@@ -1,0 +1,11 @@
+-- Datos editables del memorando, persistidos por orden (2026-10-01).
+--
+-- Hasta ahora los datos que la Direccion teclea en el editor por-orden (numero de memorando,
+-- NUT, firmante, cargo/dependencia del destinatario...) NO se guardaban: el PDF se generaba al
+-- vuelo y lo que faltaba salia como `XXXX`. Ahora se persisten para reproducir el documento, para
+-- "reemitir con los datos actuales" y para saber que REQUERIDOS faltan (orden en BORRADOR).
+--
+-- Nullable: una orden recien emitida nace sin editables (BORRADOR con todos los requeridos
+-- pendientes); las ya emitidas antes de esta migracion tambien (quedan como BORRADOR con aviso).
+-- Idempotente: IF NOT EXISTS para re-aplicar sin fallar.
+ALTER TABLE "t_orden_servicio" ADD COLUMN IF NOT EXISTS "oser_editables" JSONB;

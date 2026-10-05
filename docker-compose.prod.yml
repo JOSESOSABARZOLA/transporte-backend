@@ -1,0 +1,156 @@
+# Microservicio: transporte
+# Modulo: Cuadro de Colores
+# Archivo: docker-compose.prod.yml
+# Responsabilidad: Levantar el modulo en el servidor, con imagenes ya construidas.
+# Desarrollador: Jose Sosa
+# Fecha: 2026-08-28
+#
+# ==============================================================================
+# ESTE ARCHIVO NO CONSTRUYE NADA, Y ESA ES SU RAZON DE SER.
+#
+# Ningun servicio declara `build:`. Las imagenes llegan al servidor ya construidas, en
+# un archivo .tar, y se cargan con `docker load`. Es el modelo del modulo de Instruccion,
+# que despliega asi desde hace meses.
+#
+# POR QUE NO SE CONSTRUYE EN EL SERVIDOR: construir exige el codigo fuente completo, la
+# cadena de herramientas de Node y salida a la red para `npm ci`. En un servidor
+# institucional eso es mas superficie, mas cosas que pueden fallar el dia de la entrega,
+# y una imagen que nadie probo antes de subirla. Con el .tar se despliega EXACTAMENTE el
+# binario que se verifico en desarrollo.
+#
+#   docker save -o transporte-<ver>.tar transporte-backend:latest transporte-frontend:latest
+#   docker load  -i transporte-<ver>.tar
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# LO QUE NO SE COPIA DE INSTRUCCION, y conviene que quede escrito:
+#
+#   · Su aplicacion se conecta como `postgres`, superusuario. La nuestra usa
+#     `transporte_app`, que no puede alterar el esquema. No se retrocede en eso.
+#   · Su imagen de base de datos viaja con los datos dentro. La nuestra se puebla con
+#     `prisma migrate deploy`, que es reproducible y deja traza.
+#   · Sus contenedores de aplicacion no tienen comprobacion de salud. Los tres nuestros
+#     si, y `depends_on` las usa.
+# ==============================================================================
+
+services:
+  transportedb:
+    image: postgres:18
+    container_name: transportedb
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?defina DB_PASSWORD en el archivo .env.prod}"
+      POSTGRES_DB: transportedb
+      TZ: America/Guayaquil
+    # Identicos a los de desarrollo. No son ajuste fino: son un seguro contra una
+    # transaccion abandonada que retenga bloqueos e impida que autovacuum limpie.
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.track=all"
+      - "-c"
+      - "idle_in_transaction_session_timeout=60000"
+      - "-c"
+      - "lock_timeout=10000"
+    #
+    # ==========================================================================
+    # SIN `ports:`, Y ES EL CAMBIO MAS IMPORTANTE DE ESTE ARCHIVO.
+    #
+    # El compose de desarrollo publica "5434:5432" con el comentario «evita chocar con
+    # Instruccion en 5433». Eso es cierto en una maquina de desarrollo y FALSO en el
+    # servidor: el procedimiento de despliegue de Instruccion dice que alli movieron su
+    # base al 5434, precisamente porque el 5433 ya estaba ocupado. En 172.20.136.127 el
+    # 5434 es suyo, y `docker compose up` fallaria al enlazar el puerto.
+    #
+    # Pero el motivo de fondo no es la colision: es que la base NO TIENE POR QUE ESTAR
+    # PUBLICADA. La aplicacion la alcanza por la red interna de Docker
+    # (`transportedb:5432`), y publicar el puerto solo sirve para conectarse con psql
+    # desde fuera, que en produccion no deberia ser la via normal.
+    #
+    # Si hace falta puntualmente, se usa un contenedor efimero en la misma red:
+    #   docker exec -it transportedb psql -U postgres -d transportedb
+    # ==========================================================================
+    volumes:
+      # PostgreSQL 18+ NO admite el montaje en /var/lib/postgresql/data. Un nivel arriba.
+      # Ver docker-library/postgres#1259. Instruccion documenta esta misma trampa.
+      - transporte_pgdata:/var/lib/postgresql
+      #
+      # AQUI NO SE MONTA `./prisma/init-db`, Y EL DE DESARROLLO SI LO HACE.
+      #
+      # Un montaje desde el host obligaria a copiar esa carpeta al servidor, y el
+      # paquete de entrega son TRES ARCHIVOS: el compose, el .env.prod y el .tar. Con
+      # la carpeta ausente, Docker la crearia vacia y la extension no se crearia:
+      # fallaria en silencio, que es la peor forma de fallar.
+      #
+      # `pg_stat_statements` se crea como PASO EXPLICITO del despliegue, con el mismo
+      # criterio que las migraciones. El guion viaja DENTRO de la imagen del backend
+      # (`prisma/init-db/01-extensiones.sql`), asi que no hace falta llevarlo aparte.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d transportedb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  transporte-app:                    # NOMBRE EXACTO que espera el nginx del frontend
+    image: transporte-backend:1.1.0
+    container_name: transporte-app
+    restart: unless-stopped
+    depends_on:
+      transportedb:
+        condition: service_healthy
+    env_file:
+      - .env.prod
+    environment:                     # ganan sobre .env.prod (red interna de Docker)
+      PORT: "3003"
+      # `transporte_app` lee y escribe datos y nada mas: no puede crear ni alterar
+      # tablas. Si una inyeccion SQL prospera, ese es el limite del dano.
+      DATABASE_URL: "postgresql://transporte_app:${APP_DB_PASSWORD:?defina APP_DB_PASSWORD en el archivo .env.prod}@transportedb:5432/transportedb?schema=public&connection_limit=10&pool_timeout=20"
+      # Las migraciones si necesitan DDL, y van por aqui. Paso explicito del despliegue.
+      DIRECT_DATABASE_URL: "postgresql://postgres:${DB_PASSWORD}@transportedb:5432/transportedb?schema=public"
+      TZ: America/Guayaquil          # CRITICO: las ventanas de carga dependen de esto
+    ports:
+      - "3005:3003"
+    volumes:
+      #
+      # VOLUMEN NOMBRADO, NO `./uploads`. El de desarrollo usa el enlace al host
+      # porque alli la carpeta existe en el repositorio y la crea el usuario.
+      #
+      # En un servidor limpio esa carpeta no existe: Docker la crearia como `root`, y
+      # el contenedor corre como `nestjs` (uid 1001). El primer documento que alguien
+      # emitiera fallaria con EACCES. Un volumen nombrado lo evita porque Docker lo
+      # inicializa con el dueño que tiene la carpeta DENTRO de la imagen, que ya es
+      # `nestjs:nodejs` (ver `Dockerfile`, RUN mkdir -p /app/uploads && chown).
+      - transporte_uploads:/app/uploads
+    healthcheck:
+      test:
+        ["CMD-SHELL", "node -e \"require('node:http').get('http://127.0.0.1:3003/api/v1/estado', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  transporte-front:
+    image: transporte-frontend:1.1.0
+    container_name: transporte-front
+    restart: unless-stopped
+    depends_on:
+      transporte-app:
+        condition: service_healthy
+    environment:
+      # Las marcas de tiempo del registro de nginx: sin esto salen en UTC y no cuadran
+      # con las del backend al seguir una peticion de punta a punta.
+      TZ: America/Guayaquil
+    #
+    # NO LLEVA `env_file`, Y NO ES UN OLVIDO. Las variables VITE_ se hornean al
+    # construir la imagen: un archivo de entorno aqui seria decorativo, y peor que
+    # inutil, porque haria creer que la direccion del portal de Auth se puede cambiar
+    # sin reconstruir. No se puede. Instruccion entrega un `.env.prod` en la carpeta del
+    # frontend marcado «(referencia; se hornea en build)», y ese matiz se pierde.
+    ports:
+      - "5180:5180"
+
+volumes:
+  transporte_pgdata:
+  transporte_uploads:

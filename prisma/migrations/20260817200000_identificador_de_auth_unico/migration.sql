@@ -1,0 +1,25 @@
+-- Microservicio: transporte
+-- Modulo: Cuadro de Colores
+-- Archivo: migration.sql
+-- Responsabilidad: Impedir que dos cuentas compartan el mismo usuario de Auth central.
+-- Desarrollador: Jose Sosa
+-- Fecha: 2026-08-17
+--
+-- usua_identificador_ad es la LLAVE con la que el canje resuelve la identidad:
+-- el `username` que entrega Auth central se busca aqui, y la fila encontrada decide el
+-- rol de esa persona en el cuadro. Hasta ahora la columna no tenia restriccion de
+-- unicidad, asi que dos cuentas podian declarar el mismo usuario de Auth y el ingreso
+-- resolvia a la primera que devolviera la consulta: sin criterio, y sin aviso.
+--
+-- Detectado al construir la semilla de cuentas (etapa 3 de la integracion con Auth).
+-- La semilla ya avisa de los duplicados que haya en su insumo, pero eso no cubre lo que
+-- se escriba por otra via. Una regla que vive solo en la semilla no es una regla.
+--
+-- ADMITE VARIOS NULOS, y hace falta: PostgreSQL no considera iguales dos nulos en un
+-- indice unico, de modo que las cuentas sin enlace con Auth —las que existan antes de
+-- la migracion, o las de servicio— conviven sin estorbarse.
+--
+-- Comprobado antes de aplicar: no hay ningun identificador repetido en t_usuario.
+
+-- CreateIndex
+CREATE UNIQUE INDEX "uq_usuario_identificador_ad" ON "t_usuario"("usua_identificador_ad");

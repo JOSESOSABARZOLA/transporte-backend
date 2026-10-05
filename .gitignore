@@ -1,0 +1,94 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Build
+dist/
+build/
+
+# Environment
+.env
+# El .env del SERVIDOR. Trae las claves de produccion y se entrega por canal seguro,
+# como hace Instruccion. La plantilla versionada es .env.prod.example.
+.env.prod
+.env.local
+.env.*.local
+
+# Cualquier respaldo de un .env. El 2026-08-31 se encontro `.env.respaldo-camino-a`
+# VERSIONADO, con secretos dentro. Eran los de DESARROLLO y no los de produccion —el
+# AUTH_JWT_SECRET empieza por `dev_` y coincide con el .env local—, asi que no hubo
+# incidente. Pero un respaldo de .env dentro del repositorio es la puerta por la que el
+# siguiente entra con las claves de produccion.
+.env.respaldo*
+.env.bak
+
+# Imagenes exportadas para el despliegue. Pesan cientos de megas y se entregan por canal
+# aparte, nunca por git. Ver DESPLIEGUE.md seccion 7.
+*.tar
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Testing
+# `test/` NO se ignora: contiene las pruebas de integracion, que son codigo fuente.
+# La regla venia del proyecto plantilla, donde esa carpeta guardaba material desechable.
+coverage/
+
+# Migrations
+db_migrations/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Uploads (except templates)
+/uploads/documentos/*
+/uploads/soportes/*
+!/uploads/plantillas/
+/uploads/actos-inicio/*
+/uploads/memorandos/*
+/uploads/soportes/*
+/uploads/escritos/*
+
+
+
+
+# Claude Code (kit del proyecto): versionar skills/agents/hooks, ignorar config local
+.claude/settings.local.json
+
+# Documentación local e informes personales (no versionar en el repo del equipo).
+# EXCEPCIÓN: la documentación del módulo SÍ se versiona junto al código
+# (docs/IMPLEMENTATION_GUIDE.md y las fases de análisis). El CLAUDE.md, las skills
+# y los agentes la dan por presente en el repositorio.
+docs/*
+!docs/IMPLEMENTATION_GUIDE.md
+!docs/PENDIENTES-VALIDACION.md
+!docs/FASE1-informe-ejecutivo-analisis.md
+!docs/FASE2-documentacion-funcional.md
+!docs/FASE3-analisis-dominio.md
+!docs/FASE4-arquitectura-tecnica.md
+!docs/FASE4-diseno-base-datos.md
+!docs/FASE5-diseno-interfaz.md
+!docs/PROTOTIPO-sigoc-cuadro-colores.html
+resumen_*.md
+
+# Kit de despliegue Docker (trae backend.env con credenciales) — se pasa por fuera de git
+docker/
+docker_julio/
+docker_*/
+docker.zip
+docker_*.zip
+*.zip

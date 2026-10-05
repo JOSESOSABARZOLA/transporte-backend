@@ -1,0 +1,39 @@
+-- Microservicio: transporte · Modulo: Cuadro de Colores
+-- Migracion: la_hora_de_cierre_vive_solo_en_la_ventana
+-- Responsabilidad: Retirar HORA_CIERRE_DEPARTAMENTAL de los parametros de politica.
+-- Fuente: solicitud del negocio del 2026-08-25 - «debe existir solo un parametro».
+-- Desarrollador: Jose Sosa
+-- Fecha: 2026-08-25
+--
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- EL MISMO DATO ESTABA EN DOS SITIOS, Y SOLO UNO MANDABA.
+--
+-- La hora a la que un departamento deja de cargar estaba escrita dos veces:
+--
+--   1. En `t_ventana_carga.vcar_hora_cierre`, una fila por rol. **Esta es la que
+--      gobierna**: `VentanaCargaGuard` lee esa tabla y ninguna otra, y es la que
+--      devuelve el 423 al funcionario que llega tarde.
+--   2. En `t_parametro_politica`, clave `HORA_CIERRE_DEPARTAMENTAL`, un valor unico
+--      para toda la institucion. **No decidia nada.** Su unico consumidor era una
+--      advertencia de la pantalla de administracion que, al cambiar la ventana, pedia
+--      por favor que se cambiara tambien el parametro.
+--
+-- Quien movia la hora en la ventana veia el aviso, y podia guardar igual. A partir de
+-- ahi los dos valores discrepaban: la pantalla de parametros decia 15H00 y el sistema
+-- cerraba a las 16H00. El aviso no era el problema; era el sintoma.
+--
+-- Y UN VALOR UNICO NO PODIA EXPRESAR LO QUE PIDE RF-059: «parametrizar las ventanas de
+-- carga **por rol**». La DAF cierra a las 16H30 y los tres departamentos a las 15H00;
+-- una sola clave no puede decir las dos cosas, y menos aun si manana dos departamentos
+-- difieren entre si. La tabla si puede: es una fila por rol.
+--
+-- SE VA EL PARAMETRO, NO LA HORA. Nada deja de estar configurado: la hora de cierre de
+-- cada rol se sigue administrando en Ventanas y parametros, en el panel de ventanas,
+-- que es donde siempre se aplico.
+--
+-- `HORA_LIMITE_CUADRO` **se queda**, y no es lo mismo: dice a que hora debe estar
+-- cerrado el cuadro entero (RN-57), que es un hecho de la institucion y no de un rol.
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+DELETE FROM public.t_parametro_politica
+WHERE para_clave = 'HORA_CIERRE_DEPARTAMENTAL';

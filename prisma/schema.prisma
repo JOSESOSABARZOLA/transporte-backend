@@ -1,0 +1,1246 @@
+// Microservicio: transporte
+// Modulo: Cuadro de Colores
+// Archivo: schema.prisma
+// Responsabilidad: Definir el esquema de datos del Cuadro de Colores Operativo.
+// Desarrollador: Steven Matute
+// Fecha: 2026-08-05
+//
+// Fuente: docs/FASE4-diseno-base-datos.md seccion 10, mas la tabla t_parametro_politica
+// de docs/IMPLEMENTATION_GUIDE.md seccion 5.1. Son 27 tablas y 11 enumerados.
+// El modelo esta disenado y aprobado: no se improvisa.
+//
+// Nomenclatura: modelo en PascalCase, campos en camelCase, y siempre @map y @@map hacia
+// el snake_case con prefijo por tabla que usa la institucion.
+//
+// ATENCION: las restricciones CHECK y los indices parciales NO se expresan aqui porque
+// Prisma no los soporta. Viven en las migraciones 0002 y 0003.
+//
+// Cinco indices que el diseno declara como parciales -idx_operativo_conductor,
+// idx_operativo_vehiculo, idx_disponibilidad_func, idx_disponibilidad_cond e
+// idx_funcionario_area- se retiraron deliberadamente de este archivo. Si se declaran aqui, Prisma no reconoce su predicado,
+// los reporta como "indice eliminado" y la siguiente migracion los recrearia COMPLETOS,
+// destruyendo el predicado en silencio. Al no declararlos, Prisma los ignora y persisten.
+// Comprobar con: npm run prisma:verificar. Ver prisma/README.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // Lo usa el CLIENTE en ejecucion: el rol `transporte_app`, que solo lee y escribe
+  // datos. No puede crear ni alterar tablas, ni leer el historial de migraciones, ni
+  // crear roles. Si una inyeccion SQL prospera, ese es el limite del dano.
+  url       = env("DATABASE_URL")
+  // Lo usan las MIGRACIONES, que si necesitan DDL: el rol `postgres`. Van por aqui y no
+  // por `url` porque son un paso explicito del despliegue, ejecutado por un operador y
+  // separado del arranque de la aplicacion. Ver DESPLIEGUE.md.
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+// ─────────────────────────── Enumerados ───────────────────────────
+
+/// Roles del modulo. Los seis primeros son departamentales: poseen formularios, tienen
+/// ventana de carga y escriben en el cuadro.
+///
+/// FUNCIONARIO no es departamental y se agrego en la etapa 3 de la integracion con Auth
+/// central, para cerrar F-01. No posee ningun formulario, no tiene ventana de carga y no
+/// escribe nada: su unico acceso es `GET /ordenes-servicio/mias`, que no lleva `@Roles`
+/// porque ahi el filtro no es el rol sino la identidad. Sin este valor, P-06 «Mis ordenes»
+/// no se puede usar, porque el frontend ofrece el perfil desde M-21 y el servidor lo
+/// rechazaba con 401.
+/// Los roles del modulo. NUEVE desde el 2026-09-01: la administracion se reparte.
+///
+/// `ADMINISTRADOR` SE CONSERVA Y YA NO SE USA. PostgreSQL no admite retirar un valor de
+/// un enumerado sin recrear el tipo entero -y con el, las columnas que lo usan-, asi que
+/// se deja vacio en lugar de arriesgar una migracion destructiva. Las cuentas que lo
+/// tenian pasaron a ADMINISTRADOR_DMIP.
+enum RolDepartamental {
+  DMIP_OPERATIVOS
+  DMIP_INSPECCIONES
+  DMIT_INSTRUCTOR
+  DAF
+  DIRECTOR
+  ADMINISTRADOR
+  FUNCIONARIO
+  /// Hereda TODO lo que tenia ADMINISTRADOR. Es el unico de los tres que administra hoy.
+  ADMINISTRADOR_DMIP
+  /// Sin accesos todavia, por decision del negocio. Ver la prueba que lo fija.
+  ADMINISTRADOR_DMIT
+  /// Sin accesos todavia, por decision del negocio.
+  ADMINISTRADOR_DAF
+
+  @@map("e_rol_departamental")
+}
+
+/// Que autoridad tiene un rol sobre un formulario. Desde el 2026-08-25.
+///
+/// SON DOS COSAS DISTINTAS Y NO UNA ESCALA. `APORTA` no es «media escritura»: quien
+/// aporta pone personal en operativos que arma otro, con un tope, y no crea ninguno.
+enum AccesoFormulario {
+  /// Registra, y edita y retira **lo que el mismo creo**.
+  ESCRITURA
+  /// Solo asigna personal, dentro de su cupo y de las areas marcadas como compartidas.
+  APORTA
+
+  @@map("e_acceso_formulario")
+}
+
+enum EstadoCuadro {
+  BORRADOR
+  EN_TRANSPORTE
+  APROBADO
+  CERRADO
+
+  @@map("e_estado_cuadro")
+}
+
+/// Reemplaza los dos indicadores booleanos del diseno preliminar.
+/// Ver hallazgo HAL-01 de docs/FASE3-analisis-dominio.md.
+enum EstadoTransporte {
+  PENDIENTE
+  ASIGNADO
+  PROPIOS_MEDIOS
+
+  @@map("e_estado_transporte")
+}
+
+enum PoliticaVehiculo {
+  NO_APLICA
+  CONDICIONAL
+  REQUERIDO
+  OBLIGATORIO
+
+  @@map("e_politica_vehiculo")
+}
+
+/// Las cuatro areas del personal operativo.
+///
+/// `CCF` se retiro el 2026-08-27: ningun formulario la admitia y ninguna persona estaba
+/// en ella. NO viene de Auth: Auth entrega un tipo de inspector —`IG`, `IT`, `IS`, `IC`—
+/// que este sistema nunca convirtio en area; el area se captura a mano en P-07.
+enum AreaPersonal {
+  GENERAL
+  TECNICO
+  INSTRUCCION
+  OPERATIVOS
+
+  @@map("e_area_personal")
+}
+
+/// Denominacion del personal de Instruccion en la cobertura mensual por turnos.
+enum DenominacionInstruccion {
+  LIDER_ZONAL
+  INSTRUCTOR_METROPOLITANO
+  AUXILIAR_FLAGRANCIA
+
+  @@map("e_denominacion_instruccion")
+}
+
+/// Estado de un dia en la cobertura por turnos. Las AUSENCIAS (vacaciones, reposo...) NO
+/// estan aqui: se derivan de t_disponibilidad, que es su fuente unica de verdad.
+enum EstadoTurno {
+  DIURNO
+  NOCTURNO
+  DESCANSO
+
+  @@map("e_estado_turno")
+}
+
+enum TipoContrato {
+  NOMBRAMIENTO
+  OCASIONAL
+
+  @@map("e_tipo_contrato")
+}
+
+/// Zona de Quito donde vive el conductor. Los cuatro valores de la columna DOMICILIO de
+/// la hoja maestra de la DAF, contados sobre sus 34 conductores. No hay un quinto.
+enum SectorCiudad {
+  NORTE
+  SUR
+  CENTRO
+  VALLE
+
+  @@map("e_sector_ciudad")
+}
+
+enum EstadoDisponibilidad {
+  DISPONIBLE
+  VACACIONES
+  REPOSO_MEDICO
+  CALAMIDAD
+  PERMISO
+  MANTENIMIENTO
+
+  @@map("e_estado_disponibilidad")
+}
+
+enum TipoVentana {
+  SEMANAL
+  DIARIO
+  INTERVALO
+
+  @@map("e_tipo_ventana")
+}
+
+enum AccionAuditoria {
+  CREAR
+  ACTUALIZAR
+  ELIMINAR
+  CERRAR
+  REABRIR
+  EMITIR
+
+  @@map("e_accion_auditoria")
+}
+
+enum EstadoSolicitud {
+  SOLICITADA
+  ATENDIDA
+  RECHAZADA
+  VENCIDA
+
+  @@map("e_estado_solicitud")
+}
+
+/// Tipo del valor de un parametro de politica. Ver IMPLEMENTATION_GUIDE.md seccion 5.1.
+enum TipoParametro {
+  ENTERO
+  DECIMAL
+  TEXTO
+  BOOLEANO
+
+  @@map("e_tipo_parametro")
+}
+
+// ─────────────────── Configuracion institucional ───────────────────
+
+model Formulario {
+  id                Int              @id @default(autoincrement()) @map("form_id")
+  numero            Int              @unique(map: "uq_formulario_numero") @map("form_numero")
+  codigo            String           @unique(map: "uq_formulario_codigo") @map("form_codigo") @db.VarChar(40)
+  nombre            String           @map("form_nombre") @db.VarChar(160)
+  colorFondo        String           @map("form_color_fondo") @db.Char(7)
+  colorAcento       String           @map("form_color_acento") @db.Char(7)
+  colorNombre       String           @map("form_color_nombre") @db.VarChar(40)
+  /// Departamento RESPONSABLE del formulario. Desde el 2026-08-25 **no decide la
+  /// autorizacion**: eso lo hace `t_formulario_rol`. Se conserva porque hay dos cosas
+  /// que exigen UNO y no un conjunto: la ventana que mira la fila de evidencia de la
+  /// Matriz Consolidada, y la cabecera que nombra al responsable del formulario.
+  rolDueno          RolDepartamental @map("form_rol_dueno")
+  politicaVehiculo  PoliticaVehiculo @default(CONDICIONAL) @map("form_politica_vehiculo")
+  condicionanteNoct Boolean          @default(false) @map("form_condicionante_noct")
+  esPatrulla        Boolean          @default(false) @map("form_es_patrulla")
+  /// RN-20. Habilita la opcion ADICIONALES con captura de texto libre, y es propiedad
+  /// de CADA CATALOGO, no del formulario: la regla dice «los catalogos que lo preven».
+  ///
+  /// Hasta el 2026-08-11 habia una sola columna, form_permite_captura_libre, y la
+  /// interfaz la aplicaba a los dos desplegables. En el insumo aprobado ADICIONALES
+  /// figura UNICAMENTE en tiposControl, y solo de los formularios 2 (PMO) y 8 (INSP);
+  /// en puntosEncuentro no aparece en ninguno de los nueve. La columna unica ofrecia
+  /// captura libre de un punto que ningun catalogo preve.
+  ///
+  /// No hay columna para instituciones: ese catalogo no ofrece ADICIONALES en ningun
+  /// formulario del insumo, y la pantalla tampoco lo presenta como opcion.
+  capturaLibrePunto Boolean          @default(false) @map("form_captura_libre_punto")
+  capturaLibreTipo  Boolean          @default(false) @map("form_captura_libre_tipo")
+
+  /// Si al REGISTRAR se puede AGREGAR un punto de encuentro al catálogo, ligado a la zonal
+  /// elegida (2026-09-24, a pedido de Unidad de Operativos). Distinto de `capturaLibrePunto`
+  /// (que solo teclea texto en el operativo): esto CREA el punto y queda para todos. Verdadero
+  /// solo en el 1,2,3,4 (los de Unidad de Operativos); es un dato, se cambia por UPDATE.
+  puntoManual Boolean @default(false) @map("form_punto_manual")
+
+  /// Si la lista de personal elegible se acota ademas al area del rol que consulta.
+  ///
+  /// Falso solo en el 7 · OPERATIVO DMIT, el de eventuales: reune gente de las cuatro
+  /// areas, y con el filtro su unico departamento veria solo Instruccion. Es un dato y
+  /// no un `if` con un codigo dentro, por lo mismo que `admiteAdicionales`: cambiarlo en
+  /// otro formulario es un UPDATE, no un despliegue.
+  filtraPersonalPorRol Boolean @default(true) @map("form_filtra_personal_por_rol")
+
+  /// Si el operativo admite VARIOS tipos de control a la vez (2026-09-07). Nacio verdadero
+  /// solo en el 8 · INSPECCIONES; desde el 2026-09-14 lo es en LOS NUEVE formularios, a
+  /// peticion del negocio (migracion 20260914120000). Como `admiteAdicionales` o
+  /// `capturaLibreTipo`: es un dato, no un `if` con un codigo dentro; su valor se cambia por
+  /// UPDATE, no por despliegue —el `@default(false)` es solo el arranque de la columna—.
+  tipoControlMultiple Boolean   @default(false) @map("form_tipo_control_multiple")
+  /// Si cada persona asignada genera SUS PROPIOS operativos (uno por unidad de su cantidad),
+  /// dividiendo su horario. Verdadero en el 8 y, desde el 2026-09-14, en el 5 (patrulla UIG/UIT):
+  /// asi cada persona sale con el prefijo de SU area y dos areas distintas no chocan. Es un dato,
+  /// no un `if` con un codigo dentro: habilitarlo en otro formulario es un UPDATE, no un despliegue.
+  variosPorPersona    Boolean   @default(false) @map("form_varios_por_persona")
+  /// Si el formulario OFRECE fijar cuantos operativos genera cada persona (cantidad > 1), con la
+  /// columna «Cantidad de operativos». Solo el 8 (2026-09-14). Es distinto de `variosPorPersona`:
+  /// ese es el SPLIT —un operativo por persona, tambien en el 5—; este es el control de cantidad.
+  cantidadPorPersona  Boolean   @default(false) @map("form_cantidad_por_persona")
+  orden               Int       @map("form_orden")
+  vigenciaDesde       DateTime? @map("form_vigencia_desde") @db.Date
+  vigenciaHasta       DateTime? @map("form_vigencia_hasta") @db.Date
+  activo              Boolean   @default(true) @map("form_activo")
+  creadoEn            DateTime  @default(now()) @map("form_creado_en") @db.Timestamptz(3)
+
+  prefijos      FormularioPrefijo[]
+  areas         FormularioArea[]
+  roles         FormularioRol[]
+  puntos        PuntoEncuentro[]
+  tiposControl  TipoControl[]
+  instituciones Institucion[]
+  operativos    Operativo[]
+
+  @@index([orden], map: "idx_formulario_orden")
+  @@index([rolDueno], map: "idx_formulario_rol_dueno")
+  @@map("t_formulario")
+}
+
+/// Normaliza el arreglo de prefijos del diseno preliminar: el prefijo del identificador
+/// depende del area del personal asignado. El formulario 8 (2026-09-08) elige por area:
+/// GENERAL -> IG (adicional IGA); TECNICO -> IT (adicional ITA). El PMO usa OCPMO/OCAPMO.
+model FormularioPrefijo {
+  id               Int           @id @default(autoincrement()) @map("fpre_id")
+  formularioId     Int           @map("form_id")
+  prefijo          String        @map("fpre_prefijo") @db.VarChar(12)
+  areaAplica       AreaPersonal? @map("fpre_area_aplica")
+  esPredeterminado Boolean       @default(false) @map("fpre_es_predeterminado")
+  /// El prefijo nombra a los ADICIONALES del formulario, no a los operativos ordinarios.
+  /// El PMO usa OCPMO para lo planificado y OCAPMO para lo que se dispone por urgencia.
+  esAdicional      Boolean       @default(false) @map("fpre_es_adicional")
+
+  formulario Formulario @relation(fields: [formularioId], references: [id], onDelete: Cascade, map: "fk_formulario_prefijo_formulario")
+
+  /// Único por (formulario, área, ordinario/adicional). Incluye `esAdicional` desde el
+  /// 2026-09-08: el formulario 8 tiene DOS prefijos por área —el ordinario (IG/IT) y el
+  /// adicional (IGA/ITA)—, y con solo (formulario, área) no podían coexistir.
+  @@unique([formularioId, areaAplica, esAdicional], map: "uq_formulario_prefijo_area")
+  @@index([formularioId], map: "idx_formulario_prefijo_form")
+  @@map("t_formulario_prefijo")
+}
+
+model FormularioArea {
+  formularioId Int          @map("form_id")
+  area         AreaPersonal @map("farea_area")
+  esCompartida Boolean      @default(false) @map("farea_es_compartida")
+
+  formulario Formulario @relation(fields: [formularioId], references: [id], onDelete: Cascade, map: "fk_formulario_area_formulario")
+
+  @@id([formularioId, area])
+  @@map("t_formulario_area")
+}
+
+/// Que puede hacer cada rol en cada formulario. Desde el 2026-08-25.
+///
+/// SUSTITUYE A `form_rol_compartido` Y `form_cupo_compartido`, que solo daban para un
+/// dueño y un invitado. El negocio pidio que la patrulla ECU la registren DOS
+/// departamentos, y eso con dos columnas no cabe: lo que varia es el NUMERO de
+/// participantes, y eso se modela con filas.
+///
+/// Agregar un tercer departamento a un formulario es un `INSERT`, no un despliegue.
+model FormularioRol {
+  formularioId      Int              @map("form_id")
+  rol               RolDepartamental @map("frol_rol")
+  acceso            AccesoFormulario @map("frol_acceso")
+  /// Maximo de personas que puede asignar. Solo en `APORTA`; nulo en `ESCRITURA`, donde
+  /// no hay tope. Lo respalda `ck_formulario_rol_cupo`.
+  cupo              Int?             @map("frol_cupo") @db.SmallInt
+  /// Si este rol asigna personal a este formulario **desde la Jornada del Dia** (P-13).
+  ///
+  /// NO ES UN PERMISO, ES UN CAMINO. Quien lo tiene en `false` sigue asignando por P-01 y
+  /// P-02 si su `acceso` se lo permite; lo que no hace es actuar desde la rejilla del dia,
+  /// que para el es una consulta. Desde el 2026-09-01: P-13 se abrio a los tres
+  /// departamentos «solo en lectura», y sin esta columna la unica forma de cumplirlo era
+  /// escribir el nombre de un rol en el codigo.
+  editaDesdeJornada Boolean          @default(false) @map("frol_edita_desde_jornada")
+
+  formulario Formulario @relation(fields: [formularioId], references: [id], onDelete: Cascade, map: "fk_formulario_rol_formulario")
+
+  @@id([formularioId, rol])
+  @@index([rol], map: "idx_formulario_rol_rol")
+  @@map("t_formulario_rol")
+}
+
+model Zonal {
+  id     Int     @id @default(autoincrement()) @map("zona_id")
+  codigo String  @unique(map: "uq_zonal_codigo") @map("zona_codigo") @db.VarChar(30)
+  nombre String  @map("zona_nombre") @db.VarChar(90)
+  /// Marca el ambito distrital, que no es una zonal especifica.
+  esDmq  Boolean @default(false) @map("zona_es_dmq")
+  orden  Int     @map("zona_orden")
+  activo Boolean @default(true) @map("zona_activo")
+
+  puntos       PuntoEncuentro[]
+  operativos   OperativoZonal[]
+  funcionarios Funcionario[]
+
+  @@map("t_zonal")
+}
+
+/// Cada punto de encuentro PERTENECE A UN FORMULARIO (2026-09-29). Antes era un punto por
+/// zonal compartido entre formularios (join `t_formulario_punto`): un nombre era una sola fila
+/// y crearlo para un formulario chocaba con el de otro en la misma zonal. El negocio pidio que
+/// cada formulario tenga sus PROPIOS puntos —igual que los tipos de control—, asi que el nombre
+/// deja de ser unico por (nombre, zonal) global y pasa a serlo por (formulario, zonal, nombre).
+/// La zonal sigue siendo global.
+model PuntoEncuentro {
+  id           Int     @id @default(autoincrement()) @map("pcto_id")
+  formularioId Int     @map("form_id")
+  nombre       String  @map("pcto_nombre") @db.VarChar(200)
+  zonalId      Int     @map("zona_id")
+  activo       Boolean @default(true) @map("pcto_activo")
+
+  formulario Formulario  @relation(fields: [formularioId], references: [id], onDelete: Cascade, map: "fk_punto_formulario")
+  zonal      Zonal       @relation(fields: [zonalId], references: [id], onDelete: Restrict, map: "fk_punto_zonal")
+  operativos Operativo[]
+
+  @@unique([formularioId, zonalId, nombre], map: "uq_punto_form_zona_nombre")
+  @@index([zonalId], map: "idx_punto_zonal")
+  @@index([formularioId], map: "idx_punto_formulario")
+  @@map("t_punto_encuentro")
+}
+
+/// Cada tipo de control PERTENECE A UN FORMULARIO (2026-09-07). Antes era un catalogo
+/// global con vinculos por formulario (`t_formulario_tipo_control`): un nombre era una sola
+/// fila compartida, y renombrarlo o darlo de baja alcanzaba a todos. El negocio pidio que
+/// cada formulario tenga su PROPIA copia —renombrar en el 1 no toca al 7—, asi que el nombre
+/// deja de ser unico global y pasa a serlo por (formulario, nombre).
+model TipoControl {
+  id           Int     @id @default(autoincrement()) @map("tico_id")
+  formularioId Int     @map("form_id")
+  nombre       String  @map("tico_nombre") @db.VarChar(200)
+  activo       Boolean @default(true) @map("tico_activo")
+
+  formulario          Formulario             @relation(fields: [formularioId], references: [id], onDelete: Cascade, map: "fk_tipo_control_formulario")
+  operativos          Operativo[]
+  /// Los operativos que lo llevan cuando el formulario admite varios tipos (form 8).
+  operativosMultiples OperativoTipoControl[]
+
+  @@unique([formularioId, nombre], map: "uq_tipo_control_form_nombre")
+  @@index([formularioId], map: "idx_tipo_control_formulario")
+  @@map("t_tipo_control")
+}
+
+/// Cada institucion PERTENECE A UN FORMULARIO (2026-09-29), como los puntos y los tipos de
+/// control. Antes era un catalogo global (sigla unica) delimitado por formulario via
+/// `t_formulario_institucion`. Ahora la sigla es unica por (formulario, sigla).
+model Institucion {
+  id           Int     @id @default(autoincrement()) @map("inst_id")
+  formularioId Int     @map("form_id")
+  sigla        String  @map("inst_sigla") @db.VarChar(40)
+  nombre       String  @map("inst_nombre") @db.VarChar(200)
+  activo       Boolean @default(true) @map("inst_activo")
+
+  formulario Formulario             @relation(fields: [formularioId], references: [id], onDelete: Cascade, map: "fk_institucion_formulario")
+  operativos OperativoInstitucion[]
+
+  @@unique([formularioId, sigla], map: "uq_institucion_form_sigla")
+  @@index([formularioId], map: "idx_institucion_formulario")
+  @@map("t_institucion")
+}
+
+model VentanaCarga {
+  id            Int              @id @default(autoincrement()) @map("vcar_id")
+  rol           RolDepartamental @unique(map: "uq_ventana_rol") @map("vcar_rol")
+  tipo          TipoVentana      @map("vcar_tipo")
+  diaApertura   Int?             @map("vcar_dia_apertura") @db.SmallInt
+  horaApertura  String?          @map("vcar_hora_apertura") @db.VarChar(5)
+  diaCierre     Int?             @map("vcar_dia_cierre") @db.SmallInt
+  horaCierre    String?          @map("vcar_hora_cierre") @db.VarChar(5)
+  /// Las ventanas se evaluan SIEMPRE en esta zona horaria, no en la del servidor.
+  zonaHoraria   String           @default("America/Guayaquil") @map("vcar_zona_horaria") @db.VarChar(60)
+  mensajeCierre String           @map("vcar_mensaje_cierre") @db.VarChar(400)
+  activo        Boolean          @default(true) @map("vcar_activo")
+
+  @@map("t_ventana_carga")
+}
+
+/// Umbrales de politica institucional. Las policies LEEN estos valores; nunca una
+/// constante literal. Ver docs/IMPLEMENTATION_GUIDE.md seccion 5.
+model ParametroPolitica {
+  id            Int           @id @default(autoincrement()) @map("para_id")
+  clave         String        @unique(map: "uq_parametro_clave") @map("para_clave") @db.VarChar(60)
+  valor         String        @map("para_valor") @db.VarChar(120)
+  tipo          TipoParametro @map("para_tipo")
+  descripcion   String        @map("para_descripcion") @db.VarChar(300)
+  unidad        String?       @map("para_unidad") @db.VarChar(30)
+  minimo        String?       @map("para_minimo") @db.VarChar(120)
+  maximo        String?       @map("para_maximo") @db.VarChar(120)
+  modificadoPor Int?          @map("para_modificado_por")
+  modificadoEn  DateTime      @default(now()) @updatedAt @map("para_modificado_en") @db.Timestamptz(3)
+
+  @@map("t_parametro_politica")
+}
+
+// ───────────────────────── Talento operativo ─────────────────────────
+
+model Funcionario {
+  id                  Int                      @id @default(autoincrement()) @map("func_id")
+  cedula              String                   @unique(map: "uq_funcionario_cedula") @map("func_cedula") @db.VarChar(13)
+  apellidos           String                   @map("func_apellidos") @db.VarChar(90)
+  nombres             String                   @map("func_nombres") @db.VarChar(90)
+  /// RN-34: unico origen del telefono. No se digita en el formulario de operativo.
+  telefono            String?                  @map("func_telefono") @db.VarChar(20)
+  /// Correo INSTITUCIONAL. Opcional, igual que el telefono: el maestro se administra el
+  /// dia que la persona entra, no el dia que Sistemas le crea la cuenta. Se precarga del
+  /// directorio de Auth central (la cuenta AD) al dar de alta desde el directorio.
+  ///
+  /// SIN INDICE UNICO A PROPOSITO. La identidad de la ficha es la cedula; un unico aqui
+  /// anadiria un modo de fallo -un buzon compartido por una unidad- sin anadir garantia.
+  correoInstitucional String?                  @map("func_correo") @db.VarChar(160)
+  /// Correo PERSONAL. Opcional y sin indice unico, con la misma politica que el institucional.
+  /// Lo captura la ficha a mano (Auth no lo conoce). Anadido el 2026-10-01.
+  correoPersonal      String?                  @map("func_correo_personal") @db.VarChar(160)
+  cargo               String?                  @map("func_cargo") @db.VarChar(90)
+  /// Determina en que formularios puede participar.
+  area                AreaPersonal             @map("func_area")
+  /// RN-26 y RN-27: determina la jornada admisible.
+  tipoContrato        TipoContrato             @map("func_tipo_contrato")
+  direccion           RolDepartamental         @map("func_direccion")
+  /// Zonal de trabajo. Desde el 2026-09-21 la captura la FICHA para el personal DMIP
+  /// (OPERATIVOS/GENERAL/TECNICO), donde es OPCIONAL; para INSTRUCCION la fija la matriz de
+  /// cobertura mensual del DMIT (junto con `denominacion`). Nula si aun no se asigno o se omitio.
+  zonalId             Int?                     @map("func_zonal_id")
+  denominacion        DenominacionInstruccion? @map("func_denominacion")
+  /// Baja logica. La rotacion del personal es mensual.
+  activo              Boolean                  @default(true) @map("func_activo")
+  /// Motivo de la ultima baja (codigo: FIN_CONTRATO/RENUNCIA/TRASLADO/OTRO) y su detalle libre
+  /// (solo cuando el codigo es OTRO). Se fijan al dar de baja y se LIMPIAN al reactivar; el
+  /// historial de bajas permanece en la auditoria. Nulos mientras la ficha esta activa.
+  motivoBaja          String?                  @map("func_motivo_baja") @db.VarChar(30)
+  motivoBajaDetalle   String?                  @map("func_motivo_baja_detalle") @db.VarChar(220)
+  creadoEn            DateTime                 @default(now()) @map("func_creado_en") @db.Timestamptz(3)
+  actualizadoEn       DateTime                 @default(now()) @updatedAt @map("func_actualizado_en") @db.Timestamptz(3)
+
+  asignaciones     AsignacionPersonal[]
+  disponibilidades Disponibilidad[]
+  historial        HistorialJornada[]
+  ordenes          OrdenServicio[]
+  coberturas       CoberturaTurno[]
+  zonal            Zonal?               @relation(fields: [zonalId], references: [id], onDelete: SetNull, map: "fk_funcionario_zonal")
+  /// M-20. Cuenta de acceso de esta persona, si la tiene.
+  usuario          Usuario?
+
+  @@index([tipoContrato], map: "idx_funcionario_contrato")
+  @@map("t_funcionario")
+}
+
+/// Un dia de la cobertura mensual por turnos de una persona de Instruccion. Uno por
+/// (funcionario, fecha). Las AUSENCIAS no viven aqui: se derivan de t_disponibilidad, para
+/// que vacaciones/reposo tengan una sola fuente de verdad y no se contradigan.
+model CoberturaTurno {
+  id            Int         @id @default(autoincrement()) @map("cotu_id")
+  funcionarioId Int         @map("cotu_funcionario_id")
+  fecha         DateTime    @map("cotu_fecha") @db.Date
+  estado        EstadoTurno @map("cotu_estado")
+  registradoPor Int?        @map("cotu_registrado_por")
+  creadoEn      DateTime    @default(now()) @map("cotu_creado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime    @default(now()) @updatedAt @map("cotu_actualizado_en") @db.Timestamptz(3)
+
+  funcionario Funcionario @relation(fields: [funcionarioId], references: [id], onDelete: Cascade, map: "fk_cobertura_funcionario")
+
+  @@unique([funcionarioId, fecha], map: "uq_cobertura_funcionario_fecha")
+  @@index([fecha], map: "idx_cobertura_fecha")
+  @@map("t_cobertura_turno")
+}
+
+model Conductor {
+  id                 Int     @id @default(autoincrement()) @map("cond_id")
+  cedula             String  @unique(map: "uq_conductor_cedula") @map("cond_cedula") @db.VarChar(13)
+  nombreCompleto     String  @map("cond_nombre_completo") @db.VarChar(160)
+  telefono           String? @map("cond_telefono") @db.VarChar(20)
+  licenciaTipo       String? @map("cond_licencia_tipo") @db.VarChar(10)
+  vehiculoHabitualId Int?    @map("vehi_id")
+  activo             Boolean @default(true) @map("cond_activo")
+
+  /// Sector donde vive. Columna DOMICILIO de la hoja de la DAF.
+  sector                SectorCiudad? @map("cond_sector")
+  /// RN-DAF-04. Si puede llevarse el vehiculo a casa.
+  /// NOT NULL con defecto falso: no saberlo y no tenerlo llevan a la MISMA decision.
+  parqueaderoAutorizado Boolean       @default(false) @map("cond_parqueadero_autorizado")
+  /// RN-DAF-06. Nulable a proposito: sin contrato consta, la regla NO se aplica.
+  tipoContrato          TipoContrato? @map("cond_tipo_contrato")
+
+  vehiculoHabitual Vehiculo?        @relation(fields: [vehiculoHabitualId], references: [id], onDelete: SetNull, map: "fk_conductor_vehiculo")
+  operativos       Operativo[]
+  disponibilidades Disponibilidad[]
+
+  @@index([vehiculoHabitualId], map: "idx_conductor_vehiculo")
+  @@map("t_conductor")
+}
+
+model Vehiculo {
+  id          Int     @id @default(autoincrement()) @map("vehi_id")
+  placa       String  @unique(map: "uq_vehiculo_placa") @map("vehi_placa") @db.VarChar(10)
+  descripcion String? @map("vehi_descripcion") @db.VarChar(160)
+  activo      Boolean @default(true) @map("vehi_activo")
+
+  conductores      Conductor[]
+  operativos       Operativo[]
+  disponibilidades Disponibilidad[]
+  destinos         DestinoVehiculo[]
+
+  @@map("t_vehiculo")
+}
+
+/// RN-30 y RN-45: las ausencias excluyen a la persona, al conductor o al vehiculo.
+/// Las tres referencias son mutuamente excluyentes: exactamente una debe estar
+/// informada. Se protege con ck_disponibilidad_sujeto en la migracion 0002.
+/// RN-DAF-03. Zonales donde puede quedar un vehiculo al terminar la jornada.
+/// Nace VACIA: la evidencia se contradice -cinco en el Excel, cuatro en la reunion- y es
+/// la pregunta Q-01. La carga el ADMINISTRADOR, no una semilla.
+model UbicacionFlota {
+  id     Int     @id @default(autoincrement()) @map("ubic_id")
+  nombre String  @unique(map: "uq_ubicacion_nombre") @map("ubic_nombre") @db.VarChar(120)
+  activo Boolean @default(true) @map("ubic_activo")
+
+  destinos DestinoVehiculo[]
+
+  @@map("t_ubicacion_flota")
+}
+
+/// RN-DAF-03. Donde debe quedar el vehiculo al terminar el dia.
+///
+/// ES DEL VEHICULO Y DEL DIA, NO DEL OPERATIVO: en la hoja de la DAF la coordinacion se
+/// escribe una vez por turno, y un conductor encadena varios operativos dentro de el.
+/// `uq_destino_vehi_fecha` es lo que hace que la pregunta tenga UNA respuesta.
+model DestinoVehiculo {
+  id            Int      @id @default(autoincrement()) @map("dest_id")
+  vehiculoId    Int      @map("vehi_id")
+  fecha         DateTime @map("dest_fecha") @db.Date
+  ubicacionId   Int?     @map("ubic_id")
+  /// Se lo lleva el conductor a casa. Excluyente con `ubicacionId`, lo protege
+  /// ck_destino_sujeto, que Prisma no puede expresar.
+  domicilio     Boolean  @default(false) @map("dest_domicilio")
+  observacion   String?  @map("dest_observacion") @db.VarChar(220)
+  registradoPor Int      @map("dest_registrado_por")
+  creadoEn      DateTime @default(now()) @map("dest_creado_en") @db.Timestamptz(3)
+
+  vehiculo  Vehiculo        @relation(fields: [vehiculoId], references: [id], onDelete: Cascade, map: "fk_destino_vehiculo")
+  ubicacion UbicacionFlota? @relation(fields: [ubicacionId], references: [id], onDelete: Restrict, map: "fk_destino_ubicacion")
+
+  @@unique([vehiculoId, fecha], map: "uq_destino_vehi_fecha")
+  @@index([fecha], map: "idx_destino_fecha")
+  @@map("t_destino_vehiculo")
+}
+
+model Disponibilidad {
+  id            Int                  @id @default(autoincrement()) @map("disp_id")
+  funcionarioId Int?                 @map("func_id")
+  conductorId   Int?                 @map("cond_id")
+  vehiculoId    Int?                 @map("vehi_id")
+  estado        EstadoDisponibilidad @map("disp_estado")
+  desde         DateTime             @map("disp_desde") @db.Date
+  hasta         DateTime             @map("disp_hasta") @db.Date
+  motivo        String?              @map("disp_motivo") @db.VarChar(220)
+  /// RN-DAF-05. Solo en filas de MANTENIMIENTO de un vehiculo: lo ata
+  /// ck_disponibilidad_taller, que Prisma no puede expresar.
+  taller        String?              @map("disp_taller") @db.VarChar(120)
+  /// Hora de la cita, HH:MM. Texto por lo mismo que oper_hora_inicio: es una hora de
+  /// reloj, y convertirla a timestamp la desplazaria cinco horas en Quito.
+  hora          String?              @map("disp_hora") @db.VarChar(5)
+  registradoPor Int                  @map("disp_registrado_por")
+  creadoEn      DateTime             @default(now()) @map("disp_creado_en") @db.Timestamptz(3)
+
+  funcionario Funcionario? @relation(fields: [funcionarioId], references: [id], onDelete: Cascade, map: "fk_disponibilidad_funcionario")
+  conductor   Conductor?   @relation(fields: [conductorId], references: [id], onDelete: Cascade, map: "fk_disponibilidad_conductor")
+  vehiculo    Vehiculo?    @relation(fields: [vehiculoId], references: [id], onDelete: Cascade, map: "fk_disponibilidad_vehiculo")
+
+  @@index([vehiculoId, desde, hasta], map: "idx_disponibilidad_vehi")
+  @@map("t_disponibilidad")
+}
+
+/// Proyeccion persistida que alimenta las politicas de descanso.
+/// Se actualiza con el evento CuadroCerrado, no en cada escritura.
+model HistorialJornada {
+  id            Int      @id @default(autoincrement()) @map("hist_id")
+  funcionarioId Int      @map("func_id")
+  fecha         DateTime @map("hist_fecha") @db.Date
+  /// RN-24: bloquea patrulla al dia siguiente.
+  fuePatrulla   Boolean  @default(false) @map("hist_fue_patrulla")
+  /// RN-25: suma al tope de salidas pesadas.
+  fueNocturna   Boolean  @default(false) @map("hist_fue_nocturna")
+  /// RN-25: suma al tope de salidas pesadas.
+  fueFinSemana  Boolean  @default(false) @map("hist_fue_fin_semana")
+  /// RN-36: control de jornada maxima.
+  horasJornada  Decimal  @default(0) @map("hist_horas_jornada") @db.Decimal(4, 1)
+  operativos    Int      @default(0) @map("hist_operativos") @db.SmallInt
+  consolidadoEn DateTime @default(now()) @map("hist_consolidado_en") @db.Timestamptz(3)
+
+  funcionario Funcionario @relation(fields: [funcionarioId], references: [id], onDelete: Cascade, map: "fk_historial_funcionario")
+
+  // El indice unico ES el indice de acceso: sirve tanto "funcionarioId = X" como
+  // "... ORDER BY fecha DESC", porque un btree se recorre en los dos sentidos. Aqui
+  // habia ademas un @@index sobre las MISMAS columnas; se retiro el 2026-08-19.
+  @@unique([funcionarioId, fecha], map: "uq_historial_func_fecha")
+  @@map("t_historial_jornada")
+}
+
+// ─────────────────────── Planificacion operativa ───────────────────────
+
+model CuadroDiario {
+  id           Int          @id @default(autoincrement()) @map("cuad_id")
+  /// RN-05: un solo cuadro por fecha.
+  fecha        DateTime     @unique(map: "uq_cuadro_fecha") @map("cuad_fecha") @db.Date
+  ordenTrabajo String       @unique(map: "uq_cuadro_orden") @map("cuad_orden_trabajo") @db.VarChar(40)
+  /// RN-06: semana ISO 8601, derivada. Nunca se asigna desde el cliente.
+  nroSemana    Int          @map("cuad_nro_semana") @db.SmallInt
+  anioSemana   Int          @map("cuad_anio_semana") @db.SmallInt
+  estado       EstadoCuadro @default(BORRADOR) @map("cuad_estado")
+  cerradoPor   Int?         @map("cuad_cerrado_por")
+  cerradoEn    DateTime?    @map("cuad_cerrado_en") @db.Timestamptz(3)
+  reaperturas  Int          @default(0) @map("cuad_reaperturas") @db.SmallInt
+  creadoEn     DateTime     @default(now()) @map("cuad_creado_en") @db.Timestamptz(3)
+
+  operativos Operativo[]
+  capacidad  CapacidadFlota?
+
+  @@index([fecha(sort: Desc), estado], map: "idx_cuadro_fecha_estado")
+  @@map("t_cuadro_diario")
+}
+
+model Operativo {
+  id            Int     @id @default(autoincrement()) @map("oper_id")
+  cuadroId      Int     @map("cuad_id")
+  formularioId  Int     @map("form_id")
+  /// RN-09: codigo generado, nunca digitado.
+  identificador String  @map("oper_identificador") @db.VarChar(50)
+  /// RN-12: reinicia cada dia, por formulario. Los adicionales llevan SERIE PROPIA.
+  secuencial    Int     @map("oper_secuencial")
+  /// Operativo del que nace este adicional. Nulo en un operativo ordinario.
+  /// Un adicional se dispone por urgencia el mismo dia de la ejecucion, sobre un
+  /// operativo del formulario PMO ya registrado. Ver la migracion del 2026-08-20.
+  origenId      Int?    @map("oper_origen_id")
+  /// Enlaza los operativos creados en un MISMO registro-patrulla (Form 5/6: split por
+  /// persona con areas distintas), para agruparlos visualmente como «una sola patrulla»:
+  /// cada persona con su codigo por area, el resto fusionado. Nulo en un registro de un
+  /// solo operativo, en el adicional y en las copias de la misma persona del 8.
+  grupoRegistro String? @map("oper_grupo_registro") @db.Uuid
+
+  /// RN-07: formato HH:MM, solo :00 o :30.
+  horaInicio      String  @map("oper_hora_inicio") @db.VarChar(5)
+  horaFin         String  @map("oper_hora_fin") @db.VarChar(5)
+  /// Derivado: intersecta la franja nocturna.
+  esNocturno      Boolean @default(false) @map("oper_es_nocturno")
+  /// Derivado: la hora de fin es menor que la de inicio.
+  cruzaMedianoche Boolean @default(false) @map("oper_cruza_medianoche")
+  /// Derivado: contempla el cruce de medianoche.
+  duracionHoras   Decimal @map("oper_duracion_horas") @db.Decimal(4, 1)
+
+  puntoEncuentroId Int?    @map("pcto_id")
+  /// RN-20: punto capturado como adicional.
+  puntoLibre       String? @map("oper_punto_libre") @db.VarChar(220)
+  tipoControlId    Int?    @map("tico_id")
+  /// RN-20: tipo capturado como adicional.
+  tipoLibre        String? @map("oper_tipo_libre") @db.VarChar(220)
+
+  /// Asignacion logistica. Escritura EXCLUSIVA del rol DAF.
+  /// RN-40: conductor y vehiculo nacen nulos.
+  estadoTransporte EstadoTransporte @default(PENDIENTE) @map("oper_estado_transporte")
+  conductorId      Int?             @map("cond_id")
+  vehiculoId       Int?             @map("vehi_id")
+  asignadoEn       DateTime?        @map("oper_asignado_en") @db.Timestamptz(3)
+
+  /// Derivado: permite filtrar sin abrir el documento JSON.
+  alertaActiva Boolean @default(true) @map("oper_alerta_activa")
+  alertas      Json?   @map("oper_alertas") @db.JsonB
+  /// PV-10. La baja es LOGICA. Agregada en M-14: el plan la exige y el esquema
+  /// aprobado no traia la columna. Un operativo retirado deja de figurar en el cuadro
+  /// pero conserva su identificador, su secuencial y su traza de auditoria; borrarlo
+  /// dejaria un hueco en la numeracion del dia y una orden de servicio sin origen.
+  activo       Boolean @default(true) @map("oper_activo")
+
+  creadoPorRol     RolDepartamental @map("oper_creado_por_rol")
+  creadoPor        Int              @map("oper_creado_por")
+  modificadoPorRol RolDepartamental @map("oper_modificado_por_rol")
+  modificadoPor    Int              @map("oper_modificado_por")
+  /// Bloqueo optimista.
+  version          Int              @default(1) @map("oper_version")
+  creadoEn         DateTime         @default(now()) @map("oper_creado_en") @db.Timestamptz(3)
+  actualizadoEn    DateTime         @default(now()) @updatedAt @map("oper_actualizado_en") @db.Timestamptz(3)
+
+  cuadro         CuadroDiario    @relation(fields: [cuadroId], references: [id], onDelete: Cascade, map: "fk_operativo_cuadro")
+  formulario     Formulario      @relation(fields: [formularioId], references: [id], onDelete: Restrict, map: "fk_operativo_formulario")
+  puntoEncuentro PuntoEncuentro? @relation(fields: [puntoEncuentroId], references: [id], onDelete: Restrict, map: "fk_operativo_punto")
+  tipoControl    TipoControl?    @relation(fields: [tipoControlId], references: [id], onDelete: Restrict, map: "fk_operativo_tipo")
+  conductor      Conductor?      @relation(fields: [conductorId], references: [id], onDelete: Restrict, map: "fk_operativo_conductor")
+  vehiculo       Vehiculo?       @relation(fields: [vehiculoId], references: [id], onDelete: Restrict, map: "fk_operativo_vehiculo")
+
+  /// RESTRICT y no CASCADE: PV-10 admite borrar fisicamente un operativo sin ordenes,
+  /// y arrastrar al adicional borraria la unica evidencia de una salida extraordinaria.
+  origen      Operativo?  @relation("AdicionalDeOperativo", fields: [origenId], references: [id], onDelete: Restrict, map: "fk_operativo_origen")
+  adicionales Operativo[] @relation("AdicionalDeOperativo")
+
+  zonales       OperativoZonal[]
+  personal      AsignacionPersonal[]
+  instituciones OperativoInstitucion[]
+  /// Tipos de control cuando el formulario admite varios (form 8). En los demas el tipo va
+  /// en `tipoControlId` (uno solo) o en `tipoLibre`.
+  tiposControl  OperativoTipoControl[]
+  ordenes       OrdenServicio[]
+  solicitudes   SolicitudApoyo[]
+  auditoria     Auditoria[]
+  /// Notas del operativo (bitacora append-only, 2026-09-09). Sustituyen al antiguo campo
+  /// unico `oper_observaciones`.
+  observaciones OperativoObservacion[]
+
+  @@unique([cuadroId, identificador], map: "uq_operativo_cuad_ident")
+  // Tenia al lado un @@index sobre estas MISMAS tres columnas en el mismo orden. La
+  // restriccion unica ya crea su indice, asi que el gemelo no aceleraba ninguna
+  // consulta y encarecia cada escritura de la tabla que mas se escribe. Retirado el
+  // 2026-08-19.
+  // uq_operativo_cuad_form_sec (y su gemelo de adicionales) SE RETIRARON el 2026-09-17. Las
+  // patrullas (Form 5/6) numeran POR PREFIJO -cada area desde 001-, asi que IGNECU-001,
+  // ITNECU-001 e INECU-001 comparten (cuadro, formulario, secuencial) y colisionarian en ese
+  // unico. La unicidad del secuencial la garantiza uq_operativo_cuad_ident (cuadro,
+  // identificador): como la fecha es constante por cuadro, equivale a unicidad por
+  // cuadro+prefijo+secuencial, que es justo lo deseado. Ver migracion 20260917140000 y
+  // prisma/README.md. Nunca se declararon aqui (son/eran parciales, y Prisma no expresa
+  // predicados de indice), asi que retirarlos es solo un DROP en la migracion.
+  //
+  // idx_operativo_origen tampoco se declara, por lo mismo: tambien es parcial.
+  //
+  // Clave foranea RESTRICT: sin este indice, desactivar un tipo de control obliga a
+  // recorrer t_operativo entera para comprobar que nadie lo referencia.
+  @@index([tipoControlId], map: "idx_operativo_tipo_control")
+  @@index([cuadroId, estadoTransporte], map: "idx_operativo_transporte")
+  @@index([creadoPorRol, cuadroId], map: "idx_operativo_creador")
+  @@index([puntoEncuentroId], map: "idx_operativo_punto")
+  @@map("t_operativo")
+}
+
+model AsignacionPersonal {
+  id             Int              @id @default(autoincrement()) @map("aper_id")
+  operativoId    Int              @map("oper_id")
+  funcionarioId  Int              @map("func_id")
+  /// PER-06: distingue al rol dueno del rol compartido en el formulario 6.
+  asignadoPorRol RolDepartamental @map("aper_asignado_por_rol")
+  esResponsable  Boolean          @default(false) @map("aper_es_responsable")
+  /// Ventana horaria PROPIA de la persona dentro del operativo (2026-09-08). OPCIONAL: si
+  /// es NULL, la persona cumple el horario del operativo (`oper_hora_inicio/fin`), que es el
+  /// caso de siempre. Se pobla cuando un operativo reune varios turnos —p. ej. una persona
+  /// de 07H00 a 16H00 y otra de 09H00 a 18H00 en el mismo operativo—. Los derivados
+  /// (nocturno, duracion) se calculan de esta ventana efectiva, no se guardan.
+  horaInicio     String?          @map("aper_hora_inicio") @db.VarChar(5)
+  horaFin        String?          @map("aper_hora_fin") @db.VarChar(5)
+  creadoEn       DateTime         @default(now()) @map("aper_creado_en") @db.Timestamptz(3)
+
+  operativo   Operativo   @relation(fields: [operativoId], references: [id], onDelete: Cascade, map: "fk_asignacion_operativo")
+  funcionario Funcionario @relation(fields: [funcionarioId], references: [id], onDelete: Restrict, map: "fk_asignacion_funcionario")
+
+  /// INV-10: una persona no figura dos veces en el mismo operativo.
+  @@unique([operativoId, funcionarioId], map: "uq_asignacion_oper_func")
+  @@index([funcionarioId], map: "idx_asignacion_funcionario")
+  @@index([operativoId], map: "idx_asignacion_operativo")
+  @@map("t_asignacion_personal")
+}
+
+model OperativoZonal {
+  operativoId Int @map("oper_id")
+  zonalId     Int @map("zona_id")
+  /// RN-19: orden cuando la jornada se reparte entre zonales.
+  orden       Int @default(1) @map("ozon_orden") @db.SmallInt
+
+  operativo Operativo @relation(fields: [operativoId], references: [id], onDelete: Cascade, map: "fk_oper_zonal_operativo")
+  zonal     Zonal     @relation(fields: [zonalId], references: [id], onDelete: Restrict, map: "fk_oper_zonal_zonal")
+
+  @@id([operativoId, zonalId])
+  @@index([zonalId], map: "idx_operativo_zonal_zona")
+  @@map("t_operativo_zonal")
+}
+
+model OperativoInstitucion {
+  operativoId   Int @map("oper_id")
+  institucionId Int @map("inst_id")
+
+  operativo   Operativo   @relation(fields: [operativoId], references: [id], onDelete: Cascade, map: "fk_oper_inst_operativo")
+  institucion Institucion @relation(fields: [institucionId], references: [id], onDelete: Restrict, map: "fk_oper_inst_institucion")
+
+  @@id([operativoId, institucionId])
+  // institucionId es la SEGUNDA columna de la clave primaria, de modo que la regla de
+  // prefijo por la izquierda la deja sin indice util. La relacion es RESTRICT: sin esto,
+  // desactivar una institucion recorre la tabla entera.
+  @@index([institucionId], map: "idx_oper_inst_institucion")
+  @@map("t_operativo_institucion")
+}
+
+/// Varios tipos de control por operativo, donde el formulario lo admite (flag
+/// `tipoControlMultiple`, verdadero en los nueve desde el 2026-09-14). Molde de
+/// `OperativoInstitucion`. El escalar `t_operativo.tico_id` se conserva para los operativos
+/// creados antes de que su formulario fuera multiple (el join se relleno desde el en la
+/// migracion 20260914120000); la lectura prefiere este join y cae al escalar si esta vacio.
+model OperativoTipoControl {
+  operativoId Int @map("oper_id")
+  tipoId      Int @map("tico_id")
+
+  operativo Operativo   @relation(fields: [operativoId], references: [id], onDelete: Cascade, map: "fk_oper_tico_operativo")
+  tipo      TipoControl @relation(fields: [tipoId], references: [id], onDelete: Restrict, map: "fk_oper_tico_tipo")
+
+  @@id([operativoId, tipoId])
+  @@index([tipoId], map: "idx_oper_tico_tipo")
+  @@map("t_operativo_tipo_control")
+}
+
+/// Nota (observacion) de un operativo. BITACORA APPEND-ONLY (2026-09-09): cada nota es una fila
+/// independiente, con quien la escribio y cuando. Sustituye al antiguo campo unico
+/// `oper_observaciones`. No se editan ni se borran una a una —quedan como constancia—; al
+/// registrar entran las capturadas y al editar se AGREGAN nuevas. RN-19 del cuadro: la matriz
+/// las pinta como notas separadas.
+model OperativoObservacion {
+  id           Int              @id @default(autoincrement()) @map("oobs_id")
+  operativoId  Int              @map("oper_id")
+  texto        String           @map("oobs_texto") @db.Text
+  /// Quien la escribio, para la bitacora. Mismo patron que `oper_creado_por(_rol)`.
+  creadoPorRol RolDepartamental @map("oobs_creado_por_rol")
+  creadoPor    Int              @map("oobs_creado_por")
+  creadoEn     DateTime         @default(now()) @map("oobs_creado_en") @db.Timestamptz(3)
+
+  operativo Operativo @relation(fields: [operativoId], references: [id], onDelete: Cascade, map: "fk_observacion_operativo")
+
+  @@index([operativoId], map: "idx_observacion_operativo")
+  @@map("t_operativo_observacion")
+}
+
+/// PENDIENTE PV-12: se registra y se notifica; el flujo de aceptacion o rechazo
+/// no esta definido por el negocio.
+model SolicitudApoyo {
+  id             Int              @id @default(autoincrement()) @map("sapo_id")
+  operativoId    Int              @map("oper_id")
+  rolSolicitante RolDepartamental @map("sapo_rol_solicitante")
+  rolRequerido   RolDepartamental @map("sapo_rol_requerido")
+  areaRequerida  AreaPersonal?    @map("sapo_area_requerida")
+  cantidad       Int              @default(1) @map("sapo_cantidad") @db.SmallInt
+  estado         EstadoSolicitud  @default(SOLICITADA) @map("sapo_estado")
+  observacion    String?          @map("sapo_observacion") @db.VarChar(400)
+  creadoEn       DateTime         @default(now()) @map("sapo_creado_en") @db.Timestamptz(3)
+
+  operativo Operativo @relation(fields: [operativoId], references: [id], onDelete: Cascade, map: "fk_solicitud_operativo")
+
+  @@index([rolRequerido, estado], map: "idx_solicitud_requerido")
+  // No habia ningun indice sobre la clave foranea, asi que "las solicitudes de este
+  // operativo" era recorrido completo, y el borrado en cascada tambien.
+  @@index([operativoId], map: "idx_solicitud_operativo")
+  @@map("t_solicitud_apoyo")
+}
+
+// ─────────────────────────── Logistica ───────────────────────────
+
+/// RN-46: el sistema advierte cuando la demanda supera la capacidad, sin bloquear.
+model CapacidadFlota {
+  id                 Int      @id @default(autoincrement()) @map("capa_id")
+  cuadroId           Int      @unique(map: "uq_capacidad_cuadro") @map("cuad_id")
+  fecha              DateTime @unique(map: "uq_capacidad_fecha") @map("capa_fecha") @db.Date
+  vehiculosHabiles   Int      @map("capa_vehiculos_habiles") @db.SmallInt
+  conductoresHabiles Int      @map("capa_conductores_habiles") @db.SmallInt
+  observacion        String?  @map("capa_observacion") @db.VarChar(300)
+  declaradoPor       Int      @map("capa_declarado_por")
+  declaradoEn        DateTime @default(now()) @map("capa_declarado_en") @db.Timestamptz(3)
+
+  cuadro CuadroDiario @relation(fields: [cuadroId], references: [id], onDelete: Cascade, map: "fk_capacidad_cuadro")
+
+  @@map("t_capacidad_flota")
+}
+
+// ─────────────────── Entregables y trazabilidad ───────────────────
+
+model OrdenServicio {
+  id               Int      @id @default(autoincrement()) @map("oser_id")
+  operativoId      Int      @map("oper_id")
+  funcionarioId    Int      @map("func_id")
+  codigo           String   @unique(map: "uq_orden_codigo") @map("oser_codigo") @db.VarChar(50)
+  /// INV-24: contenido congelado en la emision. SOLO horario, funcionario, conductor
+  /// y placa. El objeto se construye cerrado: la fuga es estructuralmente imposible.
+  datoAislado      Json     @map("oser_dato_aislado") @db.JsonB
+  emitidaPor       Int      @map("oser_emitida_por")
+  emitidaEn        DateTime @default(now()) @map("oser_emitida_en") @db.Timestamptz(3)
+  /// INV-25: una orden emitida es inmutable. La correccion genera una reemision.
+  vigente          Boolean  @default(true) @map("oser_vigente")
+  /// Datos del memorando que la Direccion completa despues de emitir (numero de memorando,
+  /// NUT, cargo/dependencia del destinatario...). NULL = recien emitida, sin completar (BORRADOR).
+  /// Se persisten para reproducir el documento y para saber que falta (D13, 2026-10-01).
+  editables        Json?    @map("oser_editables") @db.JsonB
+  /// Numero AMC-OS-<8>-<anio>: secuencial por anio, asignado cuando la orden queda VIGENTE
+  /// (sin faltantes). Los borradores no consumen numero (G, 2026-10-02). La reemision lo conserva.
+  numeroSecuencial Int?     @map("oser_numero_secuencial")
+  numeroAnio       Int?     @map("oser_numero_anio")
+  /// Copia del firmante (Director en sesion) al emitir/reemitir: nombre/cargo/dependencia/usuario/fecha.
+  /// Congelada: la orden conserva su firmante aunque despues entre otro Director (F, 2026-10-02).
+  firmante         Json?    @map("oser_firmante") @db.JsonB
+  rutaPdf          String?  @map("oser_ruta_pdf") @db.VarChar(300)
+  /// PLANTILLA POR DIRECTOR (2026-10-05): quién la generó y con qué plantilla y versión. Se resuelve
+  /// SIEMPRE con esa versión (historial inmutable), no con la del usuario que la abre.
+  directorId       Int?     @map("oser_director_id")
+  plantillaId      Int?     @map("oser_plantilla_id")
+  plantillaVersion Int?     @map("oser_plantilla_version")
+
+  operativo   Operativo       @relation(fields: [operativoId], references: [id], onDelete: Restrict, map: "fk_orden_operativo")
+  funcionario Funcionario     @relation(fields: [funcionarioId], references: [id], onDelete: Restrict, map: "fk_orden_funcionario")
+  director    Usuario?        @relation("OrdenDirector", fields: [directorId], references: [id], onDelete: Restrict, map: "fk_orden_director")
+  plantilla   PlantillaOrden? @relation(fields: [plantillaId], references: [id], onDelete: Restrict, map: "fk_orden_plantilla")
+
+  // El número AMC-OS es único entre las VIGENTES: índice único PARCIAL uq_orden_numero_vigente en la
+  // migración 20261005180000 (la reemisión conserva el número y la reemplazada lo guarda como histórico).
+  @@index([directorId], map: "idx_orden_director")
+  @@index([plantillaId], map: "idx_orden_plantilla")
+  @@index([funcionarioId, emitidaEn(sort: Desc)], map: "idx_orden_funcionario")
+  @@index([operativoId], map: "idx_orden_operativo")
+  @@map("t_orden_servicio")
+}
+
+/// CONTADOR ANUAL del numero de orden (AMC-OS-<8>-<anio>). Una fila por anio con el ultimo
+/// secuencial usado. Se incrementa de forma ATOMICA dentro de la transaccion de emision/completado
+/// (INSERT ... ON CONFLICT DO UPDATE ... RETURNING), de modo que dos emisiones simultaneas no
+/// colisionan. Sembrado con (2026, 5571) por migracion para continuar la numeracion actual.
+model SecuenciaOrden {
+  anio             Int @id @map("seor_anio")
+  ultimoSecuencial Int @map("seor_ultimo_secuencial")
+
+  @@map("t_secuencia_orden")
+}
+
+/// CONFIG DEL MEMORANDO POR CUADRO (una fila por fecha de jornada, 2026-10-02). El numero de
+/// memorando, el NUT y quien elabora son del DIA, no de cada orden: todas las ordenes de esa
+/// jornada comparten estos tres datos. Se configuran una vez y, al guardarlos, los borradores de
+/// la jornada que ya no tengan faltantes pasan a VIGENTE (con su numero AMC-OS). Los tres son
+/// NULL mientras no se configuren: un valor vacio equivale a sin configurar (faltante si la
+/// plantilla lo usa, D15). La fecha es la clave, igual que `t_cuadro_diario.cuad_fecha`.
+model OrdenConfigCuadro {
+  fecha           DateTime @id @map("ocuc_fecha") @db.Date
+  numeroMemorando String?  @map("ocuc_numero_memorando") @db.VarChar(120)
+  nut             String?  @map("ocuc_nut") @db.VarChar(120)
+  elaboradoPor    String?  @map("ocuc_elaborado_por") @db.VarChar(200)
+  creadoEn        DateTime @default(now()) @map("ocuc_creado_en") @db.Timestamptz(3)
+  actualizadoEn   DateTime @default(now()) @updatedAt @map("ocuc_actualizado_en") @db.Timestamptz(3)
+
+  @@map("t_orden_config_cuadro")
+}
+
+/// La traza sobrevive al registro auditado: es la unica relacion con SET NULL.
+/// Si al eliminar un operativo se borrara su traza, desapareceria justamente la
+/// evidencia de que existio y de quien lo elimino.
+model Auditoria {
+  id            BigInt           @id @default(autoincrement()) @map("audi_id")
+  operativoId   Int?             @map("oper_id")
+  entidad       String           @map("audi_entidad") @db.VarChar(60)
+  entidadId     Int              @map("audi_entidad_id")
+  accion        AccionAuditoria  @map("audi_accion")
+  campo         String?          @map("audi_campo") @db.VarChar(60)
+  valorAnterior String?          @map("audi_valor_anterior") @db.Text
+  valorNuevo    String?          @map("audi_valor_nuevo") @db.Text
+  usuario       Int              @map("audi_usuario")
+  rol           RolDepartamental @map("audi_rol")
+  correlacion   String?          @map("audi_correlacion") @db.VarChar(60)
+  momento       DateTime         @default(now()) @map("audi_momento") @db.Timestamptz(3)
+
+  operativo Operativo? @relation(fields: [operativoId], references: [id], onDelete: SetNull, map: "fk_auditoria_operativo")
+
+  @@index([operativoId, momento(sort: Desc)], map: "idx_auditoria_operativo")
+  @@index([entidad, entidadId], map: "idx_auditoria_entidad")
+  @@index([momento(sort: Desc)], map: "idx_auditoria_momento")
+  @@map("t_auditoria")
+}
+
+/// Provisional en su alcance: mantiene la identidad mientras el microservicio de
+/// Active Directory no este disponible. La columna de correspondencia ya existe
+/// para que la integracion no requiera migracion.
+/// Correspondencia entre los roles de Auth central y los de este modulo.
+///
+/// POR QUE EXISTE. Auth nombra sus roles "Transporte - Operativos"; este modulo los
+/// llama DMIP_OPERATIVOS. Hasta hoy la equivalencia vivia como comentario en un JSON de
+/// semilla, y quien daba de alta a alguien la copiaba a ojo: equivocarse hacia DIRECTOR
+/// significa ver la matriz consolidada entera. Ahora es dato, y se puede comprobar.
+///
+/// LA LLAVE ES EL NUMERO, NO EL NOMBRE. Un nombre para mostrar se edita desde una
+/// pantalla de administracion de Auth; el dia que alguien escriba "Transporte -
+/// Direccion" el modulo dejaria de reconocer al Director sin que nada lo avise.
+/// `idAuth` es estable.
+///
+/// LO QUE ESTA TABLA NO PUEDE HACER. Registrar un rol de Auth que corresponda a un rol
+/// que YA existe aqui es un alta y no necesita migracion. Pero un actor genuinamente
+/// nuevo -un "Auditor" que solo lee- SI la necesita: hay que definir que formularios
+/// posee, si tiene ventana de carga y que le permiten las cuatro guardas. Si bastara una
+/// fila, se crearian roles cuyo comportamiento no esta definido en ninguna parte.
+/// Rol que tiene un usuario. Tabla de union: una fila por rol y persona.
+///
+/// SIN IDENTIFICADOR PROPIO. La clave primaria es el par, que es lo que la hace unica por
+/// construccion: no puede asignarse dos veces el mismo rol a la misma persona.
+model UsuarioRol {
+  usuarioId Int              @map("usua_id")
+  rol       RolDepartamental @map("usro_rol")
+  /// Cuando se le concedio. Sirve para auditar quien tuvo que rol y desde cuando.
+  creadoEn  DateTime         @default(now()) @map("usro_creado_en") @db.Timestamptz(3)
+
+  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade, map: "fk_usuario_rol_usuario")
+
+  @@id([usuarioId, rol])
+  @@index([rol], map: "idx_usuario_rol_rol")
+  @@map("t_usuario_rol")
+}
+
+model RolAuth {
+  /// Identificador del rol en Auth central. Es la llave y no se genera aqui.
+  idAuth        Int              @id @map("rola_id_auth")
+  /// Nombre tal como lo muestra Auth. Solo para mostrar y auditar: NO se decide con el.
+  nombreAuth    String           @map("rola_nombre_auth") @db.VarChar(120)
+  /// Rol de este modulo al que corresponde.
+  rol           RolDepartamental @map("rola_rol")
+  /// Subsistema de Auth. SIGOC es el 11.
+  subsistema    Int              @default(11) @map("rola_subsistema")
+  activo        Boolean          @default(true) @map("rola_activo")
+  creadoEn      DateTime         @default(now()) @map("rola_creado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime         @updatedAt @map("rola_actualizado_en") @db.Timestamptz(3)
+
+  @@index([rol], map: "idx_rol_auth_rol")
+  @@map("t_rol_auth")
+}
+
+/// Que direcciones administra cada rol. 2026-09-01.
+///
+/// NO ES LO MISMO QUE `t_usuario_rol` NI QUE `t_rol_auth`. Aquella dice quien tiene que
+/// rol; esta, sobre que gente actua ese rol. Un `DMIP_INSPECCIONES` ve lo suyo porque **es**
+/// esa direccion; un `ADMINISTRADOR_DMIT` no es ninguna, **administra** una.
+///
+/// Es dato y no un mapa en el codigo porque cambia sin que cambie el sistema: una
+/// reorganizacion de la DMIP, o un administrador que cubre a otro mientras esta de
+/// vacaciones, son filas.
+model RolDireccion {
+  id        Int              @id @default(autoincrement()) @map("rodi_id")
+  /// El rol que administra.
+  rol       RolDepartamental @map("rodi_rol")
+  /// La direccion administrada, tal como aparece en `func_direccion`.
+  direccion RolDepartamental @map("rodi_direccion")
+  activo    Boolean          @default(true) @map("rodi_activo")
+  creadoEn  DateTime         @default(now()) @map("rodi_creado_en") @db.Timestamptz(3)
+
+  @@unique([rol, direccion], map: "uq_rol_direccion")
+  @@index([rol], map: "idx_rol_direccion_rol")
+  @@map("t_rol_direccion")
+}
+
+/// Catalogo de roles del modulo: nombre del organigrama, orden y si se ofrece en Cuentas.
+///
+/// La IDENTIDAD del rol sigue siendo el enum `RolDepartamental` (tipo de PostgreSQL); esta
+/// tabla solo pone el nombre y las banderas, para que dejen de vivir en `catalogo-roles.ts`.
+/// `codigo` refleja cada valor del enum. RBAC 2026-09-16.
+model Rol {
+  codigo    RolDepartamental @id @map("rol_codigo")
+  nombre    String           @map("rol_nombre") @db.VarChar(120)
+  orden     Int              @map("rol_orden") @db.SmallInt
+  /// Si se puede otorgar a una cuenta nueva. Todos se pueden nombrar.
+  asignable Boolean          @default(true) @map("rol_asignable")
+
+  permisos RolPermiso[]
+
+  @@map("t_rol")
+}
+
+/// Catalogo de permisos atomicos (`modulo:accion`, p. ej. `transporte:asignar`). RBAC.
+///
+/// Es la lista de acciones que un endpoint puede exigir con `@RequierePermiso`. La decision
+/// de acceso deja de estar en los `@Roles` del codigo y pasa a la matriz `t_rol_permiso`.
+model Permiso {
+  codigo      String  @id @map("perm_codigo") @db.VarChar(60)
+  modulo      String  @map("perm_modulo") @db.VarChar(40)
+  descripcion String  @map("perm_descripcion") @db.VarChar(200)
+  activo      Boolean @default(true) @map("perm_activo")
+
+  roles RolPermiso[]
+
+  @@index([modulo], map: "idx_permiso_modulo")
+  @@map("t_permiso")
+}
+
+/// Matriz rol <-> permiso (M:N). Editable en caliente por la administracion: dar o quitar un
+/// acceso a un rol es una fila, no un despliegue. La semilla reproduce 1:1 los `@Roles` de hoy.
+model RolPermiso {
+  rol           RolDepartamental @map("rper_rol")
+  permisoCodigo String           @map("rper_permiso") @db.VarChar(60)
+
+  rolRef  Rol     @relation(fields: [rol], references: [codigo], onDelete: Cascade, map: "fk_rol_permiso_rol")
+  permiso Permiso @relation(fields: [permisoCodigo], references: [codigo], onDelete: Cascade, map: "fk_rol_permiso_permiso")
+
+  @@id([rol, permisoCodigo])
+  @@index([rol], map: "idx_rol_permiso_rol")
+  @@index([permisoCodigo], map: "idx_rol_permiso_permiso")
+  @@map("t_rol_permiso")
+}
+
+model Usuario {
+  id              Int          @id @default(autoincrement()) @map("usua_id")
+  correo          String       @unique(map: "uq_usuario_correo") @map("usua_correo") @db.VarChar(160)
+  nombre          String       @map("usua_nombre") @db.VarChar(160)
+  /// Roles del Cuadro de Colores que tiene esta persona.
+  ///
+  /// ERA UNA COLUMNA HASTA EL 2026-08-19. Auth central admite asignar VARIOS roles de
+  /// Transporte a la misma persona, y el modulo solo podia representar uno: quien tuviera
+  /// dos entraba con el que alguien hubiera escrito aqui, no con los suyos.
+  ///
+  /// SEMANTICA ACORDADA CON EL NEGOCIO: varios A LA VEZ, no uno por sesion. Quien tenga
+  /// DAF y DMIP Operativos ve la UNION de los formularios de ambos. No es lo que modela el
+  /// portal -que hace elegir uno- pero es lo unico construible mientras el canje no
+  /// transmita cual se eligio, que es el desajuste D-5 pendiente de Auth central.
+  roles           UsuarioRol[]
+  /// Usuario con el que Auth central acredita a esta persona. Es la LLAVE del canje:
+  /// `username` de Auth -> esta columna -> la fila decide el rol. Unica desde la etapa 3
+  /// de la integracion: dos cuentas con el mismo identificador harian que el ingreso
+  /// resolviera a una cualquiera. Admite varios nulos, que son las cuentas sin enlace.
+  identificadorAd String?      @unique(map: "uq_usuario_identificador_ad") @map("usua_identificador_ad") @db.VarChar(120)
+  /// Enlace con la ficha de personal. Agregado en M-20: sin el, un usuario no puede
+  /// consultar SUS ordenes de servicio, porque nada dice a que funcionario corresponde.
+  /// Nulo para los perfiles que no salen a operativos: Direccion y administracion.
+  funcionarioId   Int?         @unique(map: "uq_usuario_funcionario") @map("func_id")
+  activo          Boolean      @default(true) @map("usua_activo")
+  creadoEn        DateTime     @default(now()) @map("usua_creado_en") @db.Timestamptz(3)
+
+  funcionario      Funcionario?     @relation(fields: [funcionarioId], references: [id], onDelete: SetNull, map: "fk_usuario_funcionario")
+  plantillasOrden  PlantillaOrden[] @relation("PlantillaDirector")
+  ordenesDirigidas OrdenServicio[]  @relation("OrdenDirector")
+
+  // El indice sobre (rol, activo) se retiro con la columna: el rol vive ahora en
+  // t_usuario_rol, que tiene el suyo propio.
+  @@index([activo], map: "idx_usuario_activo")
+  @@map("t_usuario")
+}
+
+/// La plantilla editable de la orden de servicio. Una sola, global (clave unica), compartida
+/// por todas las ordenes. `apartados` es la lista ordenada de secciones del documento
+/// ([{ id, titulo, tipo, contenido }]); se guarda como JSONB porque la Direccion puede
+/// anadir, quitar y reordenar apartados libremente, sin cambiar el esquema.
+model PlantillaOrden {
+  id             Int      @id @default(autoincrement()) @map("plor_id")
+  clave          String   @unique(map: "uq_plantilla_clave") @map("plor_clave") @db.VarChar(40)
+  apartados      Json     @map("plor_apartados") @db.JsonB
+  // Datos generales del Director (2026-10-02): dirección responsable, número y fecha del memorando
+  // de designación, y funcionario designado. Alimentan los tokens del cuerpo (origen «plantilla»).
+  datosGenerales Json?    @map("plor_datos_generales") @db.JsonB
+  actualizadoEn  DateTime @updatedAt @map("plor_actualizado_en") @db.Timestamptz(3)
+  actualizadoPor Int?     @map("plor_actualizado_por")
+
+  /// PLANTILLA POR DIRECTOR (2026-10-05): dueño (NULL = base institucional), versión vigente y marca
+  /// de base. Una por Director (índice único parcial uq_plantilla_director) y una sola base
+  /// (uq_plantilla_base): ambos viven en la migración 20261005180000.
+  directorId Int?    @map("plor_director_id")
+  version    Int     @default(1) @map("plor_version")
+  esBase     Boolean @default(false) @map("plor_es_base")
+
+  director  Usuario?                @relation("PlantillaDirector", fields: [directorId], references: [id], onDelete: Restrict, map: "fk_plantilla_director")
+  versiones PlantillaOrdenVersion[]
+  ordenes   OrdenServicio[]
+
+  @@map("t_plantilla_orden")
+}
+
+/// Historial INMUTABLE de las versiones de cada plantilla (2026-10-05): una orden se resuelve con la
+/// versión con la que se generó (oser_plantilla_id + oser_plantilla_version), no con la actual.
+model PlantillaOrdenVersion {
+  id             Int      @id @default(autoincrement()) @map("plov_id")
+  plantillaId    Int      @map("plor_id")
+  version        Int      @map("plov_version")
+  apartados      Json     @map("plov_apartados") @db.JsonB
+  datosGenerales Json?    @map("plov_datos_generales") @db.JsonB
+  creadoPor      Int?     @map("plov_creado_por")
+  creadoEn       DateTime @default(now()) @map("plov_creado_en") @db.Timestamptz(3)
+
+  plantilla PlantillaOrden @relation(fields: [plantillaId], references: [id], onDelete: Restrict, map: "fk_plantilla_version_plantilla")
+
+  @@unique([plantillaId, version], map: "uq_plantilla_version")
+  @@map("t_plantilla_orden_version")
+}

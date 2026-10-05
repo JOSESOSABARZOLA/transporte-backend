@@ -1,0 +1,13 @@
+-- Correo personal del funcionario (2026-10-01).
+--
+-- La ficha pasa a distinguir dos correos: el INSTITUCIONAL -la columna existente `func_correo`,
+-- que se precarga del directorio de Auth central- y un nuevo correo PERSONAL que se captura a
+-- mano (Auth no lo conoce). La columna `func_correo` NO se renombra: sigue siendo el correo
+-- institucional; en el codigo la propiedad pasa a llamarse `correoInstitucional` (solo cambia el
+-- `@map`, no la columna fisica), de modo que esta migracion es PURAMENTE ADITIVA.
+--
+-- Nullable y SIN indice unico, con la misma politica que `func_correo` (RN: la identidad de la
+-- ficha es la cedula; un buzon compartido por una unidad no debe bloquear el alta).
+--
+-- Idempotente (IF NOT EXISTS): re-aplicarla sobre una base que ya la tiene no falla.
+ALTER TABLE "t_funcionario" ADD COLUMN IF NOT EXISTS "func_correo_personal" VARCHAR(160);

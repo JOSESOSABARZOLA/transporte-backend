@@ -1,0 +1,14 @@
+-- VARIOS OPERATIVOS POR PERSONA EN EL FORMULARIO 5 · PATRULLA REACCIÓN DIURNA (UIG - UIT).
+-- 2026-09-14, a petición del negocio.
+--
+-- El formulario 5 tiene PREFIJOS POR ÁREA (IGECU para el área General, ITECU para el área
+-- Técnico). Un operativo lleva UN código y el código nombra UN área, así que un operativo con
+-- personal de las dos áreas no puede recibir un solo prefijo y el generador lo rechazaba:
+-- «...mezcla personal de áreas distintas; registre un operativo por área.» (elegirPorArea).
+--
+-- La solución pedida: que cada persona genere su propio operativo, como ya hace el 8. Al activar
+-- `form_varios_por_persona`, cada persona asignada produce un operativo de UNA sola persona con
+-- el prefijo de SU área (IGECU o ITECU), de modo que dos inspectores de áreas distintas salen
+-- como dos operativos con su propio código y ya no hay mezcla. Es la MISMA maquinaria del 8
+-- (`componerOperativosDelRegistro`), gobernada por este flag: no hay cambios de código.
+UPDATE "t_formulario" SET "form_varios_por_persona" = true WHERE "form_numero" = 5;

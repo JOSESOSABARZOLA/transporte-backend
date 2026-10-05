@@ -1,0 +1,200 @@
+# Microservicio: transporte
+# Modulo: Cuadro de Colores
+# Archivo: docker-compose.yml
+# Responsabilidad: Orquestar base de datos, backend y frontend del Modulo Transportes.
+#   Los puertos evitan colision con el modulo de Instruccion (5433, 3002, 5175).
+#   El bloque `environment:` SOBREESCRIBE lo que venga de `env_file: .env`, por eso
+#   la conexion apunta a la red interna de Docker (transportedb:5432).
+#
+# Las migraciones NO se aplican al arrancar: son un paso explicito del despliegue
+# con `npx prisma migrate deploy`. Ver docs/IMPLEMENTATION_GUIDE.md seccion 14.4.
+
+services:
+  transportedb:
+    image: postgres:18
+    container_name: transportedb
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?defina DB_PASSWORD en el archivo .env}"
+      POSTGRES_DB: transportedb
+      TZ: America/Guayaquil
+    # pg_stat_statements se precarga al arrancar el proceso: shared_preload_libraries NO
+    # se puede activar en caliente. La extension en si la crea el script de init-db.
+    # Se mide desde el primer dia porque esta vista acumula desde el arranque: habilitarla
+    # cuando alguien ya se queja de lentitud deja sin nada con que comparar.
+    #
+    # LOS DOS TIEMPOS MAXIMOS NO SON AJUSTE FINO, SON UN SEGURO. Sin ellos, una
+    # transaccion que quede abierta -un contenedor que se reinicia a mitad, un corte de
+    # red- retiene sus bloqueos y, sobre todo, IMPIDE QUE AUTOVACUUM LIMPIE, sin limite de
+    # tiempo. Es una causa clasica de caida en produccion y no avisa: la base se degrada
+    # despacio hasta que algo se bloquea.
+    #
+    # NO se fija statement_timeout aqui a proposito: global romperia las migraciones si
+    # alguna tarda mas de la cuenta. Va por rol de aplicacion, con
+    # ALTER ROLE ... SET statement_timeout, cuando ese rol exista.
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.track=all"
+      - "-c"
+      - "idle_in_transaction_session_timeout=60000"
+      - "-c"
+      - "lock_timeout=10000"
+    ports:
+      # SOLO 127.0.0.1, NO 0.0.0.0 (H-02). El bind anterior "5434:5432" publicaba PostgreSQL
+      # en TODAS las interfaces del host: con DB_PASSWORD debil, la base quedaba expuesta a
+      # la red. Atado a localhost, el dev local sigue igual -backend en host por
+      # localhost:5434 y `docker exec ... psql`- y nadie la alcanza desde fuera de la maquina.
+      # En PRODUCCION este puerto no se publica: la app usa la red interna (transportedb:5432)
+      # y las migraciones entran por `docker exec`. Ver DESPLIEGUE.md.
+      - "127.0.0.1:5434:5432"        # externo 5434 (evita chocar con Instruccion en 5433)
+    volumes:
+      # PostgreSQL 18+ NO admite el montaje en /var/lib/postgresql/data: la imagen
+      # guarda los datos en un subdirectorio con la version mayor y el contenedor
+      # entra en bucle de reinicio si se monta la ruta antigua. El montaje va un
+      # nivel arriba. Ver docker-library/postgres#1259.
+      - transporte_pgdata:/var/lib/postgresql
+      # Solo se ejecuta con el volumen vacio. Sobre un despliegue existente, la extension
+      # se crea a mano; el manual de despliegue lo indica.
+      #
+      # VIVE EN prisma/ Y NO EN docker/ A PROPOSITO: `.gitignore` ignora docker/ entero
+      # -es el kit de despliegue, que trae credenciales- y el script se habria quedado
+      # fuera del control de versiones. Un clon limpio habria desplegado sin la extension
+      # y nadie lo habria notado hasta buscar por que no hay estadisticas de consultas.
+      - ./prisma/init-db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d transportedb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  transporte-app:                    # NOMBRE EXACTO que espera el nginx del frontend
+    image: transporte-backend:latest
+    # Sin `build:`, `docker compose up --build` levantaba la imagen ANTERIOR sin avisar:
+    # el contenedor arrancaba sin el codigo recien compilado y aparentaba que el modulo
+    # no se habia integrado. Con `build:` la imagen conserva el mismo nombre y `up -d`
+    # sigue reutilizandola si ya existe; lo que cambia es que `--build` ahora funciona.
+    build: .
+    container_name: transporte-app
+    restart: unless-stopped
+    depends_on:
+      transportedb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:                     # estos ganan sobre .env (red interna de Docker)
+      PORT: "3003"
+      # connection_limit ACOTA EL POOL DE PRISMA, que sin el usa num_cpus*2+1. En la
+      # maquina de despliegue son 28 nucleos: 57 conexiones POR INSTANCIA, contra un
+      # max_connections de 100. Con dos replicas el servidor se agota y la segunda
+      # responde "too many connections". Diez sobran: PostgreSQL no rinde mas por tener
+      # mas conexiones concurrentes, y la base comparte esas mismas CPU.
+      # LA APLICACION EN EJECUCION NO ES SUPERUSUARIO. `transporte_app` lee y escribe
+      # datos y nada mas: no puede crear ni alterar tablas, ni leer el historial de
+      # migraciones, ni crear roles. Si una inyeccion SQL prospera, ese es el limite del
+      # dano. Antes se conectaba como `postgres` y el limite era el servidor entero.
+      DATABASE_URL: "postgresql://transporte_app:${APP_DB_PASSWORD:?defina APP_DB_PASSWORD en el archivo .env}@transportedb:5432/transportedb?schema=public&connection_limit=10&pool_timeout=20"
+      # Las MIGRACIONES si necesitan DDL y van por aqui: Prisma usa `directUrl` para
+      # `migrate deploy` y `url` para el cliente. Son un paso explicito del despliegue.
+      DIRECT_DATABASE_URL: "postgresql://postgres:${DB_PASSWORD}@transportedb:5432/transportedb?schema=public"
+      # ORIGENES DEL FRONTEND. SALE DE .env, Y NO SE FIJA AQUI.
+      #
+      # Estaba escrito a mano con `172.20.136.73`, que NO es el servidor de despliegue
+      # -es el .127-. Y como este bloque `environment:` gana sobre `env_file: .env`,
+      # corregirlo en el .env no habria servido de nada: el compose lo pisaba.
+      #
+      # El fallo que produce es de los que no dejan rastro: con el origen fuera de la
+      # lista y `credentials: true`, el navegador DESCARTA la respuesta sin error. La
+      # pantalla queda en blanco y no hay nada que seguir en el registro del servidor.
+      #
+      # Cambia por ambiente, como las URL de Auth, asi que vive donde ellas.
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5180}
+      TZ: America/Guayaquil          # CRITICO: las ventanas de carga dependen de esto
+      #
+      # ---- Sesion con Auth central ----
+      # Se toman de .env y NO se fijan aqui, por dos motivos distintos:
+      #
+      #   · AUTH_JWT_SECRET y SESSION_JWT_SECRET son secretos. Escribirlos en un
+      #     archivo versionado los publicaria, y AUTH_JWT_SECRET vale para TODOS los
+      #     modulos del ecosistema, no solo para este.
+      #   · Las URL y el subsistema cambian por ambiente. Fijarlos aqui obligaria a
+      #     editar el compose en cada despliegue.
+      #
+      # Sin ellas el contenedor arranca, pero NO se puede iniciar sesion: el canje
+      # responde 401 y el registro dice por que. Ver docs/PLAN_INTEGRACION_AUTH.md.
+      AUTH_EXCHANGE_URL: ${AUTH_EXCHANGE_URL}
+      # Base de la API de Auth, de la que cuelga /users. Alimenta el directorio de P-07.
+      # Vacia = sin directorio; el maestro de personal sigue administrandose igual.
+      AUTH_API_URL: ${AUTH_API_URL}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
+      AUTH_SUBSYSTEM_ID: ${AUTH_SUBSYSTEM_ID}
+      SESSION_JWT_SECRET: ${SESSION_JWT_SECRET}
+      JWT_ISSUER: ${JWT_ISSUER:-transporte-backend}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-TRANSPORTE}
+      SESSION_EXPIRES_IN: ${SESSION_EXPIRES_IN:-28800}
+      AUTH_COOKIE_NAME: ${AUTH_COOKIE_NAME:-cuadro_colores_sesion}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      AUTH_COOKIE_SAME_SITE: ${AUTH_COOKIE_SAME_SITE:-lax}
+      #
+      # Estaba forzado a "false", y eso dejaba al contenedor respondiendo 401 a TODA
+      # peticion: la cabecera x-usuario-prueba se ignora con el modo desactivado, y el
+      # microservicio de identidad real todavia no existe. El frontend apunta a este
+      # contenedor (puerto 3003), de modo que ninguna pantalla podia consumir la API.
+      # Detectado al integrar M-21.
+      #
+      # Las otras variables de este bloque si se fijan a proposito: describen la red
+      # interna de Docker, no una decision del desarrollador. Esta si lo es, y por eso
+      # vuelve a .env: en desarrollo vale true, y .env.example -la plantilla de
+      # despliegue- la deja en false, que es lo correcto en produccion.
+    ports:
+      - "3003:3003"
+    volumes:
+      - ./uploads:/app/uploads       # persistencia de documentos emitidos
+    # El punto de comprobacion es el mismo que consulta el frontend. Sin el, el
+    # contenedor figuraba como "Up" desde el primer instante aunque Nest todavia no
+    # estuviera escuchando, y `depends_on` no podia esperar a que lo estuviera.
+    healthcheck:
+      test:
+        ["CMD-SHELL", "node -e \"require('node:http').get('http://127.0.0.1:3003/api/v1/estado', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  transporte-front:
+    image: transporte-frontend:latest
+    # Le faltaba `build:`, y era el MISMO fallo que se corrigio en transporte-app: sin el,
+    # `docker compose up --build` reconstruia el backend y dejaba el frontend en la imagen
+    # anterior, sin avisar. Una pantalla recien construida no aparecia y no habia nada en
+    # el registro que lo explicara. Detectado al cerrar M-30.
+    build:
+      context: ../transporte-frontend
+      # LAS VARIABLES VITE_ SE HORNEAN AL CONSTRUIR, no se leen al arrancar. Si alguien
+      # las cambia en el .env del servidor, la imagen ya construida no se entera: hay que
+      # reconstruir. Se pasan aqui para que la direccion del portal de Auth deje de estar
+      # escrita en el fuente y sea un dato del despliegue.
+      #
+      # VACIAS POR OMISION, y src/config/env.ts resuelve su respaldo. Ese respaldo hoy
+      # acierta porque produccion y Auth central viven en la misma maquina; el dia que
+      # Auth se mueva, esto es lo que evita tener que tocar codigo fuente.
+      args:
+        VITE_AUTH_PORTAL_URL: "${VITE_AUTH_PORTAL_URL:-}"
+        VITE_AUTH_LOGOUT_URL: "${VITE_AUTH_LOGOUT_URL:-}"
+        VITE_AUTH_MODULE_CODE: "${VITE_AUTH_MODULE_CODE:-}"
+    container_name: transporte-front
+    restart: unless-stopped
+    depends_on:
+      transporte-app:
+        condition: service_healthy
+    environment:
+      # Las marcas de tiempo del registro de nginx: sin esto salen en UTC y no cuadran
+      # con las del backend al seguir una peticion de punta a punta.
+      TZ: America/Guayaquil
+    ports:
+      - "5180:5180"
+
+volumes:
+  transporte_pgdata:

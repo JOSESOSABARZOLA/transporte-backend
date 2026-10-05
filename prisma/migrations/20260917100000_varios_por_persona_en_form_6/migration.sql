@@ -1,0 +1,22 @@
+-- VARIOS OPERATIVOS POR PERSONA EN EL FORMULARIO 6 · PATRULLA REACCIÓN NOCTURNA.
+-- 2026-09-17, a petición del negocio.
+--
+-- Gemelo nocturno del Formulario 5. Tiene PREFIJOS POR ÁREA (IGNECU para el área General,
+-- ITNECU para Técnico, INECU para Instrucción). Un operativo lleva UN código y el código nombra
+-- UN área, así que un operativo con personal de varias áreas no puede recibir un solo prefijo y
+-- el generador lo rechazaba: «...mezcla personal de áreas distintas; registre un operativo por
+-- área.» (elegirPorArea).
+--
+-- La solución, la MISMA que el 5 y el 8: que cada persona genere su propio operativo. Al activar
+-- `form_varios_por_persona`, cada persona asignada produce un operativo de UNA sola persona con
+-- el prefijo de SU área, de modo que dos inspectores de áreas distintas salen como dos operativos
+-- con su propio código y ya no hay mezcla. Es la MISMA maquinaria (`componerOperativosDelRegistro`),
+-- gobernada por este flag: no hay cambios de código.
+--
+-- Al 6 se le pusieron los tres prefijos por área el 2026-09-09 pero NUNCA se le activó este flag
+-- (solo al 8 y al 5): quedó a medias —prefijos que asumen «un área por operativo» sin el split que
+-- lo garantiza—. Esto lo cierra.
+--
+-- `form_numero = 6` para no depender del id. En la base de pruebas no hay estos catálogos y el
+-- UPDATE no toca ninguna fila, que es lo correcto.
+UPDATE "t_formulario" SET "form_varios_por_persona" = true WHERE "form_numero" = 6;

@@ -1,0 +1,13 @@
+{
+  "//": "Configuracion aparte de la de package.json: estas pruebas EXIGEN base de datos. Mezclarlas con las unitarias haria que 'npm test' fallara cuando el contenedor no esta levantado. maxWorkers en 1 es deliberado: las seis suites comparten UNA base -catalogos ocupa los numeros de formulario 7, 8 y 9, cuadro diario el 6, y esta ultima desactiva las ventanas de carga mientras corre-, asi que en paralelo se pisan entre si y el fallo aparece de forma intermitente, que es la peor manera de descubrirlo.",
+  "rootDir": "..",
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "testRegex": ".*\\.integracion-spec\\.ts$",
+  "transform": {
+    "^.+\\.(t|j)s$": "ts-jest"
+  },
+  "setupFiles": ["<rootDir>/test/entorno-integracion.ts"],
+  "testEnvironment": "node",
+  "testTimeout": 30000,
+  "maxWorkers": 1
+}

@@ -1,0 +1,39 @@
+# Microservicio: transporte · Modulo: Cuadro de Colores
+# Archivo: .dockerignore
+# Responsabilidad: Reducir el contexto de build de Docker (velocidad e imagen limpia).
+#   El Dockerfile copia package*, tsconfig*, nest-cli.json, src/, fonts/ y prisma/;
+#   aun asi excluimos lo pesado o sensible para acelerar el envio del contexto.
+
+# Dependencias y build (se reinstalan/regeneran dentro de la imagen)
+node_modules
+dist
+
+# Control de versiones y kit local
+.git
+.gitignore
+.claude
+
+# Entorno y secretos (NO deben entrar a la imagen)
+.env
+.env.*
+
+# Imagenes exportadas y respaldos
+*.tar
+*.sql.gz
+
+# Archivos scratch de depuracion (ya en .gitignore)
+tmp-*.js
+tmp_*.js
+debug-*.js
+
+# Documentacion que no necesita el runtime.
+# prisma/ NO se excluye: el esquema y las migraciones deben entrar en la imagen.
+docs
+
+# Uploads: se montan como volumen en runtime, no van en la imagen
+uploads
+
+# Tests y config de editor
+test
+.vscode
+.idea

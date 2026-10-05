@@ -1,0 +1,16 @@
+-- GRUPO DE REGISTRO DEL OPERATIVO. 2026-09-17.
+--
+-- Enlaza los operativos de una MISMA patrulla (Form 5/6: `variosPorPersona` sin
+-- `cantidadPorPersona`) para agruparlos en las listas —matriz, jornada, mis operativos— como «una
+-- sola patrulla»: cada persona con su código por área en su fila, y el resto fusionado. Lo lleva
+-- TODO registro de patrulla, aunque nazca con un solo operativo: el 2026-09-17 el aporte del DMIT
+-- (Instrucción → `INECU`) ADOPTA ese grupo para sumar su operativo a la patrulla ya creada, así
+-- que el lote debe existir desde el primer inspector.
+--
+-- Nulo en: los formularios que no son patrulla, el adicional, y las copias de la misma persona del
+-- formulario 8 (`cantidadPorPersona`, que se agrupan por persona, no por patrulla).
+--
+-- ES SOLO UN ENLACE DE PRESENTACIÓN: la agrupación ocurre en el cliente, así que NO lleva índice.
+-- Columna nullable, sin backfill: los operativos anteriores quedan en NULL y no se agrupan, igual
+-- que hoy.
+ALTER TABLE "t_operativo" ADD COLUMN "oper_grupo_registro" uuid;

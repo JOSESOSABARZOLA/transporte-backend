@@ -1,0 +1,33 @@
+-- Microservicio: transporte · Modulo: Cuadro de Colores
+-- Migracion: agrega_baja_logica_al_operativo
+-- Responsabilidad: Permitir retirar un operativo del cuadro sin borrarlo.
+-- Fuente: PV-10 de PENDIENTES-VALIDACION.md y M-14 de PLAN_DE_IMPLEMENTACION.md.
+-- Desarrollador: Jose Sosa
+-- Fecha: 2026-08-06
+--
+-- POR QUE SE AGREGA UNA COLUMNA AL MODELO APROBADO.
+--
+-- El plan exige para M-14 que la baja del operativo sea LOGICA, y el esquema aprobado
+-- no trae la columna: t_operativo solo tiene oper_alerta_activa, que es otra cosa -si
+-- el operativo tiene alertas pendientes de atender-.
+--
+-- El borrado fisico no es una alternativa aceptable aqui:
+--
+--   · RN-12 numera los operativos por dia y formulario. Borrar el 002 deja un hueco en
+--     la numeracion de la jornada, y esa numeracion se imprime en la matriz.
+--   · uq_operativo_cuad_form_sec impide reutilizar el secuencial liberado, de modo que
+--     el hueco seria permanente.
+--   · t_auditoria referencia el operativo con ON DELETE SET NULL: borrarlo dejaria la
+--     traza sin el registro que explica. La evidencia de quien lo retiro perderia su
+--     objeto justo cuando mas falta hace.
+--
+-- La columna nace con DEFAULT true, de modo que los operativos existentes -si los
+-- hubiera- quedan activos. t_operativo esta vacia al aplicarse.
+--
+-- SIN INDICE NUEVO, a proposito. El filtro por oper_activo acompana siempre al filtro
+-- por cuadro y formulario, que ya cubre idx_operativo_cuad_form; y la jornada tiene
+-- decenas de filas, no millones. Agregar un indice parcial alteraria ademas el conteo
+-- que verifica npm run prisma:verificar sin ganancia medible.
+
+ALTER TABLE "t_operativo"
+  ADD COLUMN "oper_activo" BOOLEAN NOT NULL DEFAULT true;

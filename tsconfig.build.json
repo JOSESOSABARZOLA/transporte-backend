@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "// prisma": "Se excluye a proposito: los scripts de prisma/ se ejecutan con ts-node. Si entran en la compilacion, TypeScript mueve la raiz al directorio del proyecto y la salida pasa de dist/main.js a dist/src/main.js, con lo que el contenedor no arranca.",
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "test", "dist", "prisma", "**/*spec.ts"]
+}
