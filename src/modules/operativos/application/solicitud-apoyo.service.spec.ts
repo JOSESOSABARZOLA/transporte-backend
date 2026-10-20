@@ -58,12 +58,24 @@ const armar = (
     equivalenteAbierta?: SolicitudConOperativo | null;
     escrituraBloqueada?: Error;
     operativoAjeno?: Error;
+    priorizable?: {
+      id: number;
+      identificador: string;
+      creadoPorRol: RolDepartamental;
+    } | null;
+    priorizacionAbierta?: SolicitudConOperativo | null;
   } = {},
 ) => {
   const {
     equivalenteAbierta = null,
     escrituraBloqueada,
     operativoAjeno,
+    priorizable = {
+      id: 500,
+      identificador: 'INSP-001-14-OCT-2026',
+      creadoPorRol: RolDepartamental.DMIP_INSPECCIONES,
+    },
+    priorizacionAbierta = null,
   } = opciones;
 
   /** Lo que el servicio pidió guardar, con tipo, para poder afirmar sobre ello. */
@@ -100,6 +112,8 @@ const armar = (
       listar,
       listarDeOperativo,
       buscarEquivalenteAbierta: jest.fn().mockResolvedValue(equivalenteAbierta),
+      operativoParaPriorizar: jest.fn().mockResolvedValue(priorizable),
+      buscarAbiertaDe: jest.fn().mockResolvedValue(priorizacionAbierta),
       ejecutarEnTransaccion: jest
         .fn()
         .mockImplementation((operacion: (c: unknown) => Promise<unknown>) =>
@@ -419,5 +433,61 @@ describe('SolicitudApoyoService · bandeja (caso 4 del plan)', () => {
 
     expect(obtener).toHaveBeenCalledWith(500, INSPECCIONES);
     expect(listarDeOperativo).toHaveBeenCalledWith(500);
+  });
+});
+
+describe('SolicitudApoyoService · «Pedir priorización» de la DAF (Fase 3)', () => {
+  const DAF = { usuarioId: 7, rol: RolDepartamental.DAF };
+
+  it('crea la solicitud dirigida a quien registró el operativo, con las opciones en palabras', async () => {
+    const { servicio, enviados, registrar } = armar();
+
+    const r = await servicio.solicitarPriorizacion(
+      500,
+      ['PROPIOS_MEDIOS', 'COMPARTIR'],
+      null,
+      DAF,
+    );
+
+    expect(r.creada).toBe(true);
+    expect(enviados[0]).toEqual(
+      expect.objectContaining({
+        operativoId: 500,
+        rolSolicitante: RolDepartamental.DAF,
+        rolRequerido: RolDepartamental.DMIP_INSPECCIONES,
+        areaRequerida: null,
+        cantidad: 1,
+      }),
+    );
+    expect(enviados[0].observacion).toContain(
+      'ir por propios medios, compartir carro',
+    );
+    expect(registrar).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entidad: 't_solicitud_apoyo',
+        accion: AccionAuditoria.CREAR,
+      }),
+      CLIENTE,
+    );
+  });
+
+  it('es idempotente: con una abierta la devuelve y no crea otra', async () => {
+    const { servicio, crear } = armar({ priorizacionAbierta: SOLICITUD });
+
+    const r = await servicio.solicitarPriorizacion(500, [], null, DAF);
+
+    expect(r).toEqual({ solicitud: SOLICITUD, creada: false });
+    expect(crear).not.toHaveBeenCalled();
+  });
+
+  it('un operativo inexistente o retirado produce 404', async () => {
+    const { servicio, crear } = armar({ priorizable: null });
+
+    const error = await capturar(
+      servicio.solicitarPriorizacion(1, [], null, DAF),
+    );
+
+    expect((error as Error).constructor.name).toBe('RecursoNoEncontradoError');
+    expect(crear).not.toHaveBeenCalled();
   });
 });

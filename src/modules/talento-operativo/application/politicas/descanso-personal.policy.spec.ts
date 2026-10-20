@@ -11,7 +11,7 @@
  * que el día de mañana sale dos veces seguidas en patrulla o encadena dieciséis horas.
  */
 
-import { EstadoTurno, TipoContrato } from '@prisma/client';
+import { AreaPersonal, EstadoTurno, TipoContrato } from '@prisma/client';
 
 import { CODIGOS_ERROR } from '../../../../common/errors/codigos-error';
 import { RangoHorario } from '../../../operativos/domain/rango-horario';
@@ -42,6 +42,7 @@ const persona = (
 ): AntecedentesPersona => ({
   nombre: 'BENAVIDES FERNANDO',
   tipoContrato: TipoContrato.OCASIONAL,
+  area: AreaPersonal.GENERAL,
   ultimaPatrulla: null,
   salidasPesadas: 0,
   asignacionesDelDia: [],
@@ -104,7 +105,10 @@ describe('1 · Disponibilidad (RN-30)', () => {
 describe('1·bis · Descanso de la cobertura de Instrucción', () => {
   it('el turno DESCANSO ese día excluye a la persona', () => {
     const veredicto = verificarDescanso(
-      persona({ turnoCobertura: EstadoTurno.DESCANSO }),
+      persona({
+        area: AreaPersonal.INSTRUCCION,
+        turnoCobertura: EstadoTurno.DESCANSO,
+      }),
       contexto(),
       UMBRALES,
     );
@@ -125,6 +129,7 @@ describe('1·bis · Descanso de la cobertura de Instrucción', () => {
   it('la ausencia manda sobre el descanso: informa el retorno', () => {
     const veredicto = verificarDescanso(
       persona({
+        area: AreaPersonal.INSTRUCCION,
         ausencia: { estado: 'VACACIONES', hasta: dia('2026-08-15') },
         turnoCobertura: EstadoTurno.DESCANSO,
       }),
@@ -139,7 +144,10 @@ describe('1·bis · Descanso de la cobertura de Instrucción', () => {
 describe('1·ter · Ventana del turno de la cobertura', () => {
   it('turno DIURNO: un operativo dentro de 08:00–16:30 es elegible', () => {
     const veredicto = verificarDescanso(
-      persona({ turnoCobertura: EstadoTurno.DIURNO }),
+      persona({
+        area: AreaPersonal.INSTRUCCION,
+        turnoCobertura: EstadoTurno.DIURNO,
+      }),
       contexto({ rango: RangoHorario.de('08:00', '16:00') }),
       UMBRALES,
     );
@@ -149,7 +157,10 @@ describe('1·ter · Ventana del turno de la cobertura', () => {
 
   it('turno DIURNO: un operativo fuera de la ventana se rechaza con su motivo', () => {
     const veredicto = verificarDescanso(
-      persona({ turnoCobertura: EstadoTurno.DIURNO }),
+      persona({
+        area: AreaPersonal.INSTRUCCION,
+        turnoCobertura: EstadoTurno.DIURNO,
+      }),
       contexto({ rango: RangoHorario.de('17:00', '19:00') }),
       UMBRALES,
     );
@@ -162,7 +173,10 @@ describe('1·ter · Ventana del turno de la cobertura', () => {
 
   it('turno NOCTURNO: un operativo que cruza la medianoche dentro de 17:30–02:00 es elegible', () => {
     const veredicto = verificarDescanso(
-      persona({ turnoCobertura: EstadoTurno.NOCTURNO }),
+      persona({
+        area: AreaPersonal.INSTRUCCION,
+        turnoCobertura: EstadoTurno.NOCTURNO,
+      }),
       contexto({ rango: RangoHorario.de('22:00', '01:00') }),
       UMBRALES,
     );
@@ -172,7 +186,10 @@ describe('1·ter · Ventana del turno de la cobertura', () => {
 
   it('turno NOCTURNO: un operativo diurno queda fuera de la ventana', () => {
     const veredicto = verificarDescanso(
-      persona({ turnoCobertura: EstadoTurno.NOCTURNO }),
+      persona({
+        area: AreaPersonal.INSTRUCCION,
+        turnoCobertura: EstadoTurno.NOCTURNO,
+      }),
       contexto({ rango: RangoHorario.de('08:00', '16:00') }),
       UMBRALES,
     );
@@ -183,7 +200,10 @@ describe('1·ter · Ventana del turno de la cobertura', () => {
 
   it('sin ventana configurada la regla se abstiene, no bloquea', () => {
     const veredicto = verificarDescanso(
-      persona({ turnoCobertura: EstadoTurno.DIURNO }),
+      persona({
+        area: AreaPersonal.INSTRUCCION,
+        turnoCobertura: EstadoTurno.DIURNO,
+      }),
       contexto({ rango: RangoHorario.de('22:00', '23:00') }),
       { ...UMBRALES, ventanaDiurna: undefined },
     );
@@ -570,5 +590,97 @@ describe('caso 12 del plan · contenido del veredicto', () => {
     ]) {
       expect(serializado).not.toContain(campo);
     }
+  });
+});
+
+describe('Cobertura por turnos · solo Instrucción (decisión 2026-10-05)', () => {
+  const instruccion = (
+    parcial: Partial<AntecedentesPersona> = {},
+  ): AntecedentesPersona =>
+    persona({
+      area: AreaPersonal.INSTRUCCION,
+      tipoContrato: TipoContrato.NOMBRAMIENTO,
+      ...parcial,
+    });
+
+  it('Instrucción + nombramiento + turno N + operativo nocturno → elegible (manda la matriz)', () => {
+    const veredicto = verificarDescanso(
+      instruccion({ turnoCobertura: EstadoTurno.NOCTURNO }),
+      contexto({ rango: RangoHorario.de('22:00', '01:00'), esNocturno: true }),
+      UMBRALES,
+    );
+
+    expect(veredicto).toEqual({ elegible: true });
+  });
+
+  it('Instrucción + nombramiento + turno D + sábado dentro de la ventana → elegible', () => {
+    const veredicto = verificarDescanso(
+      instruccion({ turnoCobertura: EstadoTurno.DIURNO }),
+      contexto({
+        fecha: SABADO,
+        esFinDeSemana: true,
+        rango: RangoHorario.de('08:00', '16:00'),
+      }),
+      UMBRALES,
+    );
+
+    expect(veredicto).toEqual({ elegible: true });
+  });
+
+  it('Instrucción + nombramiento SIN turno + nocturno → CONTRATO_NO_ADMITE_TURNO (como hoy)', () => {
+    const veredicto = verificarDescanso(
+      instruccion(),
+      contexto({ rango: RangoHorario.de('22:00', '01:00'), esNocturno: true }),
+      UMBRALES,
+    );
+
+    expect(veredicto.codigo).toBe(CODIGOS_ERROR.CONTRATO_NO_ADMITE_TURNO);
+  });
+
+  it('Inspección + nombramiento + nocturno → bloqueado, aunque tuviera turno (sin cambios)', () => {
+    const veredicto = verificarDescanso(
+      persona({
+        area: AreaPersonal.GENERAL,
+        tipoContrato: TipoContrato.NOMBRAMIENTO,
+        turnoCobertura: EstadoTurno.NOCTURNO,
+      }),
+      contexto({ rango: RangoHorario.de('22:00', '01:00'), esNocturno: true }),
+      UMBRALES,
+    );
+
+    expect(veredicto.codigo).toBe(CODIGOS_ERROR.CONTRATO_NO_ADMITE_TURNO);
+  });
+
+  it('Instrucción + turno D + horario fuera de la ventana → TURNO_FUERA_DE_RANGO', () => {
+    const veredicto = verificarDescanso(
+      instruccion({ turnoCobertura: EstadoTurno.DIURNO }),
+      contexto({ rango: RangoHorario.de('17:00', '19:00') }),
+      UMBRALES,
+    );
+
+    expect(veredicto.codigo).toBe(CODIGOS_ERROR.TURNO_FUERA_DE_RANGO);
+  });
+
+  it('Instrucción + DESCANSO → PERSONA_EN_DESCANSO', () => {
+    const veredicto = verificarDescanso(
+      instruccion({ turnoCobertura: EstadoTurno.DESCANSO }),
+      contexto(),
+      UMBRALES,
+    );
+
+    expect(veredicto.codigo).toBe(CODIGOS_ERROR.PERSONA_EN_DESCANSO);
+  });
+
+  it('otra área con DESCANSO cargado: las reglas de cobertura no se evalúan', () => {
+    const veredicto = verificarDescanso(
+      persona({
+        area: AreaPersonal.GENERAL,
+        turnoCobertura: EstadoTurno.DESCANSO,
+      }),
+      contexto(),
+      UMBRALES,
+    );
+
+    expect(veredicto).toEqual({ elegible: true });
   });
 });

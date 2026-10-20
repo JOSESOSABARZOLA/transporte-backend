@@ -19,10 +19,10 @@
 import { Module } from '@nestjs/common';
 
 import { TalentoOperativoModule } from '../talento-operativo/talento-operativo.module';
+import { AuthDirectorioModule } from './auth-directorio.module';
 import { DirectorioAuthService } from './application/directorio-auth.service';
 import { SesionService } from './application/sesion.service';
 import { UsuariosAdminService } from './application/usuarios-admin.service';
-import { AuthUsuariosClient } from './infrastructure/auth-usuarios.client';
 import { UsuarioSesionRepository } from './infrastructure/usuario-sesion.repository';
 import { UsuariosAdminRepository } from './infrastructure/usuarios-admin.repository';
 import { AdministracionUsuariosController } from './presentation/administracion-usuarios.controller';
@@ -40,7 +40,7 @@ import { SesionController } from './presentation/sesion.controller';
    *
    * No hay ciclo: `talento-operativo` no conoce a `identidad`.
    */
-  imports: [TalentoOperativoModule],
+  imports: [TalentoOperativoModule, AuthDirectorioModule],
   controllers: [
     SesionController,
     AdministracionUsuariosController,
@@ -52,7 +52,6 @@ import { SesionController } from './presentation/sesion.controller';
     UsuariosAdminService,
     UsuariosAdminRepository,
     DirectorioAuthService,
-    AuthUsuariosClient,
   ],
 })
 export class IdentidadModule {}

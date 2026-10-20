@@ -162,6 +162,28 @@ export class PersonalElegibleService {
    * delimitación» ofrecería a Inspecciones gente de Instrucción sin que nadie lo
    * notara. Una lista vacía se ve, se pregunta y se corrige.
    */
+  /**
+   * Las áreas de personal que estos roles pueden ASIGNAR en algún formulario (2026-10-07).
+   *
+   * Es la unión, sobre los formularios que el rol escribe o a los que aporta, de lo mismo que
+   * ofrece la lista de elegibles (`areasQueCorresponden`). La usa la consulta de trámites de
+   * Inspección para no mostrar los trámites de personas que ese departamento no puede convocar
+   * (el mismo criterio que cerró el IDOR H-01). Un formulario solo en LECTURA no cuenta.
+   */
+  async areasAsignables(
+    roles: readonly RolDepartamental[],
+  ): Promise<AreaPersonal[]> {
+    const permitidos = await this.formularios.obtenerPermitidos([...roles]);
+    const areas = new Set<AreaPersonal>();
+    for (const { formulario, acceso } of permitidos) {
+      if (acceso === 'LECTURA') continue;
+      for (const area of this.areasQueCorresponden(formulario, roles)) {
+        areas.add(area);
+      }
+    }
+    return [...areas];
+  }
+
   async consultar(consulta: ConsultaElegibles): Promise<PersonaElegible[]> {
     const formulario = await this.formularios.obtenerDefinicion(
       consulta.formularioCodigo,

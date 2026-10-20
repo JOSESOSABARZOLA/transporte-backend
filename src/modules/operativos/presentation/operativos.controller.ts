@@ -66,11 +66,19 @@ import {
   AsignacionPersonalDto,
   CrearOperativoDto,
   EditarPatrullaDto,
+  FiltroCoincidenciasDto,
+  FiltroConteoDto,
+  FijarTramitePersonalDto,
   FiltroOperativosDto,
   ReemplazarPersonalDto,
   RetirarOperativoDto,
+  type CoincidenciaTransporteDto,
+  type ConteoFormularioDto,
+  type OperativoListadoDto,
   type OperativoResponseDto,
+  type RangoConsultaDto,
 } from './dto/operativo.dto';
+import { resolverRango } from '../application/politicas/rango-consulta';
 
 @Controller('operativos')
 @UseGuards(IdentidadGuard, PermisosGuard, FormularioRolGuard, VentanaCargaGuard)
@@ -83,13 +91,21 @@ export class OperativosController {
   async consultar(
     @Query() filtro: FiltroOperativosDto,
     @UsuarioActual() usuario: UsuarioAutenticado,
-  ): Promise<RespuestaPaginada<OperativoResponseDto>> {
+  ): Promise<RespuestaPaginada<OperativoListadoDto>> {
     const pagina = filtro.pagina ?? 1;
     const tamanio = filtro.tamanio ?? 25;
 
+    // Rango Desde–Hasta (2026-10-13). `fecha` sola sigue valiendo: es desde = hasta.
+    const { rangoMaxDias } = await this.operativos.parametrosDeRango();
+    const rango = resolverRango(
+      { fecha: filtro.fecha, desde: filtro.desde, hasta: filtro.hasta },
+      rangoMaxDias,
+    );
+
     const { datos, total } = await this.operativos.consultar(
       {
-        fecha: filtro.fecha ? exigirFecha(filtro.fecha) : undefined,
+        desde: rango ? exigirFecha(rango.desde) : undefined,
+        hasta: rango ? exigirFecha(rango.hasta) : undefined,
         formularioCodigo: filtro.formulario,
         pagina,
         tamanio,
@@ -99,11 +115,74 @@ export class OperativosController {
       usuario.roles,
     );
 
+    const [admision, transporte] = await Promise.all([
+      this.operativos.admisionDeEdicion(datos, usuario.roles),
+      this.operativos.transporteDelListado(datos),
+    ]);
+
     return componerPaginada(
-      datos.map(aOperativoResponse),
+      datos.map((operativo, i) => ({
+        ...aOperativoResponse(operativo),
+        admiteEdicion: admision[i],
+        transporteAsignado: transporte[i],
+      })),
       total,
       pagina,
       tamanio,
+    );
+  }
+
+  /**
+   * Fecha del cuadro vigente y rango máximo del listado (2026-10-13). Liviano a propósito: la
+   * pantalla lo pide una vez al abrir para validar el rango sin consultar. Va ANTES de `:id`,
+   * o `ParseIntPipe` lo tomaría por un identificador.
+   */
+  @Get('rango')
+  @RequierePermiso('operativos:leer')
+  async rango(): Promise<RangoConsultaDto> {
+    return this.operativos.parametrosDeRango();
+  }
+
+  /**
+   * Operativos vigentes de cada formulario permitido en la jornada `fecha` (2026-10-16): el
+   * «N hoy» del selector del registro. Misma visibilidad que el listado (PER-02). Una fecha sin
+   * cuadro devuelve todo en 0, no 404. Va ANTES de `:id`, como `rango`.
+   */
+  @Get('conteo')
+  @RequierePermiso('operativos:leer')
+  async conteo(
+    @Query() filtro: FiltroConteoDto,
+    @UsuarioActual() usuario: UsuarioAutenticado,
+  ): Promise<ConteoFormularioDto[]> {
+    return this.operativos.contarPorFormulario(
+      exigirFecha(filtro.fecha),
+      usuario.roles,
+    );
+  }
+
+  /**
+   * Coincidencias para COMPARTIR UNIDAD (2026-10-19): operativos del ámbito del usuario en el mismo
+   * día, punto, zonal y horario que el que se está registrando, con si pueden ir juntos. Misma
+   * visibilidad que el listado (RN-48). Va ANTES de `:id`, como `rango` y `conteo`.
+   */
+  @Get('coincidencias-transporte')
+  @RequierePermiso('operativos:leer')
+  async coincidenciasTransporte(
+    @Query() filtro: FiltroCoincidenciasDto,
+    @UsuarioActual() usuario: UsuarioAutenticado,
+  ): Promise<CoincidenciaTransporteDto[]> {
+    return this.operativos.coincidenciasTransporte(
+      {
+        fecha: exigirFecha(filtro.fecha),
+        puntoEncuentroId: filtro.puntoEncuentroId,
+        zonalId: filtro.zonalId,
+        horaInicio: filtro.horaInicio,
+        horaFin: filtro.horaFin,
+        tipoTransporte: filtro.tipoTransporte,
+        esMacrooperativo: filtro.esMacrooperativo,
+        excluirOperativoId: filtro.excluirOperativoId,
+      },
+      usuario.roles,
     );
   }
 
@@ -133,6 +212,8 @@ export class OperativosController {
           cuadroFecha: exigirFecha(dto.cuadroFecha),
         },
         comoAutor(usuario),
+        // Para volver a preguntar a Inspección por los trámites elegidos (2026-10-07).
+        usuario.tokenAuth,
       ),
     );
   }
@@ -145,9 +226,16 @@ export class OperativosController {
     @Body() dto: ActualizarOperativoDto,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<OperativoResponseDto> {
-    return aOperativoResponse(
-      await this.operativos.editar(id, dto, comoAutor(usuario), usuario.roles),
+    const editado = await this.operativos.editar(
+      id,
+      dto,
+      comoAutor(usuario),
+      usuario.roles,
     );
+    // Avisos de la edición (2026-10-19, COMPARTIR_RETIRADO): solo si los hay.
+    return editado.avisos
+      ? { ...aOperativoResponse(editado), avisos: editado.avisos }
+      : aOperativoResponse(editado);
   }
 
   /**
@@ -218,6 +306,32 @@ export class OperativosController {
         dto,
         comoAutor(usuario),
         usuario.roles,
+      ),
+    );
+  }
+
+  /**
+   * Fija o quita el trámite de Inspección de una persona ya asignada (2026-10-07).
+   *
+   * El servidor vuelve a preguntar a Inspección con el token de la sesión: lo que el navegador
+   * envía es solo el código. `codigoTramite: null` (o ausente) lo quita.
+   */
+  @Put(':id/personal/:funcionarioId/tramite')
+  @RequierePermiso('operativos:personal:gestionar')
+  async fijarTramitePersonal(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('funcionarioId', ParseIntPipe) funcionarioId: number,
+    @Body() dto: FijarTramitePersonalDto,
+    @UsuarioActual() usuario: UsuarioAutenticado,
+  ): Promise<OperativoResponseDto> {
+    return aOperativoResponse(
+      await this.operativos.fijarTramitePersonal(
+        id,
+        funcionarioId,
+        dto.codigoTramite ?? null,
+        comoAutor(usuario),
+        usuario.roles,
+        usuario.tokenAuth,
       ),
     );
   }

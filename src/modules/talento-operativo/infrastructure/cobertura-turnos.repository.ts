@@ -15,7 +15,9 @@
 import { Injectable } from '@nestjs/common';
 import {
   AreaPersonal,
+  EstadoCoberturaMes,
   EstadoDisponibilidad,
+  type CoberturaMes,
   type CoberturaTurno,
   type DenominacionInstruccion,
   type Disponibilidad,
@@ -129,19 +131,110 @@ export class CoberturaTurnosRepository extends RepositorioPrisma {
     });
   }
 
+  /**
+   * De estos ids, los que son de Instrucción, activos y de una dirección al alcance. EN LOTE, para
+   * validar un lote de celdas sin una consulta por persona.
+   */
+  async idsDeInstruccion(
+    funcionarioIds: number[],
+    direcciones: readonly RolDepartamental[],
+  ): Promise<Set<number>> {
+    if (funcionarioIds.length === 0 || direcciones.length === 0) {
+      return new Set();
+    }
+
+    const filas = await this.prisma.funcionario.findMany({
+      where: {
+        id: { in: funcionarioIds },
+        activo: true,
+        area: AreaPersonal.INSTRUCCION,
+        direccion: { in: [...direcciones] },
+      },
+      select: { id: true },
+    });
+
+    return new Set(filas.map((fila) => fila.id));
+  }
+
   /** Fija (o cambia) el turno de una persona en un día. Uno por (funcionario, fecha). */
   async guardarCelda(
     funcionarioId: number,
     fecha: Date,
     estado: EstadoTurno,
     usuarioId: number,
+    cliente?: Prisma.TransactionClient,
   ): Promise<void> {
-    await this.prisma.coberturaTurno.upsert({
+    const db = cliente ?? this.prisma;
+    await db.coberturaTurno.upsert({
       where: {
         funcionarioId_fecha: { funcionarioId, fecha },
       },
       create: { funcionarioId, fecha, estado, registradoPor: usuarioId },
       update: { estado, registradoPor: usuarioId },
+    });
+  }
+
+  /** Limpia la celda: el día queda vacío (sin turno), que es «sin restricción de horario». */
+  async borrarCelda(
+    funcionarioId: number,
+    fecha: Date,
+    cliente?: Prisma.TransactionClient,
+  ): Promise<void> {
+    const db = cliente ?? this.prisma;
+    await db.coberturaTurno.deleteMany({ where: { funcionarioId, fecha } });
+  }
+
+  // ─────────────────────── Estado (informativo) del mes ───────────────────────
+
+  /** El estado del mes para esa dirección, o `null` si no hay fila (= BORRADOR). */
+  async estadoMes(
+    mes: string,
+    direccion: RolDepartamental,
+  ): Promise<CoberturaMes | null> {
+    return this.prisma.coberturaMes.findUnique({
+      where: { mes_direccion: { mes, direccion } },
+    });
+  }
+
+  /** Publica el mes (crea la fila si no existía). */
+  async publicarMes(
+    mes: string,
+    direccion: RolDepartamental,
+    usuarioId: number,
+  ): Promise<CoberturaMes> {
+    const ahora = new Date();
+    return this.prisma.coberturaMes.upsert({
+      where: { mes_direccion: { mes, direccion } },
+      create: {
+        mes,
+        direccion,
+        estado: EstadoCoberturaMes.PUBLICADO,
+        publicadoPor: usuarioId,
+        publicadoEn: ahora,
+      },
+      update: {
+        estado: EstadoCoberturaMes.PUBLICADO,
+        publicadoPor: usuarioId,
+        publicadoEn: ahora,
+      },
+    });
+  }
+
+  /** Un mes PUBLICADO que se edita pasa a PUBLICADO_CON_CAMBIOS. Un borrador sigue igual. */
+  async marcarConCambios(
+    meses: readonly string[],
+    direccion: RolDepartamental,
+    cliente?: Prisma.TransactionClient,
+  ): Promise<void> {
+    if (meses.length === 0) return;
+    const db = cliente ?? this.prisma;
+    await db.coberturaMes.updateMany({
+      where: {
+        mes: { in: [...meses] },
+        direccion,
+        estado: EstadoCoberturaMes.PUBLICADO,
+      },
+      data: { estado: EstadoCoberturaMes.PUBLICADO_CON_CAMBIOS },
     });
   }
 }

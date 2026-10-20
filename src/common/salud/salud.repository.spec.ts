@@ -37,7 +37,7 @@ describe('SaludRepository', () => {
     // El error de conexión trae el host y la cadena de conexión: NO debe escapar de
     // aquí ni convertirse en un 500 con traza. El punto de salud responde «no
     // disponible» y ya.
-    consultar.mockRejectedValue(new Error('ECONNREFUSED 10.0.0.1:5432'));
+    consultar.mockRejectedValue(new Error('ECONNREFUSED db.local:5432'));
     await expect(repositorio.baseResponde()).resolves.toBe(false);
   });
 

@@ -14,6 +14,11 @@
  * una ventana de 20H00 a 05H00 tiene hora de cierre MENOR que la de apertura, y
  * compararlas sin contemplarlo da resultados silenciosamente incorrectos.
  *
+ * TIPOS (2026-10-07). `SIN_RESTRICCION` no restringe nada (igual que una ventana inactiva:
+ * `vcar_activo` se deriva del tipo). `LABORABLE` cierra sábado y domingo, todo el día; de lunes a
+ * viernes se evalúa como `DIARIO`. No hay calendario de feriados en el sistema: un feriado entre
+ * semana se evalúa como un día laborable más.
+ *
  * Se expone como clase propia y no como método privado de la guarda para que el
  * `VentanaCargaService` del submódulo `configuracion` (M-08) la reutilice en lugar
  * de reimplementarla.
@@ -30,7 +35,12 @@ export interface VeredictoVentana {
   motivo?: string;
   horaCierre?: string;
   horaApertura?: string;
+  /** Cerrada porque es sábado o domingo en una ventana `LABORABLE` (2026-10-07). */
+  finDeSemana?: boolean;
 }
+
+/** Sábado y domingo en numeración ISO (1 = lunes … 7 = domingo). */
+const DIAS_SIN_CARGA_LABORABLE = [6, 7];
 
 const MINUTOS_POR_DIA = 24 * 60;
 
@@ -41,13 +51,27 @@ export class VentanaCargaEvaluador {
     momento = new Date(),
   ): VeredictoVentana {
     // Sin ventana configurada, o desactivada, no hay restricción horaria.
-    if (!ventana || !ventana.activo) {
+    if (!ventana || !ventana.activo || ventana.tipo === 'SIN_RESTRICCION') {
       return { puedeEscribir: true };
     }
 
     const zona = ventana.zonaHoraria;
     const hora = horaEnZona(momento, zona);
     const dia = diaIsoEnZona(momento, zona);
+
+    // LABORABLE · sábado y domingo sin carga, sea la hora que sea.
+    if (
+      ventana.tipo === 'LABORABLE' &&
+      DIAS_SIN_CARGA_LABORABLE.includes(dia)
+    ) {
+      return {
+        puedeEscribir: false,
+        motivo: ventana.mensajeCierre,
+        horaCierre: ventana.horaCierre ?? undefined,
+        horaApertura: ventana.horaApertura ?? undefined,
+        finDeSemana: true,
+      };
+    }
 
     const usaDias = ventana.diaApertura !== null && ventana.diaCierre !== null;
 

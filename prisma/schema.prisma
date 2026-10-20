@@ -147,6 +147,15 @@ enum EstadoTurno {
   @@map("e_estado_turno")
 }
 
+/// Estado (informativo) del mes de la cobertura por turnos de Instruccion (2026-10-05).
+enum EstadoCoberturaMes {
+  BORRADOR
+  PUBLICADO
+  PUBLICADO_CON_CAMBIOS
+
+  @@map("e_estado_cobertura_mes")
+}
+
 enum TipoContrato {
   NOMBRAMIENTO
   OCASIONAL
@@ -156,6 +165,48 @@ enum TipoContrato {
 
 /// Zona de Quito donde vive el conductor. Los cuatro valores de la columna DOMICILIO de
 /// la hoja maestra de la DAF, contados sobre sus 34 conductores. No hay un quinto.
+/// Cómo se transporta al personal de un operativo (2026-10-06). Lo elige quien registra.
+/// PROPIOS_MEDIOS = el operativo no pide transporte: no genera tramos (ver TramosTransporteService).
+enum TipoTransporte {
+  COMPLETO
+  SOLO_INICIO
+  SOLO_FIN
+  INICIO_Y_FIN
+  PROPIOS_MEDIOS
+
+  @@map("e_tipo_transporte")
+}
+
+/// Un tramo de transporte: dejar, retirar, acompañar todo el operativo, o una tarea (p. ej. taller).
+enum TipoTramo {
+  DEJAR
+  RETIRAR
+  COMPLETO
+  TAREA
+
+  @@map("e_tipo_tramo")
+}
+
+/// Turno mensual del conductor (planificación DAF, 2026-10-06).
+enum TurnoConductor {
+  DIA
+  NOCHE
+  ECU_NOCHE
+  LIBRE
+  ADMINISTRATIVO
+
+  @@map("e_turno_conductor")
+}
+
+/// Dónde queda o amanece un vehículo (Reglamento 042-CG-2016, Art. 8).
+enum TipoUbicacionVehiculo {
+  GARAJE
+  DOMICILIO
+  TALLER
+
+  @@map("e_tipo_ubicacion_vehiculo")
+}
+
 enum SectorCiudad {
   NORTE
   SUR
@@ -172,14 +223,24 @@ enum EstadoDisponibilidad {
   CALAMIDAD
   PERMISO
   MANTENIMIENTO
+  /// Desde el 2026-10-08 (rediseño de P-07). Excluyen a la persona como las demás (RN-30).
+  LICENCIA
+  CAPACITACION
+  COMISION_SERVICIOS
 
   @@map("e_estado_disponibilidad")
 }
 
+/// Tipo de la ventana de carga. Desde el 2026-10-07 la pantalla ofrece solo DIARIO, LABORABLE
+/// (lunes a viernes; sábado y domingo sin carga) y SIN_RESTRICCION (sustituye a desactivarla:
+/// `vcar_activo` se conserva, derivado del tipo). SEMANAL e INTERVALO quedan en el enumerado
+/// porque quitar un valor exige recrear el tipo; la migración 20261007171000 los pasó a DIARIO.
 enum TipoVentana {
   SEMANAL
   DIARIO
   INTERVALO
+  LABORABLE
+  SIN_RESTRICCION
 
   @@map("e_tipo_ventana")
 }
@@ -265,21 +326,25 @@ model Formulario {
   /// peticion del negocio (migracion 20260914120000). Como `admiteAdicionales` o
   /// `capturaLibreTipo`: es un dato, no un `if` con un codigo dentro; su valor se cambia por
   /// UPDATE, no por despliegue —el `@default(false)` es solo el arranque de la columna—.
-  tipoControlMultiple Boolean   @default(false) @map("form_tipo_control_multiple")
+  tipoControlMultiple   Boolean        @default(false) @map("form_tipo_control_multiple")
   /// Si cada persona asignada genera SUS PROPIOS operativos (uno por unidad de su cantidad),
   /// dividiendo su horario. Verdadero en el 8 y, desde el 2026-09-14, en el 5 (patrulla UIG/UIT):
   /// asi cada persona sale con el prefijo de SU area y dos areas distintas no chocan. Es un dato,
   /// no un `if` con un codigo dentro: habilitarlo en otro formulario es un UPDATE, no un despliegue.
-  variosPorPersona    Boolean   @default(false) @map("form_varios_por_persona")
+  variosPorPersona      Boolean        @default(false) @map("form_varios_por_persona")
   /// Si el formulario OFRECE fijar cuantos operativos genera cada persona (cantidad > 1), con la
   /// columna «Cantidad de operativos». Solo el 8 (2026-09-14). Es distinto de `variosPorPersona`:
   /// ese es el SPLIT —un operativo por persona, tambien en el 5—; este es el control de cantidad.
-  cantidadPorPersona  Boolean   @default(false) @map("form_cantidad_por_persona")
-  orden               Int       @map("form_orden")
-  vigenciaDesde       DateTime? @map("form_vigencia_desde") @db.Date
-  vigenciaHasta       DateTime? @map("form_vigencia_hasta") @db.Date
-  activo              Boolean   @default(true) @map("form_activo")
-  creadoEn            DateTime  @default(now()) @map("form_creado_en") @db.Timestamptz(3)
+  cantidadPorPersona    Boolean        @default(false) @map("form_cantidad_por_persona")
+  /// Tipo de transporte que toma un operativo NUEVO de este formulario cuando el registro no lo
+  /// indica (2026-10-07). El PMO pide solo dejar y retirar: INICIO_Y_FIN. Es un dato; se cambia en
+  /// la administración de formularios, no por despliegue.
+  tipoTransporteDefecto TipoTransporte @default(PROPIOS_MEDIOS) @map("form_tipo_transporte_defecto")
+  orden                 Int            @map("form_orden")
+  vigenciaDesde         DateTime?      @map("form_vigencia_desde") @db.Date
+  vigenciaHasta         DateTime?      @map("form_vigencia_hasta") @db.Date
+  activo                Boolean        @default(true) @map("form_activo")
+  creadoEn              DateTime       @default(now()) @map("form_creado_en") @db.Timestamptz(3)
 
   prefijos      FormularioPrefijo[]
   areas         FormularioArea[]
@@ -288,6 +353,7 @@ model Formulario {
   tiposControl  TipoControl[]
   instituciones Institucion[]
   operativos    Operativo[]
+  zonales       ZonalFormulario[]
 
   @@index([orden], map: "idx_formulario_orden")
   @@index([rolDueno], map: "idx_formulario_rol_dueno")
@@ -360,19 +426,53 @@ model FormularioRol {
 }
 
 model Zonal {
-  id     Int     @id @default(autoincrement()) @map("zona_id")
-  codigo String  @unique(map: "uq_zonal_codigo") @map("zona_codigo") @db.VarChar(30)
-  nombre String  @map("zona_nombre") @db.VarChar(90)
+  id     Int           @id @default(autoincrement()) @map("zona_id")
+  codigo String        @unique(map: "uq_zonal_codigo") @map("zona_codigo") @db.VarChar(30)
+  nombre String        @map("zona_nombre") @db.VarChar(90)
   /// Marca el ambito distrital, que no es una zonal especifica.
-  esDmq  Boolean @default(false) @map("zona_es_dmq")
-  orden  Int     @map("zona_orden")
-  activo Boolean @default(true) @map("zona_activo")
+  esDmq  Boolean       @default(false) @map("zona_es_dmq")
+  orden  Int           @map("zona_orden")
+  activo Boolean       @default(true) @map("zona_activo")
+  /// Sector de la ciudad de la zonal (2026-10-06): alimenta el traslado por defecto «mismo sector».
+  sector SectorCiudad? @map("zona_sector")
 
   puntos       PuntoEncuentro[]
   operativos   OperativoZonal[]
   funcionarios Funcionario[]
+  /// Las zonales de cada formulario que corresponden a esta zona de la ciudad (2026-10-13).
+  formularios  ZonalFormulario[]
+
+  trasladosDesde TrasladoZonal[]   @relation("TrasladoOrigen")
+  trasladosHacia TrasladoZonal[]   @relation("TrasladoDestino")
+  tramosDesde    TramoTransporte[] @relation("TramoOrigen")
+  tramosHacia    TramoTransporte[] @relation("TramoDestino")
+  ubicaciones    UbicacionFlota[]
+  talleres       Disponibilidad[]  @relation("DisponibilidadTaller")
 
   @@map("t_zonal")
+}
+
+/// ZONAL DE UN FORMULARIO (2026-10-13). Cada formulario tiene sus propias zonales, con nombre y
+/// estado propios: renombrar o desactivar en el 1 no toca al 2. `t_zonal` sigue siendo la ZONA DE LA
+/// CIUDAD —la que usan el personal, la flota, los traslados y Transporte para reconocer el mismo
+/// sitio entre formularios—, y cada zonal de formulario corresponde a una de ellas. Una por zona y
+/// formulario; el nombre, único en el formulario.
+model ZonalFormulario {
+  id           Int     @id @default(autoincrement()) @map("zofo_id")
+  formularioId Int     @map("form_id")
+  zonaId       Int     @map("zona_id")
+  nombre       String  @map("zofo_nombre") @db.VarChar(90)
+  activo       Boolean @default(true) @map("zofo_activo")
+  orden        Int     @map("zofo_orden")
+
+  formulario Formulario       @relation(fields: [formularioId], references: [id], onDelete: Cascade, map: "fk_zonal_formulario_formulario")
+  zona       Zonal            @relation(fields: [zonaId], references: [id], onDelete: Restrict, map: "fk_zonal_formulario_zona")
+  puntos     PuntoEncuentro[]
+
+  @@unique([formularioId, zonaId], map: "uq_zonal_formulario_zona")
+  @@unique([formularioId, nombre], map: "uq_zonal_formulario_nombre")
+  @@index([zonaId], map: "idx_zonal_formulario_zona")
+  @@map("t_zonal_formulario")
 }
 
 /// Cada punto de encuentro PERTENECE A UN FORMULARIO (2026-09-29). Antes era un punto por
@@ -388,9 +488,11 @@ model PuntoEncuentro {
   zonalId      Int     @map("zona_id")
   activo       Boolean @default(true) @map("pcto_activo")
 
-  formulario Formulario  @relation(fields: [formularioId], references: [id], onDelete: Cascade, map: "fk_punto_formulario")
-  zonal      Zonal       @relation(fields: [zonalId], references: [id], onDelete: Restrict, map: "fk_punto_zonal")
-  operativos Operativo[]
+  formulario      Formulario      @relation(fields: [formularioId], references: [id], onDelete: Cascade, map: "fk_punto_formulario")
+  zonal           Zonal           @relation(fields: [zonalId], references: [id], onDelete: Restrict, map: "fk_punto_zonal")
+  /// La zonal DE SU FORMULARIO (2026-10-13): un punto solo cuelga de una zonal que su formulario tiene.
+  zonalFormulario ZonalFormulario @relation(fields: [formularioId, zonalId], references: [formularioId, zonaId], onDelete: NoAction, map: "fk_punto_zonal_formulario")
+  operativos      Operativo[]
 
   @@unique([formularioId, zonalId, nombre], map: "uq_punto_form_zona_nombre")
   @@index([zonalId], map: "idx_punto_zonal")
@@ -542,6 +644,21 @@ model CoberturaTurno {
   @@map("t_cobertura_turno")
 }
 
+/// Estado del mes de la cobertura por turnos (2026-10-05). SOLO INFORMATIVO: la elegibilidad usa
+/// la matriz este publicada o no. Sin fila = BORRADOR. Una por (mes, direccion al alcance).
+model CoberturaMes {
+  id            Int                @id @default(autoincrement()) @map("comes_id")
+  mes           String             @map("comes_mes") @db.VarChar(7)
+  direccion     RolDepartamental   @map("comes_direccion")
+  estado        EstadoCoberturaMes @default(BORRADOR) @map("comes_estado")
+  publicadoPor  Int?               @map("comes_publicado_por")
+  publicadoEn   DateTime?          @map("comes_publicado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime           @default(now()) @updatedAt @map("comes_actualizado_en") @db.Timestamptz(3)
+
+  @@unique([mes, direccion], map: "uq_cobertura_mes_direccion")
+  @@map("t_cobertura_mes")
+}
+
 model Conductor {
   id                 Int     @id @default(autoincrement()) @map("cond_id")
   cedula             String  @unique(map: "uq_conductor_cedula") @map("cond_cedula") @db.VarChar(13)
@@ -559,24 +676,59 @@ model Conductor {
   /// RN-DAF-06. Nulable a proposito: sin contrato consta, la regla NO se aplica.
   tipoContrato          TipoContrato? @map("cond_tipo_contrato")
 
-  vehiculoHabitual Vehiculo?        @relation(fields: [vehiculoHabitualId], references: [id], onDelete: SetNull, map: "fk_conductor_vehiculo")
+  vehiculoHabitual      Vehiculo? @relation(fields: [vehiculoHabitualId], references: [id], onDelete: SetNull, map: "fk_conductor_vehiculo")
+  /// Acta del parqueadero autorizado (2026-10-06): obligatoria si parqueaderoAutorizado. Sin acta
+  /// VIGENTE en la fecha, el vehículo no puede quedar en su domicilio (Art. 8).
+  actaParqueaderoNumero String?   @map("cond_acta_parqueadero_numero") @db.VarChar(60)
+  actaParqueaderoDesde  DateTime? @map("cond_acta_parqueadero_desde") @db.Date
+  actaParqueaderoHasta  DateTime? @map("cond_acta_parqueadero_hasta") @db.Date
+  /// Patrón de rotación del conductor (2026-10-07): una letra por día del ciclo —D día, N noche,
+  /// E ECU noche, L libre, A administrativo—, de 2 a 14. La propuesta del mes lo usa si el
+  /// historial no alcanza para continuar el ciclo. Lo valida el DTO y un CHECK.
+  patronRotacion        String?   @map("cond_patron_rotacion") @db.VarChar(14)
+  /// Cuándo y quién lo dio de baja (2026-10-20). Nulos mientras está activo; reactivar los vacía.
+  bajaEn                DateTime? @map("cond_baja_en") @db.Timestamptz(3)
+  bajaPor               Int?      @map("cond_baja_por")
+
   operativos       Operativo[]
   disponibilidades Disponibilidad[]
+  tramos           TramoTransporte[]
+  turnos           TurnoConductorDia[]
+  activaciones     ActivacionConductor[]
+  destinos         DestinoVehiculo[]
+  checklists       ChecklistVehiculo[]
+  kilometrajes     KilometrajeVehiculo[]
+  vales            ValeCombustible[]
+  hojasRuta        HojaRutaEmision[]
 
   @@index([vehiculoHabitualId], map: "idx_conductor_vehiculo")
   @@map("t_conductor")
 }
 
 model Vehiculo {
-  id          Int     @id @default(autoincrement()) @map("vehi_id")
-  placa       String  @unique(map: "uq_vehiculo_placa") @map("vehi_placa") @db.VarChar(10)
-  descripcion String? @map("vehi_descripcion") @db.VarChar(160)
-  activo      Boolean @default(true) @map("vehi_activo")
+  id                   Int       @id @default(autoincrement()) @map("vehi_id")
+  placa                String    @unique(map: "uq_vehiculo_placa") @map("vehi_placa") @db.VarChar(10)
+  descripcion          String?   @map("vehi_descripcion") @db.VarChar(160)
+  activo               Boolean   @default(true) @map("vehi_activo")
+  /// Datos de circulación (2026-10-06). Opcionales: la flota se completa a mano.
+  tipo                 String?   @map("vehi_tipo") @db.VarChar(40)
+  asientos             Int?      @map("vehi_asientos") @db.SmallInt
+  kilometraje          Int?      @map("vehi_kilometraje")
+  matriculaVencimiento DateTime? @map("vehi_matricula_vencimiento") @db.Date
+  soatVencimiento      DateTime? @map("vehi_soat_vencimiento") @db.Date
+  /// Cuándo y quién lo dio de baja (2026-10-20). Nulos mientras está activo; reactivar los vacía.
+  bajaEn               DateTime? @map("vehi_baja_en") @db.Timestamptz(3)
+  bajaPor              Int?      @map("vehi_baja_por")
 
   conductores      Conductor[]
   operativos       Operativo[]
   disponibilidades Disponibilidad[]
   destinos         DestinoVehiculo[]
+  tramos           TramoTransporte[]
+  checklists       ChecklistVehiculo[]
+  kilometrajes     KilometrajeVehiculo[]
+  vales            ValeCombustible[]
+  jornadas         VehiculoJornada[]
 
   @@map("t_vehiculo")
 }
@@ -588,10 +740,18 @@ model Vehiculo {
 /// Nace VACIA: la evidencia se contradice -cinco en el Excel, cuatro en la reunion- y es
 /// la pregunta Q-01. La carga el ADMINISTRADOR, no una semilla.
 model UbicacionFlota {
-  id     Int     @id @default(autoincrement()) @map("ubic_id")
-  nombre String  @unique(map: "uq_ubicacion_nombre") @map("ubic_nombre") @db.VarChar(120)
-  activo Boolean @default(true) @map("ubic_activo")
+  id               Int     @id @default(autoincrement()) @map("ubic_id")
+  nombre           String  @unique(map: "uq_ubicacion_nombre") @map("ubic_nombre") @db.VarChar(120)
+  activo           Boolean @default(true) @map("ubic_activo")
+  /// Garaje autorizado por el Reglamento (Art. 8): Matriz, Eloy Alfaro, Calderón, Quitumbe, Los Chillos.
+  garajeAutorizado Boolean @default(false) @map("ubic_garaje_autorizado")
+  /// Zonal donde está la ubicación, para medir el traslado hasta el primer punto del día.
+  zonalId          Int?    @map("zona_id")
+  /// Cuándo y quién lo dio de baja (2026-10-20). Nulos mientras está vigente; reactivar los vacía.
+  bajaEn           DateTime? @map("ubic_baja_en") @db.Timestamptz(3)
+  bajaPor          Int?      @map("ubic_baja_por")
 
+  zonal    Zonal?            @relation(fields: [zonalId], references: [id], onDelete: SetNull, map: "fk_ubicacion_zonal")
   destinos DestinoVehiculo[]
 
   @@map("t_ubicacion_flota")
@@ -603,19 +763,27 @@ model UbicacionFlota {
 /// escribe una vez por turno, y un conductor encadena varios operativos dentro de el.
 /// `uq_destino_vehi_fecha` es lo que hace que la pregunta tenga UNA respuesta.
 model DestinoVehiculo {
-  id            Int      @id @default(autoincrement()) @map("dest_id")
-  vehiculoId    Int      @map("vehi_id")
-  fecha         DateTime @map("dest_fecha") @db.Date
-  ubicacionId   Int?     @map("ubic_id")
+  id            Int                    @id @default(autoincrement()) @map("dest_id")
+  vehiculoId    Int                    @map("vehi_id")
+  fecha         DateTime               @map("dest_fecha") @db.Date
+  ubicacionId   Int?                   @map("ubic_id")
   /// Se lo lleva el conductor a casa. Excluyente con `ubicacionId`, lo protege
   /// ck_destino_sujeto, que Prisma no puede expresar.
-  domicilio     Boolean  @default(false) @map("dest_domicilio")
-  observacion   String?  @map("dest_observacion") @db.VarChar(220)
-  registradoPor Int      @map("dest_registrado_por")
-  creadoEn      DateTime @default(now()) @map("dest_creado_en") @db.Timestamptz(3)
+  domicilio     Boolean                @default(false) @map("dest_domicilio")
+  observacion   String?                @map("dest_observacion") @db.VarChar(220)
+  /// Tipo de la guarda final (2026-10-06): GARAJE, DOMICILIO o TALLER. Nulo en filas anteriores.
+  tipo          TipoUbicacionVehiculo? @map("dest_tipo")
+  /// Quien se lleva el vehiculo a su domicilio (2026-10-06): al dia siguiente se le repite el vehiculo.
+  conductorId   Int?                   @map("cond_id")
+  /// N.º del acta de parqueadero con que se dejo en el domicilio (2026-10-08, Art. 8). Se valida
+  /// contra el acta vigente del conductor; nulo en garaje o taller y en filas anteriores.
+  actaNumero    String?                @map("dest_acta_numero") @db.VarChar(60)
+  registradoPor Int                    @map("dest_registrado_por")
+  creadoEn      DateTime               @default(now()) @map("dest_creado_en") @db.Timestamptz(3)
 
   vehiculo  Vehiculo        @relation(fields: [vehiculoId], references: [id], onDelete: Cascade, map: "fk_destino_vehiculo")
   ubicacion UbicacionFlota? @relation(fields: [ubicacionId], references: [id], onDelete: Restrict, map: "fk_destino_ubicacion")
+  conductor Conductor?      @relation(fields: [conductorId], references: [id], onDelete: SetNull, map: "fk_destino_conductor")
 
   @@unique([vehiculoId, fecha], map: "uq_destino_vehi_fecha")
   @@index([fecha], map: "idx_destino_fecha")
@@ -623,26 +791,32 @@ model DestinoVehiculo {
 }
 
 model Disponibilidad {
-  id            Int                  @id @default(autoincrement()) @map("disp_id")
-  funcionarioId Int?                 @map("func_id")
-  conductorId   Int?                 @map("cond_id")
-  vehiculoId    Int?                 @map("vehi_id")
-  estado        EstadoDisponibilidad @map("disp_estado")
-  desde         DateTime             @map("disp_desde") @db.Date
-  hasta         DateTime             @map("disp_hasta") @db.Date
-  motivo        String?              @map("disp_motivo") @db.VarChar(220)
+  id                  Int                  @id @default(autoincrement()) @map("disp_id")
+  funcionarioId       Int?                 @map("func_id")
+  conductorId         Int?                 @map("cond_id")
+  vehiculoId          Int?                 @map("vehi_id")
+  estado              EstadoDisponibilidad @map("disp_estado")
+  desde               DateTime             @map("disp_desde") @db.Date
+  hasta               DateTime             @map("disp_hasta") @db.Date
+  motivo              String?              @map("disp_motivo") @db.VarChar(220)
   /// RN-DAF-05. Solo en filas de MANTENIMIENTO de un vehiculo: lo ata
   /// ck_disponibilidad_taller, que Prisma no puede expresar.
-  taller        String?              @map("disp_taller") @db.VarChar(120)
+  taller              String?              @map("disp_taller") @db.VarChar(120)
   /// Hora de la cita, HH:MM. Texto por lo mismo que oper_hora_inicio: es una hora de
   /// reloj, y convertirla a timestamp la desplazaria cinco horas en Quito.
-  hora          String?              @map("disp_hora") @db.VarChar(5)
-  registradoPor Int                  @map("disp_registrado_por")
-  creadoEn      DateTime             @default(now()) @map("disp_creado_en") @db.Timestamptz(3)
+  hora                String?              @map("disp_hora") @db.VarChar(5)
+  /// Solo vehiculos (2026-10-06): PROGRAMADO / EN_TALLER / LISTO. LISTO lo devuelve a circulacion.
+  estadoMantenimiento EstadoMantenimiento? @map("disp_estado_mantenimiento")
+  /// Zonal del taller: destino de la TAREA «Llevar a taller».
+  zonalTallerId       Int?                 @map("disp_zonal_taller_id")
+  registradoPor       Int                  @map("disp_registrado_por")
+  creadoEn            DateTime             @default(now()) @map("disp_creado_en") @db.Timestamptz(3)
 
-  funcionario Funcionario? @relation(fields: [funcionarioId], references: [id], onDelete: Cascade, map: "fk_disponibilidad_funcionario")
-  conductor   Conductor?   @relation(fields: [conductorId], references: [id], onDelete: Cascade, map: "fk_disponibilidad_conductor")
-  vehiculo    Vehiculo?    @relation(fields: [vehiculoId], references: [id], onDelete: Cascade, map: "fk_disponibilidad_vehiculo")
+  funcionario Funcionario?      @relation(fields: [funcionarioId], references: [id], onDelete: Cascade, map: "fk_disponibilidad_funcionario")
+  conductor   Conductor?        @relation(fields: [conductorId], references: [id], onDelete: Cascade, map: "fk_disponibilidad_conductor")
+  vehiculo    Vehiculo?         @relation(fields: [vehiculoId], references: [id], onDelete: Cascade, map: "fk_disponibilidad_vehiculo")
+  zonalTaller Zonal?            @relation("DisponibilidadTaller", fields: [zonalTallerId], references: [id], onDelete: SetNull, map: "fk_disponibilidad_zonal_taller")
+  tareas      TramoTransporte[]
 
   @@index([vehiculoId, desde, hasta], map: "idx_disponibilidad_vehi")
   @@map("t_disponibilidad")
@@ -734,10 +908,30 @@ model Operativo {
 
   /// Asignacion logistica. Escritura EXCLUSIVA del rol DAF.
   /// RN-40: conductor y vehiculo nacen nulos.
-  estadoTransporte EstadoTransporte @default(PENDIENTE) @map("oper_estado_transporte")
-  conductorId      Int?             @map("cond_id")
-  vehiculoId       Int?             @map("vehi_id")
-  asignadoEn       DateTime?        @map("oper_asignado_en") @db.Timestamptz(3)
+  estadoTransporte       EstadoTransporte @default(PENDIENTE) @map("oper_estado_transporte")
+  /// Cómo pide transporte quien registra (2026-10-06). Independiente de estadoTransporte (lo fija la DAF).
+  tipoTransporte         TipoTransporte   @default(COMPLETO) @map("oper_tipo_transporte")
+  /// Macrooperativo: no admite compartir carro (optimizador, Fase 3).
+  esMacrooperativo       Boolean          @default(false) @map("oper_es_macrooperativo")
+  /// COMPARTIR UNIDAD (2026-10-19): el operativo con el que quien registra pide viajar en la misma
+  /// unidad (mismo día, punto y horario, de su ámbito). Es una INTENCIÓN: la DAF la ejecuta
+  /// (RN-40). SET NULL si el anfitrión desaparece. CHECKs: no consigo mismo
+  /// (ck_operativo_compartir_no_propio) y no a la vez que el macrooperativo
+  /// (ck_operativo_compartir_o_exclusivo). Ver la migración 20261019090000.
+  compartirConId         Int?             @map("oper_compartir_con_id")
+  /// Por qué pide vehículo exclusivo (opción C del registro, 2026-10-19). Nulo si no lo justificó.
+  justificacionExclusivo String?          @map("oper_justificacion_exclusivo") @db.VarChar(300)
+  /// Quién pidió compartir unidad y cuándo (2026-10-19, migración 20261019150000): la tarjeta
+  /// «Comparte con X» de las notas lleva su autor y su hora. Sin FK, como `creadoPor`. Se llenan al
+  /// fijar o cambiar `compartirConId` y se vacían al retirarlo.
+  compartirSolicitadoPor Int?             @map("oper_compartir_solicitado_por")
+  compartirSolicitadoEn  DateTime?        @map("oper_compartir_solicitado_en") @db.Timestamptz(3)
+  /// Transporte requerido (2026-10-07): cuándo el registro cambió el tipo de transporte con la
+  /// asignación ya hecha y esta se liberó. Alerta ALV-07 para la DAF hasta reasignar.
+  transporteLiberadoEn   DateTime?        @map("oper_transporte_liberado_en") @db.Timestamptz(3)
+  conductorId            Int?             @map("cond_id")
+  vehiculoId             Int?             @map("vehi_id")
+  asignadoEn             DateTime?        @map("oper_asignado_en") @db.Timestamptz(3)
 
   /// Derivado: permite filtrar sin abrir el documento JSON.
   alertaActiva Boolean @default(true) @map("oper_alerta_activa")
@@ -769,6 +963,11 @@ model Operativo {
   origen      Operativo?  @relation("AdicionalDeOperativo", fields: [origenId], references: [id], onDelete: Restrict, map: "fk_operativo_origen")
   adicionales Operativo[] @relation("AdicionalDeOperativo")
 
+  /// COMPARTIR UNIDAD (2026-10-19): el anfitrión con el que pide viajar, y quienes piden viajar
+  /// con este. SET NULL: borrar el anfitrión deja la intención en nada, no el operativo.
+  compartirCon  Operativo?  @relation("CompartirUnidad", fields: [compartirConId], references: [id], onDelete: SetNull, map: "fk_operativo_compartir_con")
+  compartidoPor Operativo[] @relation("CompartirUnidad")
+
   zonales       OperativoZonal[]
   personal      AsignacionPersonal[]
   instituciones OperativoInstitucion[]
@@ -777,6 +976,7 @@ model Operativo {
   tiposControl  OperativoTipoControl[]
   ordenes       OrdenServicio[]
   solicitudes   SolicitudApoyo[]
+  tramos        TramoTransporte[]
   auditoria     Auditoria[]
   /// Notas del operativo (bitacora append-only, 2026-09-09). Sustituyen al antiguo campo
   /// unico `oper_observaciones`.
@@ -804,6 +1004,9 @@ model Operativo {
   @@index([cuadroId, estadoTransporte], map: "idx_operativo_transporte")
   @@index([creadoPorRol, cuadroId], map: "idx_operativo_creador")
   @@index([puntoEncuentroId], map: "idx_operativo_punto")
+  /// Coincidencias del registro (2026-10-19): mismo cuadro y mismo punto. idx_operativo_compartir_con
+  /// no se declara: es parcial y Prisma no expresa el predicado.
+  @@index([cuadroId, puntoEncuentroId], map: "idx_operativo_cuadro_punto")
   @@map("t_operativo")
 }
 
@@ -823,14 +1026,37 @@ model AsignacionPersonal {
   horaFin        String?          @map("aper_hora_fin") @db.VarChar(5)
   creadoEn       DateTime         @default(now()) @map("aper_creado_en") @db.Timestamptz(3)
 
-  operativo   Operativo   @relation(fields: [operativoId], references: [id], onDelete: Cascade, map: "fk_asignacion_operativo")
-  funcionario Funcionario @relation(fields: [funcionarioId], references: [id], onDelete: Restrict, map: "fk_asignacion_funcionario")
+  operativo         Operativo          @relation(fields: [operativoId], references: [id], onDelete: Cascade, map: "fk_asignacion_operativo")
+  funcionario       Funcionario        @relation(fields: [funcionarioId], references: [id], onDelete: Restrict, map: "fk_asignacion_funcionario")
+  /// Trámite de Inspección elegido para esta persona en este operativo (2026-10-07). Nulo si no tiene.
+  tramiteInspeccion TramiteInspeccion?
 
   /// INV-10: una persona no figura dos veces en el mismo operativo.
   @@unique([operativoId, funcionarioId], map: "uq_asignacion_oper_func")
   @@index([funcionarioId], map: "idx_asignacion_funcionario")
   @@index([operativoId], map: "idx_asignacion_operativo")
   @@map("t_asignacion_personal")
+}
+
+/// Copia del trámite de Inspección que el operador eligió para un inspector asignado (2026-10-07).
+/// Se toma al elegirlo y no cambia si Inspección lo modifica después: la orden de servicio lo lee de
+/// aquí. Uno por asignación; quitar a la persona del operativo lo borra (ON DELETE CASCADE).
+model TramiteInspeccion {
+  id            Int      @id @default(autoincrement()) @map("otin_id")
+  asignacionId  Int      @unique(map: "uq_tramite_inspeccion_asignacion") @map("aper_id")
+  codigoTramite String   @map("otin_codigo_tramite") @db.VarChar(60)
+  nroSitra      String?  @map("otin_nro_sitra") @db.VarChar(80)
+  predio        String?  @map("otin_predio") @db.VarChar(40)
+  zonal         String?  @map("otin_zonal") @db.VarChar(80)
+  materia       String?  @map("otin_materia") @db.VarChar(160)
+  tipoTramite   String?  @map("otin_tipo_tramite") @db.VarChar(60)
+  estado        String?  @map("otin_estado") @db.VarChar(40)
+  tomadoPor     Int      @map("otin_tomado_por")
+  tomadoEn      DateTime @default(now()) @map("otin_tomado_en") @db.Timestamptz(3)
+
+  asignacion AsignacionPersonal @relation(fields: [asignacionId], references: [id], onDelete: Cascade, map: "fk_tramite_inspeccion_asignacion")
+
+  @@map("t_operativo_tramite_inspeccion")
 }
 
 model OperativoZonal {
@@ -954,7 +1180,7 @@ model OrdenServicio {
   /// INV-25: una orden emitida es inmutable. La correccion genera una reemision.
   vigente          Boolean  @default(true) @map("oser_vigente")
   /// Datos del memorando que la Direccion completa despues de emitir (numero de memorando,
-  /// NUT, cargo/dependencia del destinatario...). NULL = recien emitida, sin completar (BORRADOR).
+  /// cargo/dependencia del destinatario...). NULL = recien emitida, sin completar (BORRADOR).
   /// Se persisten para reproducir el documento y para saber que falta (D13, 2026-10-01).
   editables        Json?    @map("oser_editables") @db.JsonB
   /// Numero AMC-OS-<8>-<anio>: secuencial por anio, asignado cuando la orden queda VIGENTE
@@ -1002,6 +1228,9 @@ model SecuenciaOrden {
 /// la jornada que ya no tengan faltantes pasan a VIGENTE (con su numero AMC-OS). Los tres son
 /// NULL mientras no se configuren: un valor vacio equivale a sin configurar (faltante si la
 /// plantilla lo usa, D15). La fecha es la clave, igual que `t_cuadro_diario.cuad_fecha`.
+/// SIN USO desde el 2026-10-08 salvo como RESPALDO: el NUT ya no se imprime y «elaborado por» pasó a
+/// los datos generales de la plantilla del Director. Ya no se escribe; se lee ocuc_elaborado_por solo
+/// para las ordenes resueltas con una version de plantilla anterior. Las columnas no se borran.
 model OrdenConfigCuadro {
   fecha           DateTime @id @map("ocuc_fecha") @db.Date
   numeroMemorando String?  @map("ocuc_numero_memorando") @db.VarChar(120)
@@ -1243,4 +1472,202 @@ model PlantillaOrdenVersion {
 
   @@unique([plantillaId, version], map: "uq_plantilla_version")
   @@map("t_plantilla_orden_version")
+}
+
+/// Tramo de transporte (2026-10-06): un conductor encadena varios en el día. Las horas se guardan
+/// como HH:MM de la JORNADA (`fecha` = el día del cuadro), igual que el operativo; `cruzaMedianoche`
+/// marca un fin al día siguiente. Una TAREA (p. ej. llevar a taller) no tiene operativo.
+model TramoTransporte {
+  id                   Int       @id @default(autoincrement()) @map("trtr_id")
+  operativoId          Int?      @map("oper_id")
+  conductorId          Int?      @map("cond_id")
+  vehiculoId           Int?      @map("vehi_id")
+  fecha                DateTime  @map("trtr_fecha") @db.Date
+  tipo                 TipoTramo @map("trtr_tipo")
+  horaInicio           String    @map("trtr_hora_inicio") @db.VarChar(5)
+  horaFin              String    @map("trtr_hora_fin") @db.VarChar(5)
+  cruzaMedianoche      Boolean   @default(false) @map("trtr_cruza_medianoche")
+  zonalOrigenId        Int?      @map("trtr_zonal_origen_id")
+  zonalDestinoId       Int?      @map("trtr_zonal_destino_id")
+  compartidoConTramoId Int?      @map("trtr_compartido_con_id")
+  descripcion          String?   @map("trtr_descripcion") @db.VarChar(200)
+  /// La cita de taller que origino esta TAREA (2026-10-06). Al retirar la cita, la tarea se va con ella.
+  mantenimientoId      Int?      @map("disp_id")
+  creadoPor            Int       @map("trtr_creado_por")
+  creadoEn             DateTime  @default(now()) @map("trtr_creado_en") @db.Timestamptz(3)
+
+  operativo     Operativo?        @relation(fields: [operativoId], references: [id], onDelete: Cascade, map: "fk_tramo_operativo")
+  conductor     Conductor?        @relation(fields: [conductorId], references: [id], onDelete: Restrict, map: "fk_tramo_conductor")
+  vehiculo      Vehiculo?         @relation(fields: [vehiculoId], references: [id], onDelete: Restrict, map: "fk_tramo_vehiculo")
+  zonalOrigen   Zonal?            @relation("TramoOrigen", fields: [zonalOrigenId], references: [id], onDelete: SetNull, map: "fk_tramo_zonal_origen")
+  zonalDestino  Zonal?            @relation("TramoDestino", fields: [zonalDestinoId], references: [id], onDelete: SetNull, map: "fk_tramo_zonal_destino")
+  compartidoCon TramoTransporte?  @relation("TramoCompartido", fields: [compartidoConTramoId], references: [id], onDelete: SetNull, map: "fk_tramo_compartido")
+  compartidos   TramoTransporte[] @relation("TramoCompartido")
+  mantenimiento Disponibilidad?   @relation(fields: [mantenimientoId], references: [id], onDelete: Cascade, map: "fk_tramo_mantenimiento")
+
+  @@index([conductorId, fecha], map: "idx_tramo_conductor_fecha")
+  @@index([operativoId], map: "idx_tramo_operativo")
+  @@index([fecha], map: "idx_tramo_fecha")
+  @@index([mantenimientoId], map: "idx_tramo_mantenimiento")
+  @@map("t_tramo_transporte")
+}
+
+/// Vehiculos que SALEN un dia (2026-10-08, «Planificar el dia», paso 1). Una fila por vehiculo
+/// activo y fecha: la DAF confirma la lista entera de una vez. El conteo sigue viviendo en
+/// t_capacidad_flota (RN-46); esta tabla guarda QUE vehiculos, para poder corregir uno a uno.
+model VehiculoJornada {
+  id            Int      @id @default(autoincrement()) @map("vejo_id")
+  fecha         DateTime @map("vejo_fecha") @db.Date
+  vehiculoId    Int      @map("vehi_id")
+  sale          Boolean  @map("vejo_sale")
+  registradoPor Int      @map("vejo_registrado_por")
+  registradoEn  DateTime @default(now()) @map("vejo_registrado_en") @db.Timestamptz(3)
+
+  vehiculo Vehiculo @relation(fields: [vehiculoId], references: [id], onDelete: Cascade, map: "fk_vehiculo_jornada_vehiculo")
+
+  @@unique([fecha, vehiculoId], map: "uq_vehiculo_jornada")
+  @@index([fecha], map: "idx_vehiculo_jornada_fecha")
+  @@map("t_vehiculo_jornada")
+}
+
+/// Emision de la hoja de ruta de un conductor en un dia (2026-10-08, paso 4). Guarda la HUELLA de
+/// sus tramos al emitir: si despues cambian, la hoja vuelve a «pendiente (cambio posterior)». El
+/// PDF NO se guarda: se sigue generando al momento.
+model HojaRutaEmision {
+  id          Int      @id @default(autoincrement()) @map("hore_id")
+  fecha       DateTime @map("hore_fecha") @db.Date
+  conductorId Int      @map("cond_id")
+  huella      String   @map("hore_huella") @db.VarChar(64)
+  emitidaPor  Int      @map("hore_emitida_por")
+  emitidaEn   DateTime @default(now()) @map("hore_emitida_en") @db.Timestamptz(3)
+
+  conductor Conductor @relation(fields: [conductorId], references: [id], onDelete: Cascade, map: "fk_hoja_ruta_conductor")
+
+  @@unique([fecha, conductorId], map: "uq_hoja_ruta_fecha_conductor")
+  @@index([fecha], map: "idx_hoja_ruta_fecha")
+  @@map("t_hoja_ruta_emision")
+}
+
+/// Minutos de traslado entre dos zonales (2026-10-06). Sin fila, se usa el valor por defecto
+/// (misma zona / mismo sector / otro sector) de los parámetros TRASLADO_*.
+model TrasladoZonal {
+  id             Int @id @default(autoincrement()) @map("trzo_id")
+  zonalOrigenId  Int @map("trzo_zonal_origen_id")
+  zonalDestinoId Int @map("trzo_zonal_destino_id")
+  minutos        Int @map("trzo_minutos") @db.SmallInt
+
+  zonalOrigen  Zonal @relation("TrasladoOrigen", fields: [zonalOrigenId], references: [id], onDelete: Cascade, map: "fk_traslado_origen")
+  zonalDestino Zonal @relation("TrasladoDestino", fields: [zonalDestinoId], references: [id], onDelete: Cascade, map: "fk_traslado_destino")
+
+  @@unique([zonalOrigenId, zonalDestinoId], map: "uq_traslado_par")
+  @@map("t_traslado_zonal")
+}
+
+/// Turno de un conductor en un día (planificación mensual de la DAF, 2026-10-06).
+model TurnoConductorDia {
+  id            Int            @id @default(autoincrement()) @map("tuco_id")
+  conductorId   Int            @map("cond_id")
+  fecha         DateTime       @map("tuco_fecha") @db.Date
+  turno         TurnoConductor @map("tuco_turno")
+  registradoPor Int?           @map("tuco_registrado_por")
+  creadoEn      DateTime       @default(now()) @map("tuco_creado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime       @default(now()) @updatedAt @map("tuco_actualizado_en") @db.Timestamptz(3)
+
+  conductor Conductor @relation(fields: [conductorId], references: [id], onDelete: Cascade, map: "fk_turno_conductor")
+
+  @@unique([conductorId, fecha], map: "uq_turno_conductor_fecha")
+  @@index([fecha], map: "idx_turno_conductor_fecha")
+  @@map("t_turno_conductor")
+}
+
+/// Estado del mes de turnos de conductores. Solo informativo; sin fila = BORRADOR.
+model TurnoConductorMes {
+  id            Int                @id @default(autoincrement()) @map("tcme_id")
+  mes           String             @unique(map: "uq_turno_conductor_mes") @map("tcme_mes") @db.VarChar(7)
+  estado        EstadoCoberturaMes @default(BORRADOR) @map("tcme_estado")
+  publicadoPor  Int?               @map("tcme_publicado_por")
+  publicadoEn   DateTime?          @map("tcme_publicado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime           @default(now()) @updatedAt @map("tcme_actualizado_en") @db.Timestamptz(3)
+
+  @@map("t_turno_conductor_mes")
+}
+
+/// Activación de un conductor LIBRE para un día (horas extra, 2026-10-06).
+model ActivacionConductor {
+  id          Int      @id @default(autoincrement()) @map("acco_id")
+  conductorId Int      @map("cond_id")
+  fecha       DateTime @map("acco_fecha") @db.Date
+  motivo      String   @map("acco_motivo") @db.VarChar(220)
+  activadoPor Int      @map("acco_activado_por")
+  creadoEn    DateTime @default(now()) @map("acco_creado_en") @db.Timestamptz(3)
+
+  conductor Conductor @relation(fields: [conductorId], references: [id], onDelete: Cascade, map: "fk_activacion_conductor")
+
+  @@unique([conductorId, fecha], map: "uq_activacion_conductor_fecha")
+  @@map("t_activacion_conductor")
+}
+
+/// Estado de una cita de taller de un vehiculo (2026-10-06).
+enum EstadoMantenimiento {
+  PROGRAMADO
+  EN_TALLER
+  LISTO
+
+  @@map("e_estado_mantenimiento")
+}
+
+/// Checklist diario del conductor antes de salir (Art. 9, Reglamento de Control de Vehiculos).
+model ChecklistVehiculo {
+  id                Int      @id @default(autoincrement()) @map("chve_id")
+  vehiculoId        Int      @map("vehi_id")
+  conductorId       Int      @map("cond_id")
+  fecha             DateTime @map("chve_fecha") @db.Date
+  items             Json     @map("chve_items") @db.JsonB
+  observacion       String?  @map("chve_observacion") @db.VarChar(400)
+  kilometrajeSalida Int?     @map("chve_km_salida")
+  registradoPor     Int      @map("chve_registrado_por")
+  creadoEn          DateTime @default(now()) @map("chve_creado_en") @db.Timestamptz(3)
+
+  vehiculo  Vehiculo  @relation(fields: [vehiculoId], references: [id], onDelete: Cascade, map: "fk_checklist_vehiculo")
+  conductor Conductor @relation(fields: [conductorId], references: [id], onDelete: Cascade, map: "fk_checklist_conductor")
+
+  @@unique([vehiculoId, conductorId, fecha], map: "uq_checklist_vehi_cond_fecha")
+  @@index([fecha], map: "idx_checklist_fecha")
+  @@map("t_checklist_vehiculo")
+}
+
+/// Lectura del kilometraje de un vehiculo por dia.
+model KilometrajeVehiculo {
+  id            Int      @id @default(autoincrement()) @map("kive_id")
+  vehiculoId    Int      @map("vehi_id")
+  conductorId   Int?     @map("cond_id")
+  fecha         DateTime @map("kive_fecha") @db.Date
+  kilometraje   Int      @map("kive_km")
+  registradoPor Int      @map("kive_registrado_por")
+  creadoEn      DateTime @default(now()) @map("kive_creado_en") @db.Timestamptz(3)
+
+  vehiculo  Vehiculo   @relation(fields: [vehiculoId], references: [id], onDelete: Cascade, map: "fk_kilometraje_vehiculo")
+  conductor Conductor? @relation(fields: [conductorId], references: [id], onDelete: SetNull, map: "fk_kilometraje_conductor")
+
+  @@unique([vehiculoId, fecha], map: "uq_kilometraje_vehi_fecha")
+  @@map("t_kilometraje_vehiculo")
+}
+
+/// Vale de combustible entregado a un conductor ($10 o $20).
+model ValeCombustible {
+  id            Int      @id @default(autoincrement()) @map("vaco_id")
+  conductorId   Int      @map("cond_id")
+  vehiculoId    Int      @map("vehi_id")
+  fecha         DateTime @map("vaco_fecha") @db.Date
+  monto         Int      @map("vaco_monto") @db.SmallInt
+  numero        String?  @map("vaco_numero") @db.VarChar(40)
+  registradoPor Int      @map("vaco_registrado_por")
+  creadoEn      DateTime @default(now()) @map("vaco_creado_en") @db.Timestamptz(3)
+
+  conductor Conductor @relation(fields: [conductorId], references: [id], onDelete: Restrict, map: "fk_vale_conductor")
+  vehiculo  Vehiculo  @relation(fields: [vehiculoId], references: [id], onDelete: Restrict, map: "fk_vale_vehiculo")
+
+  @@index([fecha], map: "idx_vale_fecha")
+  @@index([conductorId, fecha], map: "idx_vale_conductor_fecha")
+  @@map("t_vale_combustible")
 }

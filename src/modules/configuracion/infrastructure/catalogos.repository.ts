@@ -9,11 +9,11 @@
  *
  * Único punto del submódulo que toca PrismaService para los catálogos.
  *
- * CADA CATÁLOGO PERTENECE A UN FORMULARIO (2026-09-29): puntos, tipos de control e
- * instituciones llevan su `formularioId` propio, de modo que un formulario despliega
- * exactamente los suyos (RN-16) sin tablas puente. Solo la ZONAL sigue siendo global —es una
- * zona geográfica de la ciudad, referenciada por el personal y la flota—; un formulario "usa"
- * las zonales donde tiene algún punto, derivado de sus puntos.
+ * CADA CATÁLOGO PERTENECE A UN FORMULARIO: puntos, tipos de control e instituciones llevan su
+ * `formularioId` propio (2026-09-29), y desde el 2026-10-13 también las ZONALES, en
+ * `t_zonal_formulario`. `t_zonal` queda como la ZONA DE LA CIUDAD —la que usan el personal, la
+ * flota y Transporte para reconocer el mismo sitio entre formularios—; la administración y el
+ * registro trabajan con la zonal DEL formulario, que corresponde a una zona.
  */
 
 import { Injectable } from '@nestjs/common';
@@ -23,14 +23,18 @@ import type {
   PuntoEncuentro,
   TipoControl,
   Zonal,
+  ZonalFormulario,
 } from '@prisma/client';
 
 import { RepositorioPrisma } from '../../../common/persistencia/repositorio-prisma';
 import { PrismaService } from '../../../prisma/prisma.service';
 
-/** Punto de encuentro con su zonal. Pertenece a UN formulario por su `formularioId`. */
+/**
+ * Punto de encuentro con su zona de la ciudad y con la zonal DE SU FORMULARIO, que es la que da
+ * el nombre que ve ese formulario (2026-10-13).
+ */
 export type PuntoConZonal = Prisma.PuntoEncuentroGetPayload<{
-  include: { zonal: true };
+  include: { zonal: true; zonalFormulario: true };
 }>;
 
 /** Un tipo de control pertenece a UN formulario por su `formularioId` directo. */
@@ -46,6 +50,52 @@ export interface CatalogosDelimitados {
   instituciones: InstitucionDelimitada[];
 }
 
+/*
+  LA LISTA DE ADMINISTRACIÓN TRAE LOS USOS EN LA MISMA CONSULTA (rediseño de P-08, 2026-10-12).
+  `_count` de Prisma resuelve el conteo con una subconsulta por relación dentro del mismo
+  `findMany`: la pantalla sabe qué se puede eliminar sin una consulta por fila.
+*/
+export type PuntoAdmin = Prisma.PuntoEncuentroGetPayload<{
+  include: {
+    zonal: true;
+    zonalFormulario: true;
+    _count: { select: { operativos: true } };
+  };
+}>;
+
+/** El tipo se usa por su columna única (`tico_id`) o por la tabla de varios tipos. */
+export type TipoControlAdmin = Prisma.TipoControlGetPayload<{
+  include: {
+    _count: { select: { operativos: true; operativosMultiples: true } };
+  };
+}>;
+
+export type InstitucionAdmin = Prisma.InstitucionGetPayload<{
+  include: { _count: { select: { operativos: true } } };
+}>;
+
+export interface CatalogosAdmin {
+  puntos: PuntoAdmin[];
+  tiposControl: TipoControlAdmin[];
+  instituciones: InstitucionAdmin[];
+}
+
+/** Una zonal de formulario con su zona de la ciudad. */
+export type ZonalDeFormulario = Prisma.ZonalFormularioGetPayload<{
+  include: { zona: true };
+}>;
+
+/**
+ * La zonal del formulario con la forma que espera el registro: el id es el de la ZONA —lo que
+ * guardan el operativo y la ficha de personal—, y el nombre y el estado, los del formulario.
+ */
+export const comoZonal = (fila: ZonalDeFormulario): Zonal => ({
+  ...fila.zona,
+  nombre: fila.nombre,
+  activo: fila.activo,
+  orden: fila.orden,
+});
+
 @Injectable()
 export class CatalogosRepository extends RepositorioPrisma {
   constructor(prisma: PrismaService) {
@@ -55,10 +105,8 @@ export class CatalogosRepository extends RepositorioPrisma {
   // ─────────────────────────── Lectura ───────────────────────────
 
   /**
-   * Las zonales, para ADMINISTRACION: P-08 la necesita entera para poder dar de alta el
-   * primer punto de una zonal que todavia no tiene ninguno, que es la razon de ser de esa
-   * pantalla. Por omision solo las vigentes; con `incluirInactivas` tambien las
-   * desactivadas, que es lo que esa pantalla pide para reactivarlas.
+   * Las ZONAS DE LA CIUDAD, para las pantallas que no son de un formulario: la ficha de personal,
+   * la cobertura, la flota y el mantenimiento (`GET /zonales`). Por omisión solo las vigentes.
    *
    * Para registrar un operativo NO se usa esta, sino `zonalesDeFormulario`.
    */
@@ -69,58 +117,138 @@ export class CatalogosRepository extends RepositorioPrisma {
     });
   }
 
-  async crearZonal(
-    datos: { codigo: string; nombre: string; orden: number; esDmq: boolean },
-    cliente: Prisma.TransactionClient,
-  ): Promise<Zonal> {
-    return cliente.zonal.create({ data: datos });
+  // ───────────────── Zonales DE UN FORMULARIO (2026-10-13) ─────────────────
+
+  /** Las zonales del formulario PARA ADMINISTRAR, con las desactivadas, en el orden de la ciudad. */
+  async zonalesDelFormulario(
+    formularioId: number,
+  ): Promise<ZonalDeFormulario[]> {
+    return this.prisma.zonalFormulario.findMany({
+      where: { formularioId },
+      include: { zona: true },
+      orderBy: [{ orden: 'asc' }, { nombre: 'asc' }],
+    });
   }
 
-  async actualizarZonal(
+  async buscarZonalDeFormulario(
+    formularioId: number,
+    zonaId: number,
+  ): Promise<ZonalDeFormulario | null> {
+    return this.prisma.zonalFormulario.findUnique({
+      where: { formularioId_zonaId: { formularioId, zonaId } },
+      include: { zona: true },
+    });
+  }
+
+  async buscarZona(zonaId: number): Promise<Zonal | null> {
+    return this.prisma.zonal.findUnique({ where: { id: zonaId } });
+  }
+
+  /** Las zonas de la ciudad vigentes que el formulario TODAVÍA no tiene: lo que ofrece el alta. */
+  async zonasDisponibles(formularioId: number): Promise<Zonal[]> {
+    return this.prisma.zonal.findMany({
+      where: { activo: true, formularios: { none: { formularioId } } },
+      orderBy: { orden: 'asc' },
+    });
+  }
+
+  /** Para comprobar el nombre duplicado DENTRO del formulario, con la normalización aparte. */
+  async nombresDeZonalesDeFormulario(
+    formularioId: number,
+  ): Promise<{ id: number; zonaId: number; nombre: string }[]> {
+    return this.prisma.zonalFormulario.findMany({
+      where: { formularioId },
+      select: { id: true, zonaId: true, nombre: true },
+    });
+  }
+
+  async crearZonalDeFormulario(
+    datos: {
+      formularioId: number;
+      zonaId: number;
+      nombre: string;
+      orden: number;
+    },
+    cliente: Prisma.TransactionClient,
+  ): Promise<ZonalFormulario> {
+    return cliente.zonalFormulario.create({ data: datos });
+  }
+
+  async actualizarZonalDeFormulario(
     id: number,
     datos: { nombre?: string; activo?: boolean },
     cliente: Prisma.TransactionClient,
-  ): Promise<Zonal> {
-    return cliente.zonal.update({ where: { id }, data: datos });
+  ): Promise<ZonalFormulario> {
+    return cliente.zonalFormulario.update({ where: { id }, data: datos });
   }
 
-  /** Para comprobar el nombre duplicado, con acentos y mayúsculas normalizados aparte. */
-  async nombresDeZonales(): Promise<{ id: number; nombre: string }[]> {
-    return this.prisma.zonal.findMany({ select: { id: true, nombre: true } });
+  /** Borra SOLO la zonal del formulario. La zona de la ciudad no se borra desde aquí, nunca. */
+  async eliminarZonalDeFormulario(
+    id: number,
+    cliente: Prisma.TransactionClient,
+  ): Promise<void> {
+    await cliente.zonalFormulario.delete({ where: { id } });
   }
 
-  /** Para garantizar el código único que se autogenera del nombre. */
-  async codigosDeZonales(): Promise<string[]> {
-    const filas = await this.prisma.zonal.findMany({
-      select: { codigo: true },
+  /** Operativos DE ESE FORMULARIO que llevan la zona: lo que decide si su zonal se puede borrar. */
+  async contarOperativosDeFormularioConZona(
+    formularioId: number,
+    zonaId: number,
+  ): Promise<number> {
+    return this.prisma.operativoZonal.count({
+      where: { zonalId: zonaId, operativo: { formularioId } },
     });
-    return filas.map((fila) => fila.codigo);
   }
 
-  /** El orden de una zonal nueva es el siguiente al mayor: se agrega al final de la lista. */
-  async maxOrdenZonal(): Promise<number> {
-    const fila = await this.prisma.zonal.aggregate({ _max: { orden: true } });
-    return fila._max.orden ?? 0;
+  /** Por zona, cuántos operativos del formulario la llevan. Una consulta para toda la lista. */
+  async operativosPorZonaDeFormulario(
+    formularioId: number,
+  ): Promise<Map<number, number>> {
+    const filas = await this.prisma.operativoZonal.groupBy({
+      by: ['zonalId'],
+      where: { operativo: { formularioId } },
+      _count: { _all: true },
+    });
+    return new Map(filas.map((fila) => [fila.zonalId, fila._count._all]));
   }
 
-  async contarOperativosConZonal(zonalId: number): Promise<number> {
-    return this.prisma.operativoZonal.count({ where: { zonalId } });
+  /** Por zona, los puntos del formulario (todos) y los vigentes. Dos agrupaciones, ninguna por fila. */
+  async puntosPorZonaDeFormulario(
+    formularioId: number,
+  ): Promise<{ todos: Map<number, number>; activos: Map<number, number> }> {
+    const [todos, activos] = await Promise.all([
+      this.prisma.puntoEncuentro.groupBy({
+        by: ['zonalId'],
+        where: { formularioId },
+        _count: { _all: true },
+      }),
+      this.prisma.puntoEncuentro.groupBy({
+        by: ['zonalId'],
+        where: { formularioId, activo: true },
+        _count: { _all: true },
+      }),
+    ]);
+    const mapa = (filas: { zonalId: number; _count: { _all: number } }[]) =>
+      new Map(filas.map((fila) => [fila.zonalId, fila._count._all]));
+    return { todos: mapa(todos), activos: mapa(activos) };
   }
 
-  /** Cuántos puntos (activos o no) cuelgan de una zonal: bloquean su borrado físico. */
-  async contarPuntosDeZonal(zonalId: number): Promise<number> {
-    return this.prisma.puntoEncuentro.count({ where: { zonalId } });
+  /**
+   * Los puntos VIGENTES de la zonal EN ESE FORMULARIO: lo que se desactiva en cascada al dar de
+   * baja la zonal del formulario. Los de otros formularios en la misma zona no se tocan.
+   */
+  async puntosActivosDeZonalDeFormulario(
+    formularioId: number,
+    zonaId: number,
+  ): Promise<{ id: number; nombre: string }[]> {
+    return this.prisma.puntoEncuentro.findMany({
+      where: { formularioId, zonalId: zonaId, activo: true },
+      select: { id: true, nombre: true },
+    });
   }
 
   // ─────────── Borrado FÍSICO (baja definitiva). Solo lo llama el servicio tras comprobar
   // que el valor no se usó en ningún operativo (las FK hacia el catálogo son RESTRICT). ───────────
-
-  async eliminarZonal(
-    id: number,
-    cliente: Prisma.TransactionClient,
-  ): Promise<void> {
-    await cliente.zonal.delete({ where: { id } });
-  }
 
   async eliminarPunto(
     id: number,
@@ -144,38 +272,22 @@ export class CatalogosRepository extends RepositorioPrisma {
   }
 
   /**
-   * Los puntos VIGENTES de una zonal, sin distinguir formulario. Es lo que se desactiva en
-   * cascada al dar de baja la zonal: un punto pertenece a la zonal por `zonalId`, y la zonal
-   * es global, así que su baja arrastra los puntos de todos los formularios que cuelgan de ella.
-   */
-  async puntosActivosDeZonal(
-    zonalId: number,
-  ): Promise<{ id: number; nombre: string }[]> {
-    return this.prisma.puntoEncuentro.findMany({
-      where: { zonalId, activo: true },
-      select: { id: true, nombre: true },
-    });
-  }
-
-  /**
-   * Las zonales que ese formulario ofrece de verdad: aquellas donde tiene al menos un
-   * punto de encuentro vigente. Se deriva de los PUNTOS del formulario (por su `formularioId`
-   * directo): se agrega un punto en una zonal y la zonal aparece; se retira el último y
-   * desaparece. El punto de encuentro es obligatorio al registrar, así que una zonal sin
-   * puntos es un callejón sin salida y no se ofrece.
+   * Las zonales que ese formulario ofrece AL REGISTRAR: las suyas vigentes —con su zona de la
+   * ciudad vigente— que tienen al menos un punto de encuentro vigente. El punto es obligatorio al
+   * registrar, así que una zonal sin puntos es un callejón sin salida y no se ofrece (RN-18).
    */
   async zonalesDeFormulario(formularioId: number): Promise<Zonal[]> {
-    return this.prisma.zonal.findMany({
+    const filas = await this.prisma.zonalFormulario.findMany({
       where: {
+        formularioId,
         activo: true,
-        puntos: { some: { activo: true, formularioId } },
+        zona: { activo: true },
+        puntos: { some: { activo: true } },
       },
-      orderBy: { orden: 'asc' },
+      include: { zona: true },
+      orderBy: [{ orden: 'asc' }, { nombre: 'asc' }],
     });
-  }
-
-  async buscarZonal(zonalId: number): Promise<Zonal | null> {
-    return this.prisma.zonal.findUnique({ where: { id: zonalId } });
+    return filas.map(comoZonal);
   }
 
   async catalogosDeFormulario(
@@ -184,7 +296,7 @@ export class CatalogosRepository extends RepositorioPrisma {
     const [puntos, tipos, instituciones] = await Promise.all([
       this.prisma.puntoEncuentro.findMany({
         where: { activo: true, formularioId },
-        include: { zonal: true },
+        include: { zonal: true, zonalFormulario: true },
         orderBy: { nombre: 'asc' },
       }),
       this.prisma.tipoControl.findMany({
@@ -208,19 +320,27 @@ export class CatalogosRepository extends RepositorioPrisma {
    */
   async catalogosDeFormularioConInactivos(
     formularioId: number,
-  ): Promise<CatalogosDelimitados> {
+  ): Promise<CatalogosAdmin> {
     const [puntos, tipos, instituciones] = await Promise.all([
       this.prisma.puntoEncuentro.findMany({
         where: { formularioId },
-        include: { zonal: true },
+        include: {
+          zonal: true,
+          zonalFormulario: true,
+          _count: { select: { operativos: true } },
+        },
         orderBy: [{ activo: 'desc' }, { nombre: 'asc' }],
       }),
       this.prisma.tipoControl.findMany({
         where: { formularioId },
+        include: {
+          _count: { select: { operativos: true, operativosMultiples: true } },
+        },
         orderBy: [{ activo: 'desc' }, { nombre: 'asc' }],
       }),
       this.prisma.institucion.findMany({
         where: { formularioId },
+        include: { _count: { select: { operativos: true } } },
         orderBy: [{ activo: 'desc' }, { sigla: 'asc' }],
       }),
     ]);
@@ -261,13 +381,16 @@ export class CatalogosRepository extends RepositorioPrisma {
     });
   }
 
-  /** Las siglas de instituciones del formulario: la unicidad de la sigla es por formulario. */
+  /**
+   * Siglas y denominaciones de las instituciones del formulario: las dos son únicas dentro de él
+   * (la denominación desde el 2026-10-12), comparadas sin tildes ni mayúsculas.
+   */
   async siglasDeInstitucionesDeFormulario(
     formularioId: number,
-  ): Promise<{ id: number; sigla: string }[]> {
+  ): Promise<{ id: number; sigla: string; nombre: string }[]> {
     return this.prisma.institucion.findMany({
       where: { formularioId },
-      select: { id: true, sigla: true },
+      select: { id: true, sigla: true, nombre: true },
     });
   }
 
@@ -340,8 +463,18 @@ export class CatalogosRepository extends RepositorioPrisma {
     });
   }
 
+  /**
+   * Un operativo lleva el tipo por su columna única (`tico_id`) O por la tabla de varios tipos
+   * (`t_operativo_tipo_control`), que es la que se llena desde que los nueve formularios admiten
+   * varios (2026-09-14). Contar solo la columna decía «0 operativos» de tipos usados, y el borrado
+   * llegaba a la FK de la base en vez de al 409 con su motivo (defecto corregido el 2026-10-12).
+   */
   async contarOperativosConTipoControl(tipoId: number): Promise<number> {
-    return this.prisma.operativo.count({ where: { tipoControlId: tipoId } });
+    return this.prisma.operativo.count({
+      where: {
+        OR: [{ tipoControlId: tipoId }, { tiposControl: { some: { tipoId } } }],
+      },
+    });
   }
 
   async contarOperativosConInstitucion(institucionId: number): Promise<number> {

@@ -42,12 +42,38 @@ describe('puedeVerParametro', () => {
     expect(puedeVerParametro('JORNADA_MAXIMA_HORAS', ambos)).toBe(true);
   });
 
-  it('son exactamente las cuatro ventanas de turno', () => {
+  it('son las cuatro ventanas de turno y los dos avisos de la cobertura (2026-10-05)', () => {
     expect([...PARAMETROS_SOLO_DMIT].sort()).toEqual([
+      'COBERTURA_MAX_DIAS_SIN_DESCANSO',
+      'COBERTURA_PERMITE_NOCTURNO_A_DIURNO',
       'HORA_TURNO_DIURNO_FIN',
       'HORA_TURNO_DIURNO_INICIO',
       'HORA_TURNO_NOCTURNO_FIN',
       'HORA_TURNO_NOCTURNO_INICIO',
     ]);
+  });
+});
+
+describe('puedeVerParametro · parámetros de la DAF (2026-10-07)', () => {
+  const DAF = [RolDepartamental.ADMINISTRADOR_DAF];
+  const CLAVES_DAF = [
+    'DAF_DURACION_TRAMO_MIN',
+    'DAF_MIN_CONDUCTORES_DIA',
+    'DAF_PERMITE_NOCHE_A_DIA',
+    'DAF_DIAS_AVISO_VENCIMIENTO',
+  ];
+
+  it('los ve el ADMINISTRADOR_DAF, el general y el DMIP; no el DMIT', () => {
+    for (const clave of CLAVES_DAF) {
+      expect(puedeVerParametro(clave, DAF)).toBe(true);
+      expect(puedeVerParametro(clave, GENERAL)).toBe(true);
+      expect(puedeVerParametro(clave, DMIP)).toBe(true);
+      expect(puedeVerParametro(clave, DMIT)).toBe(false);
+    }
+  });
+
+  it('el ADMINISTRADOR_DAF NO ve la configuración general ni los turnos de Instrucción', () => {
+    expect(puedeVerParametro('JORNADA_MAXIMA_HORAS', DAF)).toBe(false);
+    expect(puedeVerParametro('HORA_TURNO_DIURNO_INICIO', DAF)).toBe(false);
   });
 });

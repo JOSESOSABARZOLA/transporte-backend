@@ -61,7 +61,7 @@ services:
     # El compose de desarrollo publica "5434:5432" con el comentario «evita chocar con
     # Instruccion en 5433». Eso es cierto en una maquina de desarrollo y FALSO en el
     # servidor: el procedimiento de despliegue de Instruccion dice que alli movieron su
-    # base al 5434, precisamente porque el 5433 ya estaba ocupado. En 172.20.136.127 el
+    # base al 5434, precisamente porque el 5433 ya estaba ocupado. En el servidor actual el
     # 5434 es suyo, y `docker compose up` fallaria al enlazar el puerto.
     #
     # Pero el motivo de fondo no es la colision: es que la base NO TIENE POR QUE ESTAR

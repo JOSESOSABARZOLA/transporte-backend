@@ -12,6 +12,7 @@ import 'dotenv/config';
 
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 
@@ -45,7 +46,16 @@ async function bootstrap() {
 
   // bufferLogs retiene los mensajes de arranque anteriores a useLogger y los vuelca
   // por el registrador definitivo. Sin esto, las primeras líneas salen sin formato.
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bufferLogs: true,
+  });
+
+  // Detrás del Gateway y del nginx del frontend (TRUST_PROXY, 2026-10-16): `req.ip` pasa a ser
+  // la IP del usuario y no la del último proxy, así el límite de peticiones cuenta a cada uno.
+  // Sin la variable no se toca nada. Ver `saltosProxy` en app.config.ts.
+  if (appConfig.saltosProxy !== null) {
+    app.set('trust proxy', appConfig.saltosProxy);
+  }
 
   // PRIMERO de todo: el identificador de correlación debe estar disponible para
   // cualquier petición, incluidas las que no emparejan con ninguna ruta.

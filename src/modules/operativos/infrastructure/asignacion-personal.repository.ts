@@ -135,4 +135,53 @@ export class AsignacionPersonalRepository extends RepositorioPrisma {
 
     return eliminadas.count > 0;
   }
+
+  /**
+   * Guarda (o reemplaza) la COPIA del trámite de Inspección de una asignación (2026-10-07).
+   *
+   * Es una copia: si Inspección cambia el trámite después, la orden sigue diciendo lo que se eligió.
+   * Una por asignación (`uq_tramite_inspeccion_asignacion`), así que se hace `upsert`.
+   */
+  async guardarTramite(
+    asignacionId: number,
+    tramite: {
+      codigoTramite: string;
+      nroSitra: string | null;
+      predio: string | null;
+      zonal: string | null;
+      materia: string | null;
+      tipoTramite: string | null;
+      estado: string | null;
+    },
+    tomadoPor: number,
+    cliente: Prisma.TransactionClient,
+  ): Promise<void> {
+    const datos = {
+      codigoTramite: tramite.codigoTramite,
+      nroSitra: tramite.nroSitra,
+      predio: tramite.predio,
+      zonal: tramite.zonal,
+      materia: tramite.materia,
+      tipoTramite: tramite.tipoTramite,
+      estado: tramite.estado,
+      tomadoPor,
+      tomadoEn: new Date(),
+    };
+    await cliente.tramiteInspeccion.upsert({
+      where: { asignacionId },
+      create: { asignacionId, ...datos },
+      update: datos,
+    });
+  }
+
+  /** Quita el trámite de una asignación. Devuelve `false` si no tenía. */
+  async quitarTramite(
+    asignacionId: number,
+    cliente: Prisma.TransactionClient,
+  ): Promise<boolean> {
+    const borrados = await cliente.tramiteInspeccion.deleteMany({
+      where: { asignacionId },
+    });
+    return borrados.count > 0;
+  }
 }

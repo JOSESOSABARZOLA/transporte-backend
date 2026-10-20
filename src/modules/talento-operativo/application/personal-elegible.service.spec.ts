@@ -515,3 +515,72 @@ describe('PersonalElegibleService · señales de fatiga y equidad', () => {
     expect(rojo?.elegible).toBe(true);
   });
 });
+
+describe('PersonalElegibleService · areasAsignables (alcance de los trámites, 2026-10-07)', () => {
+  const formulario = (areas: AreaPersonal[], filtraPersonalPorRol = true) => ({
+    filtraPersonalPorRol,
+    areas: areas.map((area) => ({ area, esCompartida: false })),
+  });
+
+  const armarAlcance = (
+    permitidos: {
+      formulario: ReturnType<typeof formulario>;
+      acceso: 'ESCRITURA' | 'COMPARTIDO' | 'LECTURA';
+    }[],
+  ) =>
+    new PersonalElegibleService(
+      {
+        obtenerPermitidos: jest.fn().mockResolvedValue(permitidos),
+      } as unknown as FormulariosService,
+      {} as unknown as FuncionariosService,
+      {} as unknown as DisponibilidadService,
+      {} as unknown as ElegibilidadService,
+    );
+
+  it('une las áreas de los formularios que el rol escribe, recortadas a las suyas', async () => {
+    const servicio = armarAlcance([
+      {
+        formulario: formulario([AreaPersonal.GENERAL, AreaPersonal.TECNICO]),
+        acceso: 'ESCRITURA',
+      },
+      {
+        formulario: formulario([AreaPersonal.OPERATIVOS]),
+        acceso: 'ESCRITURA',
+      },
+    ]);
+
+    const areas = await servicio.areasAsignables([
+      RolDepartamental.DMIP_INSPECCIONES,
+    ]);
+
+    expect(areas.sort()).toEqual(
+      [AreaPersonal.GENERAL, AreaPersonal.TECNICO].sort(),
+    );
+  });
+
+  it('un formulario solo en LECTURA no da alcance', async () => {
+    const servicio = armarAlcance([
+      {
+        formulario: formulario([AreaPersonal.GENERAL]),
+        acceso: 'LECTURA',
+      },
+    ]);
+
+    expect(
+      await servicio.areasAsignables([RolDepartamental.DMIP_INSPECCIONES]),
+    ).toEqual([]);
+  });
+
+  it('un formulario que no filtra por rol da todas sus áreas', async () => {
+    const servicio = armarAlcance([
+      {
+        formulario: formulario([AreaPersonal.GENERAL], false),
+        acceso: 'COMPARTIDO',
+      },
+    ]);
+
+    expect(
+      await servicio.areasAsignables([RolDepartamental.DMIT_INSTRUCTOR]),
+    ).toEqual([AreaPersonal.GENERAL]);
+  });
+});

@@ -17,9 +17,11 @@ import {
 } from '@prisma/client';
 
 import type { AuditoriaService } from '../../../common/auditoria/auditoria.service';
+import { CODIGOS_ERROR } from '../../../common/errors/codigos-error';
 import {
   AutorizacionError,
   RecursoNoEncontradoError,
+  ReglaNegocioError,
   ValidacionError,
 } from '../../../common/errors/errores-dominio';
 import type { DisponibilidadRepository } from '../infrastructure/disponibilidad.repository';
@@ -29,6 +31,11 @@ import type { FuncionariosService } from './funcionarios.service';
 import { aFechaUtc, seSolapan } from './reglas-personal';
 
 const CLIENTE = { marca: 'transaccion' };
+/**
+ * «Hoy» en estas pruebas: dentro del período de `periodo()` (1–15 de agosto), así que la
+ * ausencia está EN CURSO y se puede quitar. Las PASADAS ya no (B7, 2026-10-08).
+ */
+const HOY = '2026-08-03';
 const dia = (texto: string): Date => aFechaUtc(texto) as Date;
 
 const periodo = (parcial: Partial<Disponibilidad> = {}): Disponibilidad =>
@@ -230,8 +237,13 @@ describe('DisponibilidadService · registro', () => {
       )
       .catch((error: unknown) => error);
 
-    expect(fallo).toBeInstanceOf(ValidacionError);
-    expect((fallo as ValidacionError).message).toContain('2026-08-01');
+    // 409 desde el rediseño de P-07: choca con lo registrado, no es un dato mal escrito.
+    expect(fallo).toBeInstanceOf(ReglaNegocioError);
+    expect((fallo as ReglaNegocioError).statusCode).toBe(409);
+    expect((fallo as ReglaNegocioError).code).toBe(
+      CODIGOS_ERROR.AUSENCIA_SOLAPADA,
+    );
+    expect((fallo as ReglaNegocioError).message).toContain('2026-08-01');
     expect(crear).not.toHaveBeenCalled();
   });
 
@@ -399,7 +411,7 @@ describe('DisponibilidadService · retiro', () => {
   it('elimina el período y deja constancia de que existió', async () => {
     const { servicio, eliminar, registrar } = armar([periodo()]);
 
-    await servicio.retirar(1, 1, 6, COMO_ADMIN);
+    await servicio.retirar(1, 1, 6, COMO_ADMIN, HOY);
 
     expect(eliminar).toHaveBeenCalledWith(1, CLIENTE);
     expect(registrar).toHaveBeenCalledWith(
@@ -426,6 +438,37 @@ describe('DisponibilidadService · retiro', () => {
       RecursoNoEncontradoError,
     );
     expect(eliminar).not.toHaveBeenCalled();
+  });
+
+  it('B7 · una ausencia PASADA no se quita: 409 AUSENCIA_PASADA', async () => {
+    const { servicio, eliminar } = armar([periodo()]);
+
+    const fallo = await capturar(
+      servicio.retirar(1, 1, 6, COMO_ADMIN, '2026-08-16'),
+    );
+
+    expect(fallo).toBeInstanceOf(ReglaNegocioError);
+    expect((fallo as ReglaNegocioError).statusCode).toBe(409);
+    expect((fallo as ReglaNegocioError).code).toBe(
+      CODIGOS_ERROR.AUSENCIA_PASADA,
+    );
+    expect(eliminar).not.toHaveBeenCalled();
+  });
+
+  it('la que termina HOY sigue en curso y sí se quita', async () => {
+    const { servicio, eliminar } = armar([periodo()]);
+
+    await servicio.retirar(1, 1, 6, COMO_ADMIN, '2026-08-15');
+
+    expect(eliminar).toHaveBeenCalled();
+  });
+
+  it('una PRÓXIMA también se quita', async () => {
+    const { servicio, eliminar } = armar([periodo()]);
+
+    await servicio.retirar(1, 1, 6, COMO_ADMIN, '2026-07-20');
+
+    expect(eliminar).toHaveBeenCalled();
   });
 
   it('no retira un período que no es de una persona', async () => {
@@ -570,7 +613,7 @@ describe('DisponibilidadService · quién retira una ausencia', () => {
       ausencia: { registradoPor: 6 },
     });
 
-    await servicio.retirar(1, 1, 6, COMO_OPERATIVOS);
+    await servicio.retirar(1, 1, 6, COMO_OPERATIVOS, HOY);
 
     expect(eliminar).toHaveBeenCalled();
   });
@@ -594,8 +637,123 @@ describe('DisponibilidadService · quién retira una ausencia', () => {
       ausencia: { registradoPor: 99 },
     });
 
-    await servicio.retirar(1, 1, 6, [...COMO_ADMIN]);
+    await servicio.retirar(1, 1, 6, [...COMO_ADMIN], HOY);
 
     expect(eliminar).toHaveBeenCalled();
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════
+ * REDISEÑO DE P-07 (2026-10-08) · B5 y B6.
+ *
+ * B5 · las ausencias de toda la lista en UNA consulta, acotada a las direcciones al alcance
+ * y solo con los estados que excluyen. B6 · los operativos de una persona en un rango, con
+ * la MISMA vara de alcance que sus ausencias (H-01).
+ * ═══════════════════════════════════════════════════════════════════════════════
+ */
+describe('DisponibilidadService · ausencias del maestro y operativos (rediseño P-07)', () => {
+  const armarLectura = (direccion: RolDepartamental) => {
+    const vigentesYProximas = jest.fn().mockResolvedValue([]);
+    const operativosEntre = jest.fn().mockResolvedValue([
+      {
+        operativoId: 9,
+        identificador: 'OCPMO-001',
+        fecha: dia('2026-08-04'),
+      },
+    ]);
+    const servicio = new DisponibilidadService(
+      {
+        vigentesYProximas,
+        operativosEntre,
+      } as unknown as DisponibilidadRepository,
+      {
+        obtener: jest.fn().mockResolvedValue({
+          id: 1,
+          apellidos: 'SEGOVIA',
+          nombres: 'MARIA',
+          direccion,
+        } as Funcionario),
+        ...alcanceDeLosRoles,
+      } as unknown as FuncionariosService,
+      { registrar: jest.fn() } as unknown as AuditoriaService,
+    );
+    return { servicio, vigentesYProximas, operativosEntre };
+  };
+
+  it('B5 · pide una sola consulta con las direcciones al alcance y los estados que excluyen', async () => {
+    const { servicio, vigentesYProximas } = armarLectura(
+      RolDepartamental.DMIP_OPERATIVOS,
+    );
+
+    await servicio.delMaestro(dia('2026-08-03'), [...COMO_ADMIN]);
+
+    expect(vigentesYProximas).toHaveBeenCalledTimes(1);
+    const [desde, direcciones, estados] = vigentesYProximas.mock.calls[0] as [
+      Date,
+      RolDepartamental[],
+      EstadoDisponibilidad[],
+    ];
+    expect(desde).toEqual(dia('2026-08-03'));
+    expect(direcciones).toEqual(
+      expect.arrayContaining([
+        RolDepartamental.DMIP_OPERATIVOS,
+        RolDepartamental.DMIP_INSPECCIONES,
+      ]),
+    );
+    expect(direcciones).not.toContain(RolDepartamental.DMIT_INSTRUCTOR);
+    expect(estados).toEqual(
+      expect.arrayContaining([
+        EstadoDisponibilidad.LICENCIA,
+        EstadoDisponibilidad.CAPACITACION,
+        EstadoDisponibilidad.COMISION_SERVICIOS,
+      ]),
+    );
+    expect(estados).not.toContain(EstadoDisponibilidad.DISPONIBLE);
+  });
+
+  it('B6 · devuelve los operativos de su gente en el rango', async () => {
+    const { servicio, operativosEntre } = armarLectura(
+      RolDepartamental.DMIP_OPERATIVOS,
+    );
+
+    const operativos = await servicio.operativosDe(
+      1,
+      dia('2026-08-01'),
+      dia('2026-08-05'),
+      [...COMO_ADMIN],
+    );
+
+    expect(operativos).toHaveLength(1);
+    expect(operativosEntre).toHaveBeenCalledWith(
+      1,
+      dia('2026-08-01'),
+      dia('2026-08-05'),
+    );
+  });
+
+  it('B6 · los de otra dirección no se consultan: 403', async () => {
+    const { servicio, operativosEntre } = armarLectura(
+      RolDepartamental.DMIT_INSTRUCTOR,
+    );
+
+    const fallo = await capturar(
+      servicio.operativosDe(1, dia('2026-08-01'), dia('2026-08-05'), [
+        ...COMO_ADMIN,
+      ]),
+    );
+
+    expect(fallo).toBeInstanceOf(AutorizacionError);
+    expect(operativosEntre).not.toHaveBeenCalled();
+  });
+
+  it('B6 · un rango invertido es un 400', async () => {
+    const { servicio } = armarLectura(RolDepartamental.DMIP_OPERATIVOS);
+
+    await expect(
+      servicio.operativosDe(1, dia('2026-08-05'), dia('2026-08-01'), [
+        ...COMO_ADMIN,
+      ]),
+    ).rejects.toBeInstanceOf(ValidacionError);
   });
 });

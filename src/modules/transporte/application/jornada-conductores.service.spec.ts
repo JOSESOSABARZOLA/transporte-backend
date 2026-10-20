@@ -166,3 +166,26 @@ describe('P-14 · los conductores ausentes', () => {
     expect(jornada[1].disponible).toBe(false);
   });
 });
+
+describe('P-14 · la unidad se nombra en palabras (2026-10-07)', () => {
+  it('cada tramo lleva el nombre legible de la unidad y conserva el código', async () => {
+    const jornada = await armar({
+      conducciones: [
+        {
+          ...conduccion(10, 'OCPMO-001', '08:00', '09:00', 1),
+          creadoPorRol: 'DMIP_OPERATIVOS',
+        },
+        conduccion(10, 'IG-002', '10:00', '11:00', 1),
+      ],
+    }).componer(JORNADA);
+
+    expect(jornada[0].tramos[0]).toMatchObject({
+      departamento: 'DMIP · Unidad de Operativos',
+      departamentoCodigo: 'DMIP_OPERATIVOS',
+    });
+    expect(jornada[0].tramos[1]).toMatchObject({
+      departamento: null,
+      departamentoCodigo: null,
+    });
+  });
+});

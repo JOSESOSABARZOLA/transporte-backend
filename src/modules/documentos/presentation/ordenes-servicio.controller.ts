@@ -26,10 +26,8 @@ import {
   Controller,
   Get,
   Header,
-  HttpCode,
   Param,
   ParseIntPipe,
-  Patch,
   Post,
   Put,
   Query,
@@ -53,14 +51,11 @@ import type {
 import type { OrdenConOperativo } from '../infrastructure/orden-servicio.repository';
 import {
   OrdenServicioService,
-  type ConfigCuadroOrden,
   type SugerenciaFirmante,
   type DatosGenerales,
   type PlantillaDeDirector,
 } from '../application/orden-servicio.service';
-import { CompletarDatosPersonaDto } from './dto/completar-datos-persona.dto';
 import { DirectorGuard } from './director.guard';
-import { ConfigurarOrdenCuadroDto } from './dto/configurar-orden-cuadro.dto';
 import { EditarMemorandoDto } from './dto/editar-memorando.dto';
 import { GuardarPlantillaDto } from './dto/guardar-plantilla.dto';
 import { PrevisualizarPlantillaDto } from './dto/previsualizar-plantilla.dto';
@@ -274,60 +269,6 @@ export class OrdenesServicioController {
     );
 
     return new StreamableFile(pdf);
-  }
-
-  /**
-   * Completa el CARGO del destinatario de una orden (E21, origen 'persona'). Es la acción «Completar
-   * datos» del aviso de borrador: actualiza SOLO el cargo que aparece en ESA orden —no toca la ficha
-   * del módulo de Personal— y, con el resto de datos completos, la orden pasa a Vigente con su número.
-   * Solo Dirección (permiso `ordenes:gestionar`).
-   */
-  @Patch('ordenes-servicio/:codigo/datos-persona')
-  @RequierePermiso('ordenes:gestionar')
-  @UseGuards(DirectorGuard)
-  @HttpCode(204)
-  async completarDatosPersona(
-    @Param('codigo') codigo: string,
-    @Body() dto: CompletarDatosPersonaDto,
-    @UsuarioActual() usuario: UsuarioAutenticado,
-  ): Promise<void> {
-    await this.ordenes.completarDatosPersona(
-      codigo,
-      dto.cargo,
-      usuario.usuarioId,
-    );
-  }
-
-  /**
-   * La config del memorando de una jornada (número de memorando, NUT, «elaborado por»). Son del DÍA
-   * y las comparten todas las órdenes del cuadro (D13); el editor del cuadro las precarga. Solo
-   * Dirección (permiso `ordenes:gestionar`). La fecha viaja como texto AAAA-MM-DD (regla 12).
-   */
-  @Get('cuadro/:fecha/config-orden')
-  @RequierePermiso('ordenes:gestionar')
-  @UseGuards(DirectorGuard)
-  async obtenerConfigCuadro(
-    @Param('fecha') fecha: string,
-  ): Promise<ConfigCuadroOrden> {
-    return this.ordenes.obtenerConfigCuadro(exigirFecha(fecha));
-  }
-
-  /**
-   * Guarda la config del memorando de la jornada y PROMUEVE sus borradores (G): al completar estos
-   * datos del día, las órdenes del cuadro que ya no tengan faltantes pasan a VIGENTE con su número
-   * AMC-OS, en la misma transacción. Solo Dirección.
-   */
-  @Put('cuadro/:fecha/config-orden')
-  @RequierePermiso('ordenes:gestionar')
-  @UseGuards(DirectorGuard)
-  async guardarConfigCuadro(
-    @Param('fecha') fecha: string,
-    @Body() dto: ConfigurarOrdenCuadroDto,
-  ): Promise<ConfigCuadroOrden> {
-    return this.ordenes.guardarConfigCuadro(exigirFecha(fecha), {
-      nut: dto.nut ?? null,
-      elaboradoPor: dto.elaboradoPor ?? null,
-    });
   }
 
   /**

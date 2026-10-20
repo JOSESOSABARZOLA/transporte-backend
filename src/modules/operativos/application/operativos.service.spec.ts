@@ -15,6 +15,7 @@ import {
   PoliticaVehiculo,
   Prisma,
   RolDepartamental,
+  TipoTransporte,
 } from '@prisma/client';
 
 import type { AuditoriaService } from '../../../common/auditoria/auditoria.service';
@@ -34,6 +35,7 @@ import type { ParametroPoliticaService } from '../../configuracion/application/p
 import type { CuadroDiarioService } from '../../cuadro-diario/application/cuadro-diario.service';
 import type { ElegibilidadService } from '../../talento-operativo/application/elegibilidad.service';
 import type { FuncionariosService } from '../../talento-operativo/application/funcionarios.service';
+import type { TramitesInspeccionService } from './tramites-inspeccion.service';
 import type { AsignacionPersonalRepository } from '../infrastructure/asignacion-personal.repository';
 import type {
   DatosOperativo,
@@ -42,6 +44,11 @@ import type {
 } from '../infrastructure/operativos.repository';
 import type { CalculadorAlertasService } from './calculador-alertas.service';
 import type { GeneradorIdentificadorService } from './generador-identificador.service';
+import {
+  RegistroHerenciaTransporte,
+  type ResultadoHerencia,
+} from './herencia-transporte.puerto';
+import { RegistroCompatibilidadCompartir } from './compartir-transporte.puerto';
 import { OperativosService, type DatosRegistro } from './operativos.service';
 
 const CLIENTE = { marca: 'transaccion' };
@@ -96,12 +103,14 @@ const CATALOGOS = {
       nombre: 'Redondel del Ciclista',
       zonalId: 1,
       zonal: { nombre: 'La Delicia' },
+      zonalFormulario: { nombre: 'La Delicia' },
     },
     {
       id: 20,
       nombre: 'Parque Bicentenario',
       zonalId: 2,
       zonal: { nombre: 'Eugenio Espejo' },
+      zonalFormulario: { nombre: 'Eugenio Espejo' },
     },
   ],
   tiposControl: [{ id: 30, nombre: 'CONTROL DE VENTAS' }],
@@ -149,6 +158,10 @@ const operativoGuardado = (
     origen: null,
     _count: { adicionales: 0 },
     estadoTransporte: 'PENDIENTE',
+    // Transporte requerido (2026-10-07).
+    tipoTransporte: 'COMPLETO',
+    esMacrooperativo: false,
+    transporteLiberadoEn: null,
     conductorId: null,
     vehiculoId: null,
     alertaActiva: true,
@@ -236,6 +249,24 @@ const armar = (
     admiteAdicionales?: boolean;
     /** Miembros de la patrulla que devuelve `buscarPorGrupoRegistro` (2026-09-18). */
     grupo?: OperativoCompleto[];
+    /** Transporte requerido (2026-10-07): si el operativo ya tiene transporte asignado. */
+    transporteAsignado?: boolean;
+    /**
+     * Herencia del transporte del adicional (2026-10-14): lo que responde `transporte` por el
+     * puerto, o un error. Ausente = `transporte` no está cargado (nadie inscrito).
+     */
+    herencia?: { resultado?: ResultadoHerencia; error?: Error };
+    /**
+     * Compartir unidad (2026-10-19): los operativos que devuelve el repositorio para las
+     * coincidencias y para resolver el destino, y lo que responde `transporte` por el puerto.
+     * Sin `evaluar`, nadie inscrito: todo compatible.
+     */
+    compartir?: {
+      coincidencias?: unknown[];
+      paraCompartir?: unknown[];
+      miembros?: unknown[];
+      evaluar?: jest.Mock;
+    };
   } = {},
 ) => {
   const {
@@ -281,6 +312,18 @@ const armar = (
   const actualizar = jest
     .fn()
     .mockResolvedValue(versionDesactualizada ? null : operativoGuardado());
+  // Transporte requerido (2026-10-07).
+  const tieneTransporteAsignado = jest
+    .fn()
+    .mockResolvedValue(opciones.transporteAsignado ?? false);
+  const liberarPorCambio = jest.fn().mockResolvedValue(undefined);
+  // Conductor y placa del listado (2026-10-13).
+  const transporteDeOperativos = jest
+    .fn()
+    .mockResolvedValue(
+      new Map([[7, [{ conductor: 'PÉREZ JUAN', placa: 'PEA-1234' }]]]),
+    );
+  const limpiarTransporteLiberado = jest.fn().mockResolvedValue(undefined);
   // RN-66 (2026-09-09): re-derivar la ventana del operativo al editar un turno.
   const actualizarVentana = jest.fn().mockResolvedValue(undefined);
   const desactivar = jest
@@ -304,6 +347,12 @@ const armar = (
   const reemplazarTiposControl = jest.fn().mockResolvedValue(undefined);
   const buscarPorGrupoRegistro = jest.fn().mockResolvedValue(grupo);
   const listar = jest.fn().mockResolvedValue({ datos: [], total: 0 });
+  // «N hoy» del selector (2026-10-16): el formulario 1 lleva 3; el 2, ninguno.
+  const contarPorFormulario = jest.fn().mockResolvedValue(new Map([[1, 3]]));
+  const obtenerPermitidos = jest.fn().mockResolvedValue([
+    { formulario: { id: 1 }, acceso: 'ESCRITURA' },
+    { formulario: { id: 2 }, acceso: 'ESCRITURA' },
+  ]);
   const registrar = jest.fn().mockResolvedValue(undefined);
   const generar = jest
     .fn()
@@ -369,16 +418,38 @@ const armar = (
   const eliminarAsignacion = jest.fn().mockResolvedValue(true);
   // RN-66 (2026-09-09): cambiar el turno de una asignación existente.
   const actualizarTurnoAsignacion = jest.fn().mockResolvedValue(undefined);
+  // Trámites de Inspección (2026-10-07): la copia se guarda junto a la asignación.
+  const guardarTramite = jest.fn().mockResolvedValue(undefined);
+  const quitarTramite = jest.fn().mockResolvedValue(true);
+  const copiasParaGuardar = jest
+    .fn()
+    .mockImplementation(
+      (
+        _fecha: string,
+        solicitudes: { funcionarioId: number; codigoTramite: string }[],
+      ) =>
+        Promise.resolve(
+          new Map(
+            solicitudes.map((solicitud) => [
+              solicitud.funcionarioId,
+              {
+                codigoTramite: solicitud.codigoTramite,
+                nroSitra: 'AMC-ECU9500',
+                predio: null,
+                zonal: 'Los Chillos',
+                materia: 'Espacio público',
+                tipoTramite: 'DENUNCIA',
+                estado: 'ASIGNADO',
+              },
+            ]),
+          ),
+        ),
+    );
   const recalcular = jest.fn().mockResolvedValue([]);
   const obtenerFuncionario = jest
     .fn()
     .mockResolvedValue({ ...FUNCIONARIO, ...funcionario });
   const verificar = jest.fn().mockResolvedValue(veredictoDescanso);
-  // Desde el 2026-08-21 el adicional también pregunta por el CONDUCTOR del operativo
-  // original antes de heredarle el transporte. Comparte `veredictoDescanso` con el
-  // personal a propósito: las dos preguntas son la misma —¿puede salir a esta hora?— y
-  // tenerlas separadas obligaría a preparar dos veces el mismo caso en cada prueba.
-  const verificarConductor = jest.fn().mockResolvedValue(veredictoDescanso);
 
   // PUNTO NUEVO al registrar (Unidad de Operativos, 2026-09-24). `validar…` corre antes de la
   // transacción y devuelve el nombre recortado; `crear…EnTransaccion` escribe dentro de ella y
@@ -395,8 +466,41 @@ const armar = (
     activo: true,
   });
 
+  const heredar = opciones.herencia?.error
+    ? jest.fn().mockRejectedValue(opciones.herencia.error)
+    : jest
+        .fn()
+        .mockResolvedValue(
+          opciones.herencia?.resultado ?? { heredado: false, motivo: null },
+        );
+  const compararCambios = jest
+    .fn()
+    .mockReturnValue([{ campo: 'oper_hora_fin', valorNuevo: '13:00' }]);
+  const registroHerencia = new RegistroHerenciaTransporte();
+  const registroCompartir = new RegistroCompatibilidadCompartir();
+  if (opciones.compartir?.evaluar)
+    registroCompartir.registrar({ evaluar: opciones.compartir.evaluar });
+  const buscarCoincidencias = jest
+    .fn()
+    .mockResolvedValue(opciones.compartir?.coincidencias ?? []);
+  const paraCompartir = opciones.compartir?.paraCompartir ?? [];
+  const buscarParaCompartir = jest
+    .fn()
+    .mockImplementation((ids: number[]) =>
+      Promise.resolve(
+        paraCompartir.filter((op) => ids.includes((op as { id: number }).id)),
+      ),
+    );
+  const miembrosDeUnidad = jest
+    .fn()
+    .mockResolvedValue(opciones.compartir?.miembros ?? []);
+  if (opciones.herencia) registroHerencia.registrar({ heredar });
+
   const servicio = new OperativosService(
     {
+      conAutores: jest.fn((operativos: unknown[]) =>
+        Promise.resolve(operativos),
+      ),
       buscarPorId: jest.fn().mockResolvedValue(existente),
       // Al registrar con personal, el servicio relee el operativo DENTRO de la
       // transacción para derivar las alertas ya con su gente dentro: en ese momento
@@ -407,6 +511,7 @@ const armar = (
           Promise.resolve(existente ?? operativoGuardado()),
         ),
       listar,
+      contarPorFormulario,
       contarDelFormulario,
       contarDelPrefijo,
       buscarPorGrupoRegistro,
@@ -425,12 +530,22 @@ const armar = (
           operacion(CLIENTE),
         ),
       actualizarVentana,
+      tieneTransporteAsignado,
+      transporteDeOperativos,
+      liberarPorCambio,
+      limpiarTransporteLiberado,
+      actualizarTransporte: jest.fn().mockResolvedValue(undefined),
+      buscarCoincidencias,
+      buscarParaCompartir,
+      miembrosDeUnidad,
     } as unknown as OperativosRepository,
     {
       crear: crearAsignacion,
       retirarResponsabilidad,
       eliminar: eliminarAsignacion,
       actualizarTurno: actualizarTurnoAsignacion,
+      guardarTramite,
+      quitarTramite,
     } as unknown as AsignacionPersonalRepository,
     {
       exigirEscritura,
@@ -438,6 +553,7 @@ const armar = (
     } as unknown as CuadroDiarioService,
     {
       obtenerDefinicion: jest.fn().mockResolvedValue(FORMULARIO),
+      obtenerPermitidos,
     } as unknown as FormulariosService,
     {
       obtenerCatalogos: jest
@@ -454,6 +570,8 @@ const armar = (
             clave === 'FRANJA_NOCTURNA_INICIO' ? '18:00' : '06:00',
           ),
         ),
+      // Rango de «Mis operativos» (2026-10-13): sin sembrar, rige el valor por defecto.
+      obtenerTextoOpcional: jest.fn().mockResolvedValue(''),
     } as unknown as ParametroPoliticaService,
     {
       generar,
@@ -463,25 +581,24 @@ const armar = (
     } as unknown as GeneradorIdentificadorService,
     { recalcular } as unknown as CalculadorAlertasService,
     { obtener: obtenerFuncionario } as unknown as FuncionariosService,
-    {
-      verificar,
-      verificarConductor,
-    } as unknown as ElegibilidadService,
+    { verificar } as unknown as ElegibilidadService,
     {
       registrar,
-      compararCambios: jest
-        .fn()
-        .mockReturnValue([{ campo: 'oper_hora_fin', valorNuevo: '13:00' }]),
+      compararCambios,
     } as unknown as AuditoriaService,
     {
       buscarPorRol: buscarVentanaPorRol,
     } as unknown as VentanaCargaRepository,
     { evaluar: evaluarVentana } as unknown as VentanaCargaEvaluador,
     { log, warn } as unknown as LoggerService,
+    { copiasParaGuardar } as unknown as TramitesInspeccionService,
+    registroHerencia,
+    registroCompartir,
   );
 
   return {
     servicio,
+    heredar,
     crearAsignacion,
     retirarResponsabilidad,
     eliminarAsignacion,
@@ -489,7 +606,6 @@ const armar = (
     actualizarVentana,
     recalcular,
     verificar,
-    verificarConductor,
     crear,
     enviados,
     contarDelFormulario,
@@ -498,6 +614,8 @@ const armar = (
     reemplazarZonales,
     reemplazarInstituciones,
     listar,
+    contarPorFormulario,
+    obtenerPermitidos,
     registrar,
     generar,
     resolverPrefijo,
@@ -515,6 +633,17 @@ const armar = (
     validarPuntoDeRegistro,
     crearPuntoEnTransaccion,
     warn,
+    guardarTramite,
+    quitarTramite,
+    copiasParaGuardar,
+    tieneTransporteAsignado,
+    transporteDeOperativos,
+    liberarPorCambio,
+    limpiarTransporteLiberado,
+    buscarCoincidencias,
+    buscarParaCompartir,
+    miembrosDeUnidad,
+    compararCambios,
   };
 };
 
@@ -693,6 +822,83 @@ describe('OperativosService · registro', () => {
       expect(crearAsignacion).not.toHaveBeenCalled();
     });
 
+    it('trámite de Inspección · lo comprueba contra Inspección y guarda la copia en la asignación (2026-10-07)', async () => {
+      const { servicio, copiasParaGuardar, guardarTramite } = armar();
+
+      await servicio.registrar(
+        {
+          ...REGISTRO_VALIDO,
+          personal: [
+            {
+              funcionarioId: 100,
+              tramiteInspeccion: { codigoTramite: ' DENUNCIA-26-3415 ' },
+            },
+          ],
+        },
+        AUTOR,
+        'token-de-auth',
+      );
+
+      // Una sola consulta, con la cédula de la ficha y el token de la sesión; el código recortado.
+      expect(copiasParaGuardar).toHaveBeenCalledTimes(1);
+      const [, solicitudes, token] = copiasParaGuardar.mock.calls[0] as [
+        string,
+        { funcionarioId: number; codigoTramite: string }[],
+        string,
+      ];
+      expect(solicitudes).toEqual([
+        expect.objectContaining({
+          funcionarioId: 100,
+          codigoTramite: 'DENUNCIA-26-3415',
+        }),
+      ]);
+      expect(token).toBe('token-de-auth');
+      // La copia se escribe en la asignación recién creada (id 700), dentro de la transacción.
+      expect(guardarTramite).toHaveBeenCalledWith(
+        700,
+        expect.objectContaining({ codigoTramite: 'DENUNCIA-26-3415' }),
+        AUTOR.usuarioId,
+        CLIENTE,
+      );
+    });
+
+    it('trámite de Inspección · sin trámite elegido NO se pregunta a Inspección', async () => {
+      const { servicio, copiasParaGuardar, guardarTramite } = armar();
+
+      await servicio.registrar(
+        { ...REGISTRO_VALIDO, personalIds: [100] },
+        AUTOR,
+        'token-de-auth',
+      );
+
+      expect(copiasParaGuardar).not.toHaveBeenCalled();
+      expect(guardarTramite).not.toHaveBeenCalled();
+    });
+
+    it('trámite de Inspección · si Inspección lo rechaza, NO se crea el operativo', async () => {
+      const { servicio, copiasParaGuardar, crear } = armar();
+      copiasParaGuardar.mockRejectedValueOnce(
+        new ReglaNegocioError(
+          'TRAMITE_INSPECCION_NO_VALIDO',
+          'El trámite X no figura entre los asignados.',
+        ),
+      );
+
+      await expect(
+        servicio.registrar(
+          {
+            ...REGISTRO_VALIDO,
+            personal: [
+              { funcionarioId: 100, tramiteInspeccion: { codigoTramite: 'X' } },
+            ],
+          },
+          AUTOR,
+          'token-de-auth',
+        ),
+      ).rejects.toThrow('no figura entre los asignados');
+      expect(crear).not.toHaveBeenCalled();
+    });
+
     it('la misma persona repetida se asigna una sola vez', async () => {
       const { servicio, crearAsignacion } = armar();
 
@@ -866,6 +1072,32 @@ describe('OperativosService · registro', () => {
       { secuencial: 2, horaInicio: '08:00', horaFin: '12:00' },
       { secuencial: 3, horaInicio: '08:00', horaFin: '12:00' },
     ]);
+  });
+
+  it('trámite de Inspección · las N copias del 8 heredan el MISMO trámite (2026-10-07)', async () => {
+    const { servicio, crear, guardarTramite, copiasParaGuardar } = armar({
+      catalogos: { variosPorPersona: true, cantidadPorPersona: true },
+    });
+
+    await servicio.registrar(
+      {
+        ...REGISTRO_VALIDO,
+        personal: [
+          {
+            funcionarioId: 100,
+            cantidad: 3,
+            tramiteInspeccion: { codigoTramite: 'DENUNCIA-26-3415' },
+          },
+        ],
+      },
+      AUTOR,
+      'token-de-auth',
+    );
+
+    expect(crear).toHaveBeenCalledTimes(3);
+    // Se comprueba UNA vez y se copia a las tres asignaciones.
+    expect(copiasParaGuardar).toHaveBeenCalledTimes(1);
+    expect(guardarTramite).toHaveBeenCalledTimes(3);
   });
 
   it('sin cantidad, crea un solo operativo (por defecto 1)', async () => {
@@ -1709,7 +1941,6 @@ describe('OperativosService · aporte a una patrulla CREA operativo propio (Form
       secuencial: 2,
       grupoRegistro: 'lote-1',
       origenId: null,
-      transporte: null,
       puntoEncuentroId: 10,
       tipoControlId: 30,
       zonalIds: [1],
@@ -2035,6 +2266,164 @@ describe('OperativosService · retiro de personal (M-15)', () => {
   });
 });
 
+describe('OperativosService · trámite de Inspección de una persona asignada (2026-10-07)', () => {
+  const conInspector = () =>
+    operativoGuardado({
+      personal: [
+        {
+          ...conPersonal(100),
+          funcionario: { ...FUNCIONARIO, cedula: '1700000004' },
+          tramiteInspeccion: null,
+        },
+      ],
+    } as Partial<OperativoCompleto>);
+
+  it('con código, lo comprueba contra Inspección y guarda la copia en la asignación', async () => {
+    const { servicio, copiasParaGuardar, guardarTramite, registrar } = armar({
+      existente: conInspector(),
+    });
+
+    await servicio.fijarTramitePersonal(
+      500,
+      100,
+      'DENUNCIA-26-3415',
+      AUTOR,
+      undefined,
+      'token-de-auth',
+    );
+
+    expect(copiasParaGuardar).toHaveBeenCalledWith(
+      expect.any(String),
+      [
+        expect.objectContaining({
+          funcionarioId: 100,
+          cedula: '1700000004',
+          codigoTramite: 'DENUNCIA-26-3415',
+        }),
+      ],
+      'token-de-auth',
+    );
+    expect(guardarTramite).toHaveBeenCalledWith(
+      100,
+      expect.objectContaining({ codigoTramite: 'DENUNCIA-26-3415' }),
+      AUTOR.usuarioId,
+      CLIENTE,
+    );
+    // Queda en la auditoría, dentro de la transacción.
+    expect(registrar).toHaveBeenCalledWith(
+      expect.objectContaining({ entidad: 't_operativo_tramite_inspeccion' }),
+      CLIENTE,
+    );
+  });
+
+  it('con null, lo quita sin preguntar a Inspección', async () => {
+    const { servicio, copiasParaGuardar, quitarTramite, guardarTramite } =
+      armar({ existente: conInspector() });
+
+    await servicio.fijarTramitePersonal(500, 100, null, AUTOR);
+
+    expect(copiasParaGuardar).not.toHaveBeenCalled();
+    expect(guardarTramite).not.toHaveBeenCalled();
+    expect(quitarTramite).toHaveBeenCalledWith(100, CLIENTE);
+  });
+
+  it('quien no figura en el operativo produce 404', async () => {
+    const { servicio } = armar({ existente: conInspector() });
+
+    await expect(
+      servicio.fijarTramitePersonal(500, 999, 'X', AUTOR),
+    ).rejects.toBeInstanceOf(RecursoNoEncontradoError);
+  });
+
+  it('form 8 por lote · el cambio se aplica a TODAS las copias de esa persona en el registro', async () => {
+    const copia = (id: number) =>
+      operativoGuardado({
+        id,
+        grupoRegistro: 'lote-1',
+        personal: [
+          {
+            ...conPersonal(100),
+            id: id + 1000,
+            funcionario: { ...FUNCIONARIO, cedula: '1700000004' },
+            tramiteInspeccion: null,
+          },
+        ],
+      } as Partial<OperativoCompleto>);
+    const { servicio, guardarTramite, registrar, copiasParaGuardar } = armar({
+      existente: copia(500),
+      grupo: [copia(500), copia(501), copia(502)],
+    });
+
+    await servicio.fijarTramitePersonal(
+      500,
+      100,
+      'DENUNCIA-26-3415',
+      AUTOR,
+      undefined,
+      'token-de-auth',
+    );
+
+    // Una sola comprobación contra Inspección, tres copias guardadas y tres trazas.
+    expect(copiasParaGuardar).toHaveBeenCalledTimes(1);
+    expect(
+      (guardarTramite.mock.calls as unknown[][]).map((llamada) => llamada[0]),
+    ).toEqual([1500, 1501, 1502]);
+    const trazas = (registrar.mock.calls as unknown[][]).filter(
+      (llamada) =>
+        (llamada[0] as { entidad: string }).entidad ===
+        't_operativo_tramite_inspeccion',
+    );
+    expect(
+      trazas.map(
+        (llamada) => (llamada[0] as { operativoId: number }).operativoId,
+      ),
+    ).toEqual([500, 501, 502]);
+  });
+
+  it('form 8 por lote · quitar el trámite también lo quita en todas las copias', async () => {
+    const copia = (id: number) =>
+      operativoGuardado({
+        id,
+        grupoRegistro: 'lote-1',
+        personal: [
+          { ...conPersonal(100), id: id + 1000, tramiteInspeccion: null },
+        ],
+      } as Partial<OperativoCompleto>);
+    const { servicio, quitarTramite } = armar({
+      existente: copia(500),
+      grupo: [copia(500), copia(501)],
+    });
+
+    await servicio.fijarTramitePersonal(500, 100, null, AUTOR);
+
+    expect(
+      (quitarTramite.mock.calls as unknown[][]).map((llamada) => llamada[0]),
+    ).toEqual([1500, 1501]);
+  });
+
+  it('sin grupoRegistro solo se toca ese operativo', async () => {
+    const { servicio, guardarTramite } = armar({ existente: conInspector() });
+
+    await servicio.fijarTramitePersonal(500, 100, 'DENUNCIA-26-3415', AUTOR);
+
+    expect(guardarTramite).toHaveBeenCalledTimes(1);
+  });
+
+  it('el rol compartido NO cambia el trámite de una persona que asignó el dueño (403)', async () => {
+    const { servicio, guardarTramite } = armar({ existente: conInspector() });
+
+    const fallo = await capturar(
+      servicio.fijarTramitePersonal(500, 100, 'DENUNCIA-26-3415', {
+        usuarioId: 3,
+        rol: RolDepartamental.DMIT_INSTRUCTOR,
+      }),
+    );
+
+    expect(fallo).toBeInstanceOf(AutorizacionError);
+    expect(guardarTramite).not.toHaveBeenCalled();
+  });
+});
+
 describe('OperativosService · editar el turno de una persona (RN-66, 2026-09-09)', () => {
   // Un operativo con dos personas, cada una con su turno: la envolvente inicial es 08:00–14:00.
   const conDosPersonas = () =>
@@ -2046,6 +2435,63 @@ describe('OperativosService · editar el turno de una persona (RN-66, 2026-09-09
         { ...conPersonal(200), horaInicio: '10:00', horaFin: '14:00' },
       ],
     } as Partial<OperativoCompleto>);
+
+  it('D4 · si la ventana cambia y hay transporte asignado, exige confirmar (409)', async () => {
+    const { servicio, actualizarTurnoAsignacion } = armar({
+      existente: conDosPersonas(),
+      transporteAsignado: true,
+    });
+
+    const fallo = (await capturar(
+      servicio.actualizarTurnoPersonal(
+        500,
+        100,
+        { horaInicio: '06:00', horaFin: '12:00' },
+        AUTOR,
+      ),
+    )) as ReglaNegocioError;
+
+    expect(fallo.code).toBe('CAMBIO_CON_TRANSPORTE');
+    expect(actualizarTurnoAsignacion).not.toHaveBeenCalled();
+  });
+
+  it('D4 · confirmado, libera el transporte y borra los tramos en la misma transacción', async () => {
+    const { servicio, liberarPorCambio } = armar({
+      existente: conDosPersonas(),
+      transporteAsignado: true,
+    });
+
+    await servicio.actualizarTurnoPersonal(
+      500,
+      100,
+      { horaInicio: '06:00', horaFin: '12:00', confirmarLiberacion: true },
+      AUTOR,
+    );
+
+    expect(liberarPorCambio).toHaveBeenCalledWith(
+      500,
+      expect.objectContaining({ conTransporte: true }),
+      CLIENTE,
+    );
+  });
+
+  it('D4 · un turno que NO cambia la ventana no toca el transporte', async () => {
+    const { servicio, tieneTransporteAsignado, liberarPorCambio } = armar({
+      existente: conDosPersonas(),
+      transporteAsignado: true,
+    });
+
+    // Se reescribe el mismo turno 10:00–14:00: la envolvente sigue en 08:00–14:00.
+    await servicio.actualizarTurnoPersonal(
+      500,
+      200,
+      { horaInicio: '10:00', horaFin: '14:00' },
+      AUTOR,
+    );
+
+    expect(tieneTransporteAsignado).not.toHaveBeenCalled();
+    expect(liberarPorCambio).not.toHaveBeenCalled();
+  });
 
   it('cambia el turno de la asignación y re-deriva la ventana del operativo', async () => {
     const {
@@ -2430,6 +2876,172 @@ describe('OperativosService · consulta (PER-02)', () => {
   });
 });
 
+describe('OperativosService · conteo por formulario (2026-10-16)', () => {
+  const FECHA = new Date(Date.UTC(2026, 9, 17));
+
+  it('devuelve todos los formularios permitidos, con 0 los que no tienen operativos', async () => {
+    const { servicio } = armar();
+
+    await expect(
+      servicio.contarPorFormulario(FECHA, [RolDepartamental.DMIP_OPERATIVOS]),
+    ).resolves.toEqual([
+      { formularioId: 1, total: 3 },
+      { formularioId: 2, total: 0 },
+    ]);
+  });
+
+  it('cuenta el día pedido con la misma visibilidad que el listado (PER-02)', async () => {
+    const { servicio, contarPorFormulario, obtenerPermitidos } = armar();
+
+    await servicio.contarPorFormulario(FECHA, [
+      RolDepartamental.DMIP_OPERATIVOS,
+      RolDepartamental.DIRECTOR,
+    ]);
+
+    // Camino B: Dirección encima de un rol departamental no amplía lo que se cuenta.
+    expect(contarPorFormulario).toHaveBeenCalledWith({
+      desde: FECHA,
+      hasta: FECHA,
+      visiblesPara: [RolDepartamental.DMIP_OPERATIVOS],
+    });
+    expect(obtenerPermitidos).toHaveBeenCalledWith([
+      RolDepartamental.DMIP_OPERATIVOS,
+      RolDepartamental.DIRECTOR,
+    ]);
+  });
+
+  it('la Dirección «pura» cuenta la jornada entera', async () => {
+    const { servicio, contarPorFormulario } = armar();
+
+    await servicio.contarPorFormulario(FECHA, [RolDepartamental.DIRECTOR]);
+
+    expect(contarPorFormulario).toHaveBeenCalledWith(
+      expect.objectContaining({ visiblesPara: null }),
+    );
+  });
+
+  it('una fecha sin cuadro da todo en 0, no un error', async () => {
+    const { servicio, contarPorFormulario } = armar();
+    contarPorFormulario.mockResolvedValueOnce(new Map());
+
+    await expect(
+      servicio.contarPorFormulario(FECHA, [RolDepartamental.DMIP_OPERATIVOS]),
+    ).resolves.toEqual([
+      { formularioId: 1, total: 0 },
+      { formularioId: 2, total: 0 },
+    ]);
+  });
+});
+
+describe('OperativosService · rango y edición por fila (2026-10-13)', () => {
+  // 10H00 del 13 de octubre en Quito: el cuadro vigente es el del 14.
+  const AHORA = new Date('2026-10-13T15:00:00Z');
+
+  const fila = (
+    fecha: string,
+    estado: EstadoCuadro = EstadoCuadro.BORRADOR,
+    creadoPorRol: RolDepartamental = RolDepartamental.DMIP_OPERATIVOS,
+  ): OperativoCompleto =>
+    ({
+      cuadro: { fecha: new Date(fecha + 'T00:00:00Z'), estado },
+      creadoPorRol,
+    }) as unknown as OperativoCompleto;
+
+  it('expone la fecha vigente y el máximo por defecto si el parámetro falta', async () => {
+    const { servicio } = armar();
+
+    await expect(servicio.parametrosDeRango(AHORA)).resolves.toEqual({
+      fechaVigente: '2026-10-14',
+      rangoMaxDias: 31,
+    });
+  });
+
+  it('el cuadro vigente con la ventana abierta admite edición', async () => {
+    const { servicio } = armar({ ventanaAbierta: true });
+
+    await expect(
+      servicio.admisionDeEdicion(
+        [fila('2026-10-14')],
+        [RolDepartamental.DMIP_OPERATIVOS],
+        AHORA,
+      ),
+    ).resolves.toEqual([true]);
+  });
+
+  it('el cuadro vigente con la ventana cerrada no admite edición', async () => {
+    const { servicio } = armar({ ventanaAbierta: false });
+
+    await expect(
+      servicio.admisionDeEdicion(
+        [fila('2026-10-14')],
+        [RolDepartamental.DMIP_OPERATIVOS],
+        AHORA,
+      ),
+    ).resolves.toEqual([false]);
+  });
+
+  it('un cuadro pasado o cerrado no admite edición aunque la ventana esté abierta', async () => {
+    const { servicio } = armar({ ventanaAbierta: true });
+
+    await expect(
+      servicio.admisionDeEdicion(
+        [
+          fila('2026-10-13'),
+          fila('2026-10-14', EstadoCuadro.CERRADO),
+          fila('2026-10-14'),
+        ],
+        [RolDepartamental.DMIP_OPERATIVOS],
+        AHORA,
+      ),
+    ).resolves.toEqual([false, false, true]);
+  });
+
+  it('evalúa la ventana una vez por rol y no la evalúa si ninguna fila es del vigente', async () => {
+    const { servicio, evaluarVentana } = armar({ ventanaAbierta: true });
+
+    await servicio.admisionDeEdicion(
+      [fila('2026-10-14'), fila('2026-10-14'), fila('2026-10-14')],
+      [RolDepartamental.DMIP_OPERATIVOS, RolDepartamental.DIRECTOR],
+      AHORA,
+    );
+    expect(evaluarVentana).toHaveBeenCalledTimes(1);
+
+    evaluarVentana.mockClear();
+    await servicio.admisionDeEdicion(
+      [fila('2026-10-10')],
+      [RolDepartamental.DMIP_OPERATIVOS],
+      AHORA,
+    );
+    expect(evaluarVentana).not.toHaveBeenCalled();
+  });
+
+  it('trae conductor y placa de toda la página en una sola llamada, en el orden de las filas', async () => {
+    const { servicio, transporteDeOperativos } = armar();
+    const filas = [{ id: 9 }, { id: 7 }] as unknown as OperativoCompleto[];
+
+    await expect(servicio.transporteDelListado(filas)).resolves.toEqual([
+      [],
+      [{ conductor: 'PÉREZ JUAN', placa: 'PEA-1234' }],
+    ]);
+    expect(transporteDeOperativos).toHaveBeenCalledTimes(1);
+    expect(transporteDeOperativos).toHaveBeenCalledWith([9, 7]);
+  });
+
+  it('pasa el rango al repositorio', async () => {
+    const { servicio, listar } = armar();
+    const desde = new Date('2026-10-01T00:00:00Z');
+    const hasta = new Date('2026-10-14T00:00:00Z');
+
+    await servicio.consultar({ desde, hasta, pagina: 1, tamanio: 25 }, [
+      RolDepartamental.DMIP_OPERATIVOS,
+    ]);
+
+    expect(listar).toHaveBeenCalledWith(
+      expect.objectContaining({ desde, hasta }),
+    );
+  });
+});
+
 /**
  * ═══════════════════════════════════════════════════════════════════════════════
  * EL ADICIONAL DEL DÍA · 2026-08-20
@@ -2465,6 +3077,37 @@ describe('OperativosService · adicional del día', () => {
      * saldría `OCAPMO-007`, un código que sugiere seis adicionales previos que no
      * existieron —y que además iría impreso en una orden de servicio—.
      */
+    it('trámite de Inspección · el adicional lo comprueba y lo guarda como el alta (2026-10-07)', async () => {
+      const { servicio, copiasParaGuardar, guardarTramite } = armar({
+        existente: PADRE(),
+      });
+
+      await servicio.registrarAdicional(
+        500,
+        {
+          ...ADICIONAL,
+          personal: [
+            {
+              funcionarioId: 100,
+              horaInicio: '14:00',
+              horaFin: '18:00',
+              tramiteInspeccion: { codigoTramite: 'DENUNCIA-26-3415' },
+            },
+          ],
+        },
+        AUTOR,
+        undefined,
+        'token-de-auth',
+      );
+
+      expect(copiasParaGuardar).toHaveBeenCalledWith(
+        expect.any(String),
+        [expect.objectContaining({ codigoTramite: 'DENUNCIA-26-3415' })],
+        'token-de-auth',
+      );
+      expect(guardarTramite).toHaveBeenCalled();
+    });
+
     it('cuenta solo entre adicionales, no continúa la serie ordinaria', async () => {
       const { servicio, contarDelFormulario, crear } = armar({
         existente: PADRE(),
@@ -2782,24 +3425,15 @@ describe('OperativosService · adicional del día', () => {
 
   /**
    * ═══════════════════════════════════════════════════════════════════════════════
-   * EL TRANSPORTE HEREDADO · 2026-08-21
+   * EL ADICIONAL YA NO HEREDA EL TRANSPORTE · 2026-10-14 (decisión D3)
    *
-   * Un adicional se dispone cuando la ventana de la DAF —15H00 a 16H30— también ha
-   * cerrado. Sin heredar, nacería sin conductor ni vehículo y nadie podría asignárselos
-   * hasta el día siguiente: llegaría al operativo sin transporte.
-   *
-   * LO QUE SE PROTEGE AQUÍ SON LAS DOS MITADES:
-   *
-   *   · que se herede, porque si no la funcionalidad no sirve;
-   *   · que **se verifique**, porque el mismo conductor no puede estar en dos operativos
-   *     con horario cruzado (RN-28), y heredarlo a ciegas produciría un cuadro que afirma
-   *     algo físicamente imposible **sin dar ningún error**.
-   *
-   * Y que la traza diga de dónde salió: un operativo `ASIGNADO` sin que la DAF lo haya
-   * tocado contradice lo que RN-40 hace esperar a quien audite.
+   * Hasta entonces copiaba conductor y vehículo del original al operativo, sin tramos: la
+   * agenda del conductor —que desde esa fecha sale SOLO de `t_tramo_transporte`— no lo veía
+   * y podía asignársele otra cosa a la misma hora. Ahora nace PENDIENTE y la DAF lo asigna
+   * por tramos, y la traza lo dice.
    * ═══════════════════════════════════════════════════════════════════════════════
    */
-  describe('el transporte heredado del operativo original', () => {
+  describe('el transporte del adicional', () => {
     const conTransporte = () =>
       operativoGuardado({
         id: 500,
@@ -2808,78 +3442,71 @@ describe('OperativosService · adicional del día', () => {
         estadoTransporte: 'ASIGNADO',
       } as Partial<OperativoCompleto>);
 
-    it('hereda conductor y vehículo cuando el conductor puede', async () => {
-      const { servicio, crear, verificarConductor } = armar({
+    /**
+     * Herencia por tramos (2026-10-14). El alta crea el operativo sin conductor —la columna no
+     * viaja en el `crear`— y DESPUÉS pide a `transporte`, por el puerto, que cree los tramos del
+     * adicional ya asignados. Lo que se valida allí se prueba en `planificacion-transporte`.
+     */
+    it('pide a transporte que el adicional herede del original, después del alta', async () => {
+      const { servicio, crear, heredar } = armar({
+        existente: conTransporte(),
+        herencia: { resultado: { heredado: true, motivo: null } },
+      });
+
+      await servicio.registrarAdicional(500, ADICIONAL, AUTOR);
+
+      const datos = (crear.mock.calls[0] as [Record<string, unknown>])[0];
+      expect(datos).not.toHaveProperty('transporte');
+      expect(heredar).toHaveBeenCalledWith(
+        { padreId: 500, adicionalId: expect.any(Number) as number },
+        expect.objectContaining({ usuarioId: AUTOR.usuarioId }),
+      );
+      expect(crear.mock.invocationCallOrder[0]).toBeLessThan(
+        heredar.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('si la herencia falla a mitad, el adicional no se pierde y queda pendiente', async () => {
+      const { servicio, crear, warn } = armar({
+        existente: conTransporte(),
+        herencia: { error: new Error('se cayó la base') },
+      });
+
+      await expect(
+        servicio.registrarAdicional(500, ADICIONAL, AUTOR),
+      ).resolves.toBeDefined();
+
+      expect(crear).toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(
+        'El adicional no pudo heredar el transporte',
+        expect.objectContaining({ error: 'se cayó la base' }),
+      );
+    });
+
+    it('con la ventana de carga cerrada hereda igual: la herencia no mira la ventana (regla 9)', async () => {
+      const { servicio, heredar } = armar({
+        existente: conTransporte(),
+        ventanaAbierta: false,
+        herencia: { resultado: { heredado: true, motivo: null } },
+      });
+
+      await servicio.registrarAdicional(500, ADICIONAL, AUTOR);
+
+      expect(heredar).toHaveBeenCalledTimes(1);
+    });
+
+    it('sin transporte cargado (nadie inscrito en el puerto), el adicional nace igual', async () => {
+      const { servicio, crear, heredar } = armar({
         existente: conTransporte(),
       });
 
       await servicio.registrarAdicional(500, ADICIONAL, AUTOR);
 
-      // Se le preguntó a `talento-operativo`, que es quien sabe de descanso.
-      expect(verificarConductor).toHaveBeenCalled();
-      expect(crear).toHaveBeenCalledWith(
-        expect.objectContaining({
-          transporte: { conductorId: 77, vehiculoId: 88 },
-        }),
-        CLIENTE,
-      );
+      expect(crear).toHaveBeenCalled();
+      expect(heredar).not.toHaveBeenCalled();
     });
 
-    /**
-     * LA VERIFICACIÓN NO SE SALTA. Si el adicional cruza el horario del padre, el mismo
-     * conductor no puede estar en los dos. Ésta es la prueba que impide que heredar se
-     * convierta en un atajo para escribir un imposible.
-     */
-    it('NO lo hereda si el conductor no puede, y el adicional nace PENDIENTE', async () => {
-      const { servicio, crear } = armar({
-        existente: conTransporte(),
-        veredictoDescanso: {
-          elegible: false,
-          motivo: 'El conductor ya conduce en otro operativo de 08H30 a 16H30.',
-        },
-      });
-
-      await servicio.registrarAdicional(500, ADICIONAL, AUTOR);
-
-      expect(crear).toHaveBeenCalledWith(
-        expect.objectContaining({ transporte: null }),
-        CLIENTE,
-      );
-    });
-
-    /** Sin transporte en el original no hay nada que heredar, y no es un fallo. */
-    it('si el original no tiene transporte, el adicional nace sin él', async () => {
-      const { servicio, crear, verificarConductor } = armar({
-        existente: PADRE(),
-      });
-
-      await servicio.registrarAdicional(500, ADICIONAL, AUTOR);
-
-      expect(crear).toHaveBeenCalledWith(
-        expect.objectContaining({ transporte: null }),
-        CLIENTE,
-      );
-      // Ni siquiera se pregunta: no hay conductor por el que preguntar.
-      expect(verificarConductor).not.toHaveBeenCalled();
-    });
-
-    /**
-     * RN-40 SIGUE EN PIE PARA EL REGISTRO ORDINARIO. Es la prueba que caería si alguien
-     * extendiera la herencia más allá del adicional: un operativo normal nace sin
-     * conductor ni vehículo, y solo la DAF los completa.
-     */
-    it('el registro ordinario sigue naciendo sin transporte', async () => {
-      const { servicio, crear } = armar();
-
-      await servicio.registrar(REGISTRO_VALIDO, AUTOR);
-
-      expect(crear).toHaveBeenCalledWith(
-        expect.objectContaining({ transporte: null }),
-        CLIENTE,
-      );
-    });
-
-    it('la traza dice que el transporte se heredó, y de dónde', async () => {
+    it('la traza del alta ya no habla del transporte: la deja la herencia', async () => {
       const { servicio, registrar } = armar({ existente: conTransporte() });
 
       await servicio.registrarAdicional(500, ADICIONAL, AUTOR);
@@ -2887,27 +3514,7 @@ describe('OperativosService · adicional del día', () => {
       const asiento = primeraTraza(registrar).cambios?.find(
         (cambio) => cambio.campo === 'transporte',
       );
-
-      expect(asiento?.valorNuevo).toContain('heredado de');
-      expect(asiento?.valorNuevo).toContain('DAF');
-    });
-
-    it('y cuando no se hereda, dice el motivo del servidor', async () => {
-      const { servicio, registrar } = armar({
-        existente: conTransporte(),
-        veredictoDescanso: {
-          elegible: false,
-          motivo: 'El conductor ya conduce en otro operativo de 08H30 a 16H30.',
-        },
-      });
-
-      await servicio.registrarAdicional(500, ADICIONAL, AUTOR);
-
-      const asiento = primeraTraza(registrar).cambios?.find(
-        (cambio) => cambio.campo === 'transporte',
-      );
-
-      expect(asiento?.valorNuevo).toContain('ya conduce en otro operativo');
+      expect(asiento).toBeUndefined();
     });
   });
 
@@ -2985,3 +3592,868 @@ function primeraTraza(registrar: jest.Mock): {
 
   return llamadas[0][0];
 }
+
+describe('OperativosService · tipo de transporte por defecto del formulario (2026-10-07)', () => {
+  const conDefecto = async (
+    tipoTransporte: 'COMPLETO' | undefined,
+  ): Promise<unknown> => {
+    const original = (FORMULARIO as Record<string, unknown>)
+      .tipoTransporteDefecto;
+    (FORMULARIO as Record<string, unknown>).tipoTransporteDefecto =
+      'INICIO_Y_FIN';
+    try {
+      const { servicio, crear } = armar();
+      await servicio.registrar({ ...REGISTRO_VALIDO, tipoTransporte }, AUTOR);
+      const [datos] = crear.mock.calls[0] as [{ tipoTransporte?: string }];
+      return datos.tipoTransporte;
+    } finally {
+      (FORMULARIO as Record<string, unknown>).tipoTransporteDefecto = original;
+    }
+  };
+
+  it('sin tipo indicado, el operativo toma el del formulario (PMO → INICIO_Y_FIN)', async () => {
+    expect(await conDefecto(undefined)).toBe('INICIO_Y_FIN');
+  });
+
+  it('si el registro lo indica, manda el registro', async () => {
+    expect(await conDefecto('COMPLETO')).toBe('COMPLETO');
+  });
+});
+
+describe('OperativosService · transporte requerido (2026-10-07)', () => {
+  it('cambiar el tipo con transporte asignado y SIN confirmar se rechaza (409)', async () => {
+    const { servicio, actualizar, liberarPorCambio } = armar({
+      existente: operativoGuardado({ conductorId: 3, vehiculoId: 4 }),
+      transporteAsignado: true,
+    });
+
+    const fallo = await capturar(
+      servicio.editar(
+        500,
+        { version: 1, tipoTransporte: 'SOLO_INICIO' },
+        AUTOR,
+      ),
+    );
+
+    expect(fallo).toBeInstanceOf(ReglaNegocioError);
+    expect((fallo as ReglaNegocioError).code).toBe(
+      'CAMBIO_TIPO_CON_TRANSPORTE',
+    );
+    expect(actualizar).not.toHaveBeenCalled();
+    expect(liberarPorCambio).not.toHaveBeenCalled();
+  });
+
+  it('con la confirmación, libera el transporte en la misma transacción y lo audita', async () => {
+    const { servicio, liberarPorCambio, registrar } = armar({
+      existente: operativoGuardado({ conductorId: 3, vehiculoId: 4 }),
+      transporteAsignado: true,
+    });
+
+    await servicio.editar(
+      500,
+      { version: 1, tipoTransporte: 'SOLO_INICIO', confirmarLiberacion: true },
+      AUTOR,
+    );
+
+    expect(liberarPorCambio).toHaveBeenCalledWith(
+      500,
+      { conTransporte: true, marcarLiberado: true },
+      CLIENTE,
+    );
+    expect(registrar).toHaveBeenCalledWith(
+      expect.objectContaining({ entidad: 't_operativo', operativoId: 500 }),
+      CLIENTE,
+    );
+  });
+
+  it('a Propios medios no deja alerta de liberado y limpia el macrooperativo', async () => {
+    const { servicio, actualizar, liberarPorCambio } = armar({
+      existente: operativoGuardado({ esMacrooperativo: true, conductorId: 3 }),
+      transporteAsignado: true,
+    });
+    actualizar.mockResolvedValueOnce(
+      operativoGuardado({ tipoTransporte: 'PROPIOS_MEDIOS', conductorId: 3 }),
+    );
+
+    await servicio.editar(
+      500,
+      {
+        version: 1,
+        tipoTransporte: 'PROPIOS_MEDIOS',
+        confirmarLiberacion: true,
+      },
+      AUTOR,
+    );
+
+    expect(actualizar).toHaveBeenCalledWith(
+      500,
+      1,
+      expect.objectContaining({
+        tipoTransporte: 'PROPIOS_MEDIOS',
+        esMacrooperativo: false,
+      }),
+      AUTOR,
+      CLIENTE,
+      [],
+    );
+    expect(liberarPorCambio).toHaveBeenCalledWith(
+      500,
+      { conTransporte: true, marcarLiberado: false },
+      CLIENTE,
+    );
+  });
+
+  it('sin transporte asignado no pide confirmar: solo borra los tramos para regenerarlos', async () => {
+    const { servicio, liberarPorCambio } = armar({
+      existente: operativoGuardado(),
+    });
+
+    await servicio.editar(
+      500,
+      { version: 1, tipoTransporte: 'INICIO_Y_FIN' },
+      AUTOR,
+    );
+
+    expect(liberarPorCambio).toHaveBeenCalledWith(
+      500,
+      { conTransporte: false, marcarLiberado: true },
+      CLIENTE,
+    );
+  });
+
+  it('sin cambio de tipo, horario ni zonal no toca el transporte', async () => {
+    const { servicio, tieneTransporteAsignado, liberarPorCambio } = armar({
+      existente: operativoGuardado({ conductorId: 3, vehiculoId: 4 }),
+      transporteAsignado: true,
+    });
+
+    await servicio.editar(
+      500,
+      { version: 1, observacionesNuevas: ['Llevar chalecos.'] },
+      AUTOR,
+    );
+
+    expect(tieneTransporteAsignado).not.toHaveBeenCalled();
+    expect(liberarPorCambio).not.toHaveBeenCalled();
+  });
+
+  /**
+   * D4 (2026-10-14). Los tramos se cortan con el horario y la zonal del operativo: si cambian, ya
+   * no corresponden. Con transporte asignado hay que confirmar (409 CAMBIO_CON_TRANSPORTE); sin
+   * él, solo se borran para que transporte los regenere.
+   */
+  it('D4 · cambiar el horario de un operativo con tramos asignados exige confirmar', async () => {
+    const { servicio, actualizar, liberarPorCambio } = armar({
+      existente: operativoGuardado({ conductorId: 3, vehiculoId: 4 }),
+      transporteAsignado: true,
+    });
+
+    const fallo = (await capturar(
+      servicio.editar(500, { version: 1, horaFin: '13:00' }, AUTOR),
+    )) as ReglaNegocioError;
+
+    expect(fallo.code).toBe('CAMBIO_CON_TRANSPORTE');
+    expect(fallo.message).toContain('horario o su zonal');
+    expect(actualizar).not.toHaveBeenCalled();
+    expect(liberarPorCambio).not.toHaveBeenCalled();
+  });
+
+  it('D4 · con la confirmación, el cambio de horario libera el transporte y borra sus tramos', async () => {
+    const { servicio, liberarPorCambio } = armar({
+      existente: operativoGuardado({ conductorId: 3, vehiculoId: 4 }),
+      transporteAsignado: true,
+    });
+
+    await servicio.editar(
+      500,
+      { version: 1, horaFin: '13:00', confirmarLiberacion: true },
+      AUTOR,
+    );
+
+    expect(liberarPorCambio).toHaveBeenCalledWith(
+      500,
+      expect.objectContaining({ conTransporte: true }),
+      CLIENTE,
+    );
+  });
+
+  it('D4 · sin transporte asignado, cambiar el horario solo borra los tramos para regenerarlos', async () => {
+    const { servicio, liberarPorCambio } = armar({
+      existente: operativoGuardado(),
+      transporteAsignado: false,
+    });
+
+    await servicio.editar(500, { version: 1, horaFin: '13:00' }, AUTOR);
+
+    expect(liberarPorCambio).toHaveBeenCalledWith(
+      500,
+      expect.objectContaining({ conTransporte: false }),
+      CLIENTE,
+    );
+  });
+
+  it('al registrar con Propios medios, el macrooperativo se limpia', async () => {
+    const { servicio, crear } = armar();
+
+    await servicio.registrar(
+      {
+        ...REGISTRO_VALIDO,
+        tipoTransporte: 'PROPIOS_MEDIOS',
+        esMacrooperativo: true,
+      },
+      AUTOR,
+    );
+
+    expect(crear).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tipoTransporte: 'PROPIOS_MEDIOS',
+        esMacrooperativo: false,
+      }),
+      CLIENTE,
+    );
+  });
+
+  /*
+    SOLO EN COMPLETO (2026-10-19, a pedido del negocio): el vehículo exclusivo solo tiene sentido
+    cuando la unidad acompaña todo el operativo. En otro tipo la marca se limpia en silencio.
+  */
+  it('al registrar con Solo dejar, el macrooperativo se limpia', async () => {
+    const { servicio, crear } = armar();
+
+    await servicio.registrar(
+      {
+        ...REGISTRO_VALIDO,
+        tipoTransporte: 'SOLO_INICIO',
+        esMacrooperativo: true,
+      },
+      AUTOR,
+    );
+
+    expect(crear).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tipoTransporte: 'SOLO_INICIO',
+        esMacrooperativo: false,
+      }),
+      CLIENTE,
+    );
+  });
+
+  it('al registrar con Completo, el macrooperativo se guarda', async () => {
+    const { servicio, crear } = armar();
+
+    await servicio.registrar(
+      {
+        ...REGISTRO_VALIDO,
+        tipoTransporte: 'COMPLETO',
+        esMacrooperativo: true,
+      },
+      AUTOR,
+    );
+
+    expect(crear).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tipoTransporte: 'COMPLETO',
+        esMacrooperativo: true,
+      }),
+      CLIENTE,
+    );
+  });
+
+  it('al editar de Completo a Solo retirar, el macrooperativo se limpia', async () => {
+    const { servicio, actualizar } = armar({
+      existente: operativoGuardado({
+        tipoTransporte: 'COMPLETO',
+        esMacrooperativo: true,
+      } as Partial<OperativoCompleto>),
+    });
+
+    await servicio.editar(
+      500,
+      { version: 1, tipoTransporte: 'SOLO_FIN' },
+      AUTOR,
+    );
+
+    // actualizar(id, version, cambios, autor, cliente, notas): los cambios, en el tercero.
+    expect(actualizar).toHaveBeenCalledWith(
+      500,
+      expect.anything(),
+      expect.objectContaining({
+        tipoTransporte: 'SOLO_FIN',
+        esMacrooperativo: false,
+      }),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+});
+
+describe('OperativosService · ALV-07 se apaga al reasignar (2026-10-07)', () => {
+  it('la DAF vuelve a asignar: se limpia la marca de transporte liberado', async () => {
+    const { servicio, limpiarTransporteLiberado } = armar({
+      existente: operativoGuardado({
+        transporteLiberadoEn: new Date('2026-10-07T10:00:00Z'),
+      }),
+    });
+
+    await servicio.asignarTransporte(
+      500,
+      { conductorId: 3, vehiculoId: 4 },
+      AUTOR,
+    );
+
+    expect(limpiarTransporteLiberado).toHaveBeenCalledWith(500, CLIENTE);
+  });
+
+  it('sin marca previa no escribe nada extra', async () => {
+    const { servicio, limpiarTransporteLiberado } = armar({
+      existente: operativoGuardado(),
+    });
+
+    await servicio.asignarTransporte(
+      500,
+      { conductorId: 3, vehiculoId: 4 },
+      AUTOR,
+    );
+
+    expect(limpiarTransporteLiberado).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * COMPARTIR UNIDAD · 2026-10-19 (plan «compartir unidad»). Varios operativos de una persona en el
+ * mismo punto y hora chocaban por SOLAPAMIENTO en la DAF; el registro sugiere viajar juntos y deja
+ * la INTENCIÓN, que la DAF ejecuta. Aquí se fija lo que decide `operativos`: la visibilidad (RN-48),
+ * la coincidencia y lo que se guarda o se retira.
+ */
+describe('OperativosService · compartir unidad', () => {
+  /** Un operativo que podría ser anfitrión: mismo cuadro (9), punto (10) y zonal (1). */
+  const anfitrion = (parcial: Record<string, unknown> = {}) => ({
+    id: 600,
+    identificador: 'INSP-002-05-AGO-2026',
+    cuadroId: 9,
+    puntoEncuentroId: 10,
+    horaInicio: '08:00',
+    horaFin: '12:00',
+    tipoTransporte: 'SOLO_INICIO',
+    esMacrooperativo: false,
+    compartirConId: null,
+    formulario: { numero: 2 },
+    zonales: [{ zonalId: 1 }],
+    personal: [
+      { funcionario: { apellidos: 'BARRERA TUTASIG', nombres: 'ANGELA' } },
+    ],
+    ...parcial,
+  });
+
+  const FILTRO = {
+    fecha: JORNADA,
+    puntoEncuentroId: 10,
+    zonalId: 1,
+    horaInicio: '08:00',
+    horaFin: '12:00',
+    tipoTransporte: TipoTransporte.SOLO_INICIO,
+  };
+
+  describe('coincidencias en tiempo real', () => {
+    it('busca con la visibilidad del rol y descarta los horarios que no se cruzan', async () => {
+      const { servicio, buscarCoincidencias } = armar({
+        compartir: {
+          coincidencias: [
+            anfitrion(),
+            anfitrion({
+              id: 601,
+              identificador: 'INSP-003-05-AGO-2026',
+              horaInicio: '14:00',
+              horaFin: '16:00',
+            }),
+          ],
+        },
+      });
+
+      const lista = await servicio.coincidenciasTransporte(FILTRO, [
+        RolDepartamental.DMIP_INSPECCIONES,
+      ]);
+
+      expect(buscarCoincidencias).toHaveBeenCalledWith(
+        expect.objectContaining({
+          puntoEncuentroId: 10,
+          zonalId: 1,
+          visiblesPara: [RolDepartamental.DMIP_INSPECCIONES],
+        }),
+      );
+      expect(lista.map((c) => c.identificador)).toEqual([
+        'INSP-002-05-AGO-2026',
+      ]);
+      // Solo el nombre del personal: ni teléfono ni cédula.
+      expect(lista[0]).toEqual({
+        operativoId: 600,
+        identificador: 'INSP-002-05-AGO-2026',
+        formularioNumero: 2,
+        personal: ['BARRERA TUTASIG ANGELA'],
+        horaInicio: '08:00',
+        horaFin: '12:00',
+        tipoTransporte: 'SOLO_INICIO',
+        esMacrooperativo: false,
+        compatible: true,
+        comparte: [],
+        propios: [],
+        comparteCon: [],
+        // «Completo» (2026-10-20): sin «completo» de por medio, vacíos.
+        contiene: [],
+        contenidoEn: null,
+      });
+    });
+
+    it('la unidad es la del GRUPO: con el anfitrión viajan a transporte quienes ya piden ir con él', async () => {
+      const evaluar = jest.fn().mockResolvedValue([
+        {
+          compatible: true,
+          comparte: ['retirar'],
+          propios: [],
+          comparteCon: [{ tipo: 'retirar', con: 'INSP-004-05-AGO-2026' }],
+        },
+      ]);
+      const { servicio } = armar({
+        compartir: {
+          coincidencias: [anfitrion()],
+          miembros: [
+            anfitrion({
+              id: 602,
+              identificador: 'INSP-004-05-AGO-2026',
+              tipoTransporte: 'INICIO_Y_FIN',
+              compartirConId: 600,
+            }),
+          ],
+          evaluar,
+        },
+      });
+
+      const [coincidencia] = await servicio.coincidenciasTransporte(
+        { ...FILTRO, tipoTransporte: TipoTransporte.SOLO_FIN },
+        [RolDepartamental.DMIP_INSPECCIONES],
+      );
+
+      const llamadas = evaluar.mock.calls as unknown[][];
+      const anfitriones = llamadas[0][1] as {
+        identificador: string;
+        miembros: { identificador: string }[];
+      }[];
+      expect(anfitriones[0].identificador).toBe('INSP-002-05-AGO-2026');
+      expect(anfitriones[0].miembros.map((m) => m.identificador)).toEqual([
+        'INSP-004-05-AGO-2026',
+      ]);
+      expect(coincidencia.comparteCon).toEqual([
+        { tipo: 'retirar', con: 'INSP-004-05-AGO-2026' },
+      ]);
+    });
+
+    it('quien ya pide viajar con otro se ofrece como ese anfitrión, sin cadenas ni repetidos', async () => {
+      const { servicio } = armar({
+        compartir: {
+          coincidencias: [
+            anfitrion(),
+            anfitrion({
+              id: 601,
+              identificador: 'INSP-003-05-AGO-2026',
+              compartirConId: 600,
+            }),
+          ],
+        },
+      });
+
+      const lista = await servicio.coincidenciasTransporte(FILTRO, [
+        RolDepartamental.DMIP_INSPECCIONES,
+      ]);
+
+      expect(lista.map((c) => c.operativoId)).toEqual([600]);
+    });
+
+    it('ofrece como mucho cinco, los de hora más cercana primero', async () => {
+      const { servicio } = armar({
+        compartir: {
+          coincidencias: [
+            '10:00',
+            '09:30',
+            '09:00',
+            '08:30',
+            '11:00',
+            '08:00',
+          ].map((hora, i) =>
+            anfitrion({
+              id: 700 + i,
+              identificador: `INSP-01${i}-05-AGO-2026`,
+              horaInicio: hora,
+            }),
+          ),
+        },
+      });
+
+      const lista = await servicio.coincidenciasTransporte(FILTRO, [
+        RolDepartamental.DMIP_INSPECCIONES,
+      ]);
+
+      expect(lista.map((c) => c.horaInicio)).toEqual([
+        '08:00',
+        '08:30',
+        '09:00',
+        '09:30',
+        '10:00',
+      ]);
+    });
+
+    it('el veredicto de transporte llega con su motivo', async () => {
+      const evaluar = jest
+        .fn()
+        .mockResolvedValue([
+          { compatible: false, motivo: 'No piden el mismo traslado.' },
+        ]);
+      const { servicio } = armar({
+        compartir: { coincidencias: [anfitrion()], evaluar },
+      });
+
+      const [coincidencia] = await servicio.coincidenciasTransporte(FILTRO, [
+        RolDepartamental.DMIP_INSPECCIONES,
+      ]);
+
+      expect(coincidencia).toMatchObject({
+        compatible: false,
+        motivo: 'No piden el mismo traslado.',
+      });
+      expect(evaluar).toHaveBeenCalledWith(
+        expect.objectContaining({ zonalId: 1, tipoTransporte: 'SOLO_INICIO' }),
+        [expect.objectContaining({ horaInicio: '08:00', zonalId: 1 })],
+      );
+    });
+  });
+
+  describe('la intención al registrar', () => {
+    const CON_TRANSPORTE: DatosRegistro = {
+      ...REGISTRO_VALIDO,
+      tipoTransporte: TipoTransporte.SOLO_INICIO,
+    };
+
+    it('guarda el anfitrión con el que pide compartir unidad', async () => {
+      const { servicio, crear } = armar({
+        compartir: { paraCompartir: [anfitrion()] },
+      });
+
+      await servicio.registrar(
+        { ...CON_TRANSPORTE, compartirConOperativoId: 600 },
+        AUTOR,
+      );
+
+      expect(crear).toHaveBeenCalledWith(
+        expect.objectContaining({
+          compartirConId: 600,
+          justificacionExclusivo: null,
+        }),
+        CLIENTE,
+      );
+    });
+
+    it('un destino fuera de su alcance da 404 sin revelar que existe, y no escribe nada', async () => {
+      const { servicio, crear } = armar({ compartir: { paraCompartir: [] } });
+
+      await expect(
+        servicio.registrar(
+          { ...CON_TRANSPORTE, compartirConOperativoId: 600 },
+          AUTOR,
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+      expect(crear).not.toHaveBeenCalled();
+    });
+
+    it('otro punto de encuentro: 409 COMPARTIR_NO_COMPATIBLE', async () => {
+      const { servicio } = armar({
+        compartir: { paraCompartir: [anfitrion({ puntoEncuentroId: 20 })] },
+      });
+
+      await expect(
+        servicio.registrar(
+          { ...CON_TRANSPORTE, compartirConOperativoId: 600 },
+          AUTOR,
+        ),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'COMPARTIR_NO_COMPATIBLE',
+      });
+    });
+
+    it('si transporte dice que los tramos no van juntos, 409 con su motivo', async () => {
+      const evaluar = jest
+        .fn()
+        .mockResolvedValue([{ compatible: false, motivo: 'Otro sector.' }]);
+      const { servicio } = armar({
+        compartir: { paraCompartir: [anfitrion()], evaluar },
+      });
+
+      await expect(
+        servicio.registrar(
+          { ...CON_TRANSPORTE, compartirConOperativoId: 600 },
+          AUTOR,
+        ),
+      ).rejects.toThrow(
+        'No se puede compartir unidad con INSP-002-05-AGO-2026: Otro sector.',
+      );
+    });
+
+    it('compartir y vehículo exclusivo se excluyen: 409 COMPARTIR_CON_EXCLUSIVO', async () => {
+      const { servicio } = armar({
+        compartir: { paraCompartir: [anfitrion()] },
+      });
+
+      await expect(
+        servicio.registrar(
+          {
+            ...CON_TRANSPORTE,
+            // El macrooperativo solo existe en COMPLETO (2026-10-19).
+            tipoTransporte: TipoTransporte.COMPLETO,
+            esMacrooperativo: true,
+            compartirConOperativoId: 600,
+          },
+          AUTOR,
+        ),
+      ).rejects.toMatchObject({ code: 'COMPARTIR_CON_EXCLUSIVO' });
+    });
+
+    it('un anfitrión con vehículo exclusivo tampoco comparte', async () => {
+      const { servicio } = armar({
+        compartir: { paraCompartir: [anfitrion({ esMacrooperativo: true })] },
+      });
+
+      await expect(
+        servicio.registrar(
+          { ...CON_TRANSPORTE, compartirConOperativoId: 600 },
+          AUTOR,
+        ),
+      ).rejects.toMatchObject({ code: 'COMPARTIR_CON_EXCLUSIVO' });
+    });
+
+    it('propios medios limpia la intención y no consulta a nadie', async () => {
+      const { servicio, crear, buscarParaCompartir } = armar();
+
+      await servicio.registrar(
+        {
+          ...REGISTRO_VALIDO,
+          tipoTransporte: TipoTransporte.PROPIOS_MEDIOS,
+          compartirConOperativoId: 600,
+          justificacionExclusivo: 'No aplica en propios medios',
+        },
+        AUTOR,
+      );
+
+      expect(buscarParaCompartir).not.toHaveBeenCalled();
+      expect(crear).toHaveBeenCalledWith(
+        expect.objectContaining({
+          compartirConId: null,
+          justificacionExclusivo: null,
+        }),
+        CLIENTE,
+      );
+    });
+
+    it('la justificación solo se guarda con vehículo exclusivo', async () => {
+      const { servicio, enviados } = armar();
+
+      await servicio.registrar(
+        {
+          ...CON_TRANSPORTE,
+          tipoTransporte: TipoTransporte.COMPLETO,
+          esMacrooperativo: true,
+          justificacionExclusivo: 'Traslado de equipos pesados',
+        },
+        AUTOR,
+      );
+      await servicio.registrar(
+        {
+          ...CON_TRANSPORTE,
+          justificacionExclusivo: 'Traslado de equipos pesados',
+        },
+        AUTOR,
+      );
+
+      expect(enviados[0]).toMatchObject({
+        esMacrooperativo: true,
+        justificacionExclusivo: 'Traslado de equipos pesados',
+      });
+      expect(enviados[1]).toMatchObject({
+        esMacrooperativo: false,
+        justificacionExclusivo: null,
+      });
+    });
+  });
+
+  describe('la intención al editar', () => {
+    /** Los cambios que llegaron al repositorio en la primera edición. */
+    const cambiosEditados = (actualizar: jest.Mock): unknown =>
+      (actualizar.mock.calls[0] as unknown[])[2];
+
+    const conIntencion = () =>
+      operativoGuardado({
+        tipoTransporte: TipoTransporte.SOLO_INICIO,
+        compartirConId: 600,
+      } as Partial<OperativoCompleto>);
+
+    it('si el cambio de horario deja de coincidir, la retira y avisa COMPARTIR_RETIRADO', async () => {
+      const { servicio, actualizar } = armar({
+        existente: conIntencion(),
+        compartir: { paraCompartir: [anfitrion()] },
+      });
+
+      const editado = await servicio.editar(
+        500,
+        { version: 1, horaInicio: '14:00', horaFin: '18:00' },
+        AUTOR,
+      );
+
+      expect(editado.avisos).toEqual(['COMPARTIR_RETIRADO']);
+      expect(cambiosEditados(actualizar)).toMatchObject({
+        compartirConId: null,
+      });
+    });
+
+    it('si sigue coincidiendo, la conserva y no avisa nada', async () => {
+      const { servicio, actualizar } = armar({
+        existente: conIntencion(),
+        compartir: { paraCompartir: [anfitrion()] },
+      });
+
+      const editado = await servicio.editar(
+        500,
+        { version: 1, horaFin: '11:00' },
+        AUTOR,
+      );
+
+      expect(editado.avisos).toBeUndefined();
+      expect(cambiosEditados(actualizar)).toMatchObject({
+        compartirConId: 600,
+      });
+    });
+
+    it('pedirla ahora con un destino que no coincide es un error, no un aviso', async () => {
+      const { servicio } = armar({
+        existente: operativoGuardado({
+          tipoTransporte: TipoTransporte.SOLO_INICIO,
+        } as Partial<OperativoCompleto>),
+        compartir: {
+          paraCompartir: [anfitrion({ horaInicio: '15:00', horaFin: '18:00' })],
+        },
+      });
+
+      await expect(
+        servicio.editar(
+          500,
+          { version: 1, compartirConOperativoId: 600 },
+          AUTOR,
+        ),
+      ).rejects.toMatchObject({ code: 'COMPARTIR_NO_COMPATIBLE' });
+    });
+
+    it('marcar vehículo exclusivo retira la intención de compartir', async () => {
+      const { servicio, actualizar } = armar({ existente: conIntencion() });
+
+      await servicio.editar(
+        500,
+        {
+          version: 1,
+          tipoTransporte: TipoTransporte.COMPLETO,
+          esMacrooperativo: true,
+        },
+        AUTOR,
+      );
+
+      expect(cambiosEditados(actualizar)).toMatchObject({
+        esMacrooperativo: true,
+        compartirConId: null,
+      });
+    });
+
+    it('la intención entra en la traza de auditoría', async () => {
+      const { servicio, compararCambios } = armar({
+        existente: operativoGuardado({
+          tipoTransporte: TipoTransporte.SOLO_INICIO,
+        } as Partial<OperativoCompleto>),
+        compartir: { paraCompartir: [anfitrion()] },
+      });
+
+      await servicio.editar(
+        500,
+        { version: 1, compartirConOperativoId: 600 },
+        AUTOR,
+      );
+
+      expect(compararCambios).toHaveBeenLastCalledWith(
+        expect.objectContaining({ oper_compartir_con_id: null }),
+        expect.objectContaining({ oper_compartir_con_id: 600 }),
+      );
+    });
+
+    /*
+      QUIÉN LA PIDIÓ Y CUÁNDO (2026-10-19, plan «acciones-icono-notas», N2): la tarjeta
+      «Comparte con X» de las notas lleva su autor y su hora.
+    */
+    it('al pedirla, guarda quién edita y cuándo, y entra en la traza', async () => {
+      const { servicio, actualizar, compararCambios } = armar({
+        existente: operativoGuardado({
+          tipoTransporte: TipoTransporte.SOLO_INICIO,
+        } as Partial<OperativoCompleto>),
+        compartir: { paraCompartir: [anfitrion()] },
+      });
+
+      await servicio.editar(
+        500,
+        { version: 1, compartirConOperativoId: 600 },
+        AUTOR,
+      );
+
+      expect(cambiosEditados(actualizar)).toMatchObject({
+        compartirConId: 600,
+        compartirSolicitadoPor: AUTOR.usuarioId,
+        compartirSolicitadoEn: expect.any(Date) as unknown,
+      });
+      expect(compararCambios).toHaveBeenLastCalledWith(
+        expect.objectContaining({ oper_compartir_solicitado_por: null }),
+        expect.objectContaining({
+          oper_compartir_solicitado_por: AUTOR.usuarioId,
+        }),
+      );
+    });
+
+    it('al retirarla, vacía quién la pidió y cuándo', async () => {
+      const { servicio, actualizar } = armar({
+        existente: operativoGuardado({
+          tipoTransporte: TipoTransporte.SOLO_INICIO,
+          compartirConId: 600,
+          compartirSolicitadoPor: 9,
+          compartirSolicitadoEn: new Date('2026-10-19T14:00:00.000Z'),
+        } as Partial<OperativoCompleto>),
+      });
+
+      await servicio.editar(
+        500,
+        { version: 1, compartirConOperativoId: null },
+        AUTOR,
+      );
+
+      expect(cambiosEditados(actualizar)).toMatchObject({
+        compartirConId: null,
+        compartirSolicitadoPor: null,
+        compartirSolicitadoEn: null,
+      });
+    });
+
+    it('si la conserva, no toca quién la pidió', async () => {
+      const { servicio, actualizar } = armar({
+        existente: conIntencion(),
+        compartir: { paraCompartir: [anfitrion()] },
+      });
+
+      await servicio.editar(500, { version: 1, horaFin: '11:00' }, AUTOR);
+
+      expect(cambiosEditados(actualizar)).not.toHaveProperty(
+        'compartirSolicitadoPor',
+      );
+    });
+  });
+});

@@ -41,6 +41,17 @@ propia asignación.
 **Prohibido:** `typeorm`, `@nestjs/typeorm`, `dataSource.query`, funciones `fu_*`,
 `$queryRawUnsafe`, y cualquier dependencia fuera del stack sin autorización previa.
 
+**Autorizado:** `exceljs` (2026-10-05), **solo** para exportar la cobertura por turnos de
+Instrucción a `.xlsx` (`talento-operativo/application/cobertura-exportador.ts`). No es una
+licencia general para generar hojas de cálculo en otros módulos: cada uso nuevo se autoriza. Ampliado el 2026-10-06 a la matriz de **turnos de conductores** de la DAF
+(`transporte/application/turnos-conductores-exportador.ts`), que reutiliza el mismo formato. Ampliado
+el 2026-10-06 a **LEER** `.xlsx` para importar el HORARIO de turnos de conductores de la DAF
+(`transporte/application/turnos-conductores-importador.ts`), autorizado por el usuario. Ampliado
+el 2026-10-07 a **LEER** `.xlsx` en la **carga inicial** del administrador (conductores, vehículos,
+garajes y turnos; `transporte/application/carga-inicial.service.ts`, que reutiliza el mismo lector
+`leerHojaHorario`). Desde esa fecha la importación del HORARIO ya no se ofrece en la pantalla de
+turnos: su endpoint de vista previa sigue y lo usa solo la carga inicial.
+
 ---
 
 ## 3. Cómo ejecutar
@@ -58,7 +69,95 @@ npm run lint                    # debe salir con código 0
 
 npm test                        # unitarias: no necesitan base de datos
 npm run test:integracion        # EXIGE la base levantada (test/jest-integracion.json)
-npm run prisma:verificar        # 37 tablas, 15 enums, 33 CHECK, 10 índices parciales
+npm run prisma:verificar        # 53 tablas, 21 enums, 44 restricciones, 14 índices parciales
+```
+
+### Zonales por formulario (2026-10-13)
+
+**Cada formulario tiene su configuración propia e independiente.** Áreas, puntos, tipos de control e instituciones ya eran de un formulario. Desde el 2026-10-13 también lo son las **zonales**: `t_zonal_formulario`, con nombre y estado propios.
+
+**`t_zonal` queda como la ZONA DE LA CIUDAD**, sin cambios. La usan la ficha de personal, la flota, los tramos, la matriz de traslados y Transporte, que comparan `zona_id` entre formularios. No se administra desde P-08: ahí solo se elige al dar de alta una zonal. Los puntos y `t_operativo_zonal` siguen guardando `zona_id`.
+
+**Las rutas de administración cuelgan del formulario**: `/administracion/catalogos/:codigo/…`. Un valor de otro formulario responde **404**. Las copias entre formularios se retiraron.
+
+Contrato en `docs/CONTRATO-zonal-por-formulario.md`.
+
+**Migración `20261013120000_zonal_por_formulario`** (aditiva e idempotente, se aplica con `migrate deploy`):
+- crea la tabla;
+- borra las cuatro «zonales» que eran puntos, solo si nunca se usaron;
+- crea una zonal de formulario por cada par (formulario, zona) en uso;
+- agrega la FK compuesta punto → zonal de su formulario.
+
+**Pendiente:** Mis operativos, la matriz, la jornada y la orden de servicio todavía muestran el nombre de la zona de la ciudad. Hoy es idéntico al del formulario.
+
+### Limpieza de datos de los catálogos (2026-10-13)
+
+`src/scripts/limpieza-catalogos.ts` corrige datos heredados de los catálogos del cuadro:
+- zonales que en realidad son puntos de encuentro;
+- tipos de control que no están en MAYÚSCULAS;
+- instituciones, con el mapa aprobado por negocio: la denominación completa donde todavía repite la sigla (`DENOMINACIONES`) y la sigla corta `SS`, `CBQ` o `FF.AA.` donde la sigla es el nombre entero (`SIGLAS_CORTAS`);
+- zonales **de cada formulario** (`t_zonal_formulario`) que no están en formato título. Antes de la migración esta parte se reporta como pendiente.
+
+Se compila con `src/`, así que en producción corre sin `ts-node`. **Sin `--aplicar`, solo reporta y no escribe nada.**
+
+```bash
+docker exec transporte-app node dist/scripts/limpieza-catalogos.js                     # reporte
+docker exec transporte-app node dist/scripts/limpieza-catalogos.js --incluir-zonales   # reporte, con las zonales
+docker exec transporte-app node dist/scripts/limpieza-catalogos.js --aplicar --usuario=<usua_id>
+docker exec transporte-app node dist/scripts/limpieza-catalogos.js --aplicar --incluir-zonales --usuario=<usua_id>
+```
+
+- **Una sola transacción.** Cada cambio deja su traza en `t_auditoria` con el rol `ADMINISTRADOR` y la correlación `limpieza-catalogos-2026-10-13`. `--usuario` es quien firma la traza y es obligatorio para aplicar.
+- **Las zonales se aplican solo con `--incluir-zonales`.** La parte a) borra o fusiona **zonas de la ciudad**, junto con sus zonales de formulario. Con ese flag:
+  - la zonal que nunca se usó se elimina con sus puntos;
+  - la que tiene uso y destino en `DESTINOS_DE_FUSION` se fusiona con el punto equivalente de Zonal Eugenio Espejo, en el mismo formulario;
+  - la que tiene uso y no tiene destino se reporta como «requiere decisión» y no se toca.
+- **Idempotente.** La segunda corrida reporta 0 cambios. Un cambio que chocaría con un índice único se reporta y se salta.
+- **Antes de aplicarlo en producción**, hacer `pg_dump` y revisar el reporte con negocio.
+
+### Ocupación por tramos y horas libres (Transporte DAF, 2026-10-14)
+
+**La ocupación de un conductor o un vehículo sale SOLO de `t_tramo_transporte`.** Un operativo «dejar y retirar» ocupa al conductor en sus dos tramos y deja libre el intervalo medio. `t_operativo.cond_id/vehi_id` queda como **reflejo de solo lectura** del primer tramo asignado, para la orden de servicio, la matriz y `ck_operativo_transporte`: nadie lo lee para decidir si alguien está ocupado.
+
+- **`PATCH /transporte/operativos/:id` delega en la asignación por tramos** (`asignarBloque`): mismas reglas que «Planificar el día». `ActualizarTransporteDto` sigue con dos campos (regla 3). `/desasignar` vacía los tramos del operativo.
+- **El macrooperativo (vehículo exclusivo) solo existe en `COMPLETO` (2026-10-19).** `macroSegunTipo` lo deja en `false` con cualquier otro tipo, en el alta, la edición y la herencia del adicional, sin error (como ya hacía con `PROPIOS_MEDIOS`). No se migraron datos: rige al crear y al editar.
+- **RN-44 (patrulla consecutiva) y RN-25 (tope de salidas pesadas) siguen en `talento-operativo`** y llegan a la política de tramos como veredictos (`ElegibilidadService.evaluadorDeConduccion`, por lote). El solapamiento, el nombramiento, la ausencia y la jornada (lapso del primer al último tramo, D8) los mide la política de tramos (`transporte/application/politicas/asignacion-conductor.policy.ts`), con traslados.
+- **El adicional hereda conductor y vehículo del original POR TRAMOS**: después de confirmar el alta, `transporte` crea sus tramos ya asignados (el conductor del tramo del original del mismo tipo, o su reflejo), validados con las mismas reglas que `asignarBloque` y sin mirar la ventana (regla 9). Si no es viable, nace PENDIENTE con el motivo en la traza. `operativos` lo pide por el puerto `RegistroHerenciaTransporte`, en el que `transporte` se inscribe al iniciar, sin dependencia circular.
+- **Cambiar el horario o la zonal** de un operativo con transporte asignado exige `confirmarLiberacion` (409 `CAMBIO_CON_TRANSPORTE`; si solo cambia el tipo, sigue `CAMBIO_TIPO_CON_TRANSPORTE`). Sus tramos se borran y transporte los regenera.
+- **Horas libres**: `GET /transporte/huecos/:fecha` y `GET /transporte/conductores/:id/huecos-libres` (`politicas/huecos-libres.ts`, no se guardan). Parámetro `DAF_HUECO_MINIMO_MIN`.
+- **Duración del tramo por tipo**: `DAF_DURACION_DEJAR_MIN` y `DAF_DURACION_RETIRAR_MIN` (si faltan, `DAF_DURACION_TRAMO_MIN`). **No** se calcula con la matriz de traslados.
+- **La confirmación del optimizador** deja una fila de `t_auditoria` por tramo asignado, compartido o libre activado, más un resumen con la estrategia y las omitidas, con una correlación propia que devuelve.
+- **Compartir unidad (2026-10-19).** `POST /transporte/tramos/compartir` lleva al invitado en el conductor y la placa de un anfitrión ya asignado (regla única `politicas/compartir-tramo.ts`, con asientos); `GET /transporte/tramos/:operativoId/compartibles` lista con quién, el pedido de quien registró primero. Para la política, anfitrión e invitados son UN intervalo (`agendaPorUnidad` / `conSuUnidad`). Quitar o reasignar un anfitrión suelta a sus invitados y lo avisa (`liberados`, `aviso`; el `DELETE …/asignacion` responde 200 con cuerpo). El optimizador prioriza el pedido y su confirmación revalida cada compartido. **«La misma unidad»**: se comparte el conductor con su vehículo, así que basta UN traslado en común (un «dejar y retirar» comparte el dejar con un «solo dejar»); los traslados sin pareja los hace la misma unidad si la política completa lo permite y, si no, quedan pendientes con su motivo (`tramosPropios`, `aviso`). «Asignar conductor» sobre un operativo con algo compartido y algo pendiente completa solo lo pendiente (`porAsignar`). **Tres clases** (2026-10-19): COMPARTIDO, SECUENCIAL (no se cruza: la misma unidad lo hace después) y CONFLICTO; la unidad es la del GRUPO (A+B dejan juntos, B+C retiran juntos). **«Completo» comparte unidad (2026-10-20)**: cuarta clase CONTENIDO —un traslado DENTRO de un «completo» de la unidad, o un «completo» que ABARCA sus traslados— en el mismo sitio (misma zonal y, si ambos lo tienen, mismo punto); otro punto, solape parcial o exclusivo siguen siendo CONFLICTO. Asientos por momento (ver 2026-10-21); con ABARCA los tramos cubiertos se re-enraízan a la raíz (un grupo, un intervalo); el registro suma `contiene` / `contenidoEn` y `compartibles` suma `completo` y `personasConInvitado`. Lo que el conductor de la unidad hace FUERA del grupo también cuenta: `compartibles` y `compartir` evalúan los traslados compartidos con la política completa de ese conductor (`choqueFueraDelGrupo`), así que un «completo» no va en la unidad de quien a media mañana está en otro punto; `comparte` lista solo lo del mismo tipo y lo que va dentro de un «completo» va en `contiene`. **El «completo» es la raíz y lo hace también el automático (2026-10-21)**: una regla única pura, `encajarEnUnidad`, decide para la DAF a mano (`emparejar`), «Asignar» con varios operativos que se cruzan (`agruparEnElBloque`: los agrupa o 409, nunca dos traslados que se pisan sin marca), el optimizador (`contener`: con «compartir carro», un bloque de dejar/retirar dentro de un «completo» del MISMO punto conocido va primero en esa unidad, con los asientos de cada momento y la política fuera del grupo) y su confirmación (`compatibleAlConfirmar`). Cuando un «completo» abarca la unidad pasa a ser la RAÍZ y se re-enraízan a él los dejar/retirar que contiene, también los que entraron «con la misma unidad» sin marca, así que el orden en que se asignan no importa. La contención es solo de dejar y retirar (otro «completo» no se contiene). En los candidatos, quien está ocupado solo por esa unidad sale como `COMPARTE` («Comparte unidad con X», `compartirCon`). **Los asientos se cuentan POR MOMENTO (2026-10-21, decisión del negocio, definitiva)**: en cada momento en que viaja el que se suma (el inicio de cada traslado de la unidad mientras va a bordo), las personas DISTINTAS a bordo —el «completo» todo su horario (±`COMPARTIR_VENTANA_MIN`), cada dejar y cada retirar solo durante su traslado, y él— no pasan de los asientos de la placa (`personasPorMomento` / `maximoAbordo`, puras). Caso 21-OCT con la PMA-3370 en 3 asientos: a las 08:00 van el «completo» y los dos dejar (3), a las 16:00 el «completo» y los dos retirar (3): caben los cuatro; con 2, 409 «No caben a las 08:00: la unidad llevaría 3 personas y el vehículo tiene 2 asientos.». Lo mismo en `compartibles` (`asientosLibres` del momento más lleno, `personasConInvitado`, `asientosPorMomento: { tipo, hora, ocupados }[]`), «Asignar» con varios, el optimizador (`compartir` y `contener`) y su confirmación. Por unas horas del mismo día rigió «todo el grupo aunque no viaje a la misma hora»; se revirtió. Contrato: `docs/CONTRATO-compartir-unidad.md`.
+
+Contratos en `docs/CONTRATO-ocupacion-por-tramos.md` y `docs/CONTRATO-huecos-libres.md`. Migración `20261014090000_daf_huecos_y_duracion_por_tipo` (solo parámetros).
+
+### Ausencias de conductores (Flota y garajes, 2026-10-16)
+
+La ausencia del conductor ya la leía toda la planificación (`t_disponibilidad.cond_id`); desde hoy se REGISTRA desde Flota: `AusenciasConductorController` / `AusenciasConductorService` / `AusenciasConductorRepository` en `transporte`, permiso `flota:ausencias` (migración de datos `20261016120000`). Mismas reglas puras que el personal, que salieron a `common/ausencias/reglas-ausencia.ts` (`reglas-personal.ts` las reexporta). Sin alcance por dirección ni autoría: la flota tiene un solo dueño, como el mantenimiento. Contrato: `docs/CONTRATO-ausencias-conductor.md`.
+
+### Alineación con `SIGOC_Logica_de_Negocio_Transporte_DAF.md` (2026-10-15)
+
+- **Sin vehículo vale, y se dice.** `vehiculoId: null` se evalúa sin vehículo (sin taller, asientos ni arranque lejos) y lleva el aviso `SIN_VEHICULO` «Asignado sin vehículo: falta la placa.». El operativo sigue PENDIENTE hasta tener placa: el reflejo necesita los dos.
+- **Sustitución de flota.** `POST /transporte/evaluar/vehiculos` evalúa cada placa activa del día para un conductor y un bloque (`PLACA_OCUPADA` = RN-DAF-01). El conductor no está amarrado a su habitual. El optimizador le cambia la placa a mitad de jornada **solo** si la de hoy está en el taller (G6). Contrato: `docs/CONTRATO-sustitucion-flota.md`.
+- **Duración del tramo (D7): parámetro por tipo, no la matriz.** El tramo empieza y termina en la zonal del operativo; la matriz daría siempre «misma zona» (15 min) y contaría dos veces el traslado, que ya cobran `NO_LLEGA` y los huecos ENTRE tramos. Tomar la matriz exige saber dónde aborda el personal (§7, sin definir).
+- **Jornada máxima (D8): el lapso** del primer inicio al último fin, no la suma de horas al volante. Las horas de conducción se muestran solo como dato.
+- **Cobertura de la matriz**: `GET /administracion/traslados` devuelve `cobertura: { posibles, sinTiempo }` (sin el DMQ): los pares que aún usan la regla general.
+
+| Código del documento | Código del sistema |
+|---|---|
+| `LIBRE_SIN_ACTIVAR` | `LIBRE_NO_ACTIVADO` |
+| `VEHICULO_TALLER` | `VEHICULO_EN_TALLER` |
+| `CAPACIDAD_ASIENTOS` | `ASIENTOS` |
+| `SOLAPAMIENTO` (vehículo) | `PLACA_OCUPADA` / 409 `VEHICULO_OCUPADO` |
+| `SOLAPAMIENTO`, `NO_LLEGA`, `JORNADA_MAXIMA` | iguales |
+
+No se renombran: el frontend depende de ellos.
+
+**Script `src/scripts/tramos-desde-asignacion-clasica.ts`**: a cada operativo asignado por la ruta clásica que no tiene tramos le crea los suyos con ese conductor y vehículo. Sin él, para la agenda ese conductor estaría libre a esa hora. Mismo patrón que la limpieza de catálogos: sin `--aplicar` solo reporta, una transacción, traza con la correlación `tramos-clasicos-AAAA-MM-DD`, idempotente.
+
+```bash
+docker exec transporte-app node dist/scripts/tramos-desde-asignacion-clasica.js                          # reporte
+docker exec transporte-app node dist/scripts/tramos-desde-asignacion-clasica.js --aplicar --usuario=<usua_id>
 ```
 
 Las pruebas de integración viven en `test/` con su propia configuración, a propósito: si
@@ -109,8 +208,10 @@ Solo por **servicios publicados**. Prohibido importar el repositorio de otro sub
 | Origen | Destino | Servicio |
 |---|---|---|
 | `operativos` | `talento-operativo` | `ElegibilidadService.verificar()` → veredicto y motivo, **no datos del funcionario** |
+| `transporte` | `talento-operativo` | `ElegibilidadService.evaluadorDeConduccion()` → veredictos RN-44 y RN-25 del conductor, por lote (2026-10-14) |
 | `operativos` | `configuracion` | `FormulariosService.obtenerDefinicion()` |
 | `transporte` | `operativos` | `OperativosService.asignarTransporte()` |
+| `operativos` | `transporte` | Por **puerto** (registro que `transporte` llena al iniciar), sin importar el módulo: `RegistroHerenciaTransporte` (el adicional hereda, 2026-10-14) y `RegistroCompatibilidadCompartir` (¿van juntos en la misma unidad?, 2026-10-19) |
 | `documentos` | `operativos`, `transporte` | Servicios de consulta |
 | Todos | `cuadro-diario` | `CuadroDiarioService.puedeEscribir()` |
 
@@ -249,7 +350,14 @@ registrado como riesgo aceptado en `17_KNOWN_ISSUES.md`, B-01.
 Dos consecuencias al escribir código aquí:
 
 - **No lo registre en la bitácora, no lo devuelva en ningún DTO y no lo reenvíe a nada que no sea
-  Auth.** `perfilVigente` devuelve `tokenAuth: null` a propósito: relee de la base y ahí no está.
+  Auth ni Inspección.** `perfilVigente` devuelve `tokenAuth: null` a propósito: relee de la base y ahí no está.
+
+  > **Excepción decidida el 2026-10-07: Inspección.** Para ofrecer los trámites del inspector en el
+  > registro, `operativos/infrastructure/inspeccion-tramites.client.ts` lo reenvía como Bearer a
+  > `GET {INSPECCION_API_URL}/operativos?fecha=`. Inspección es de la misma familia SIGOC: valida
+  > con el secreto compartido de Auth y `/auth/session/validate`, y no tiene token de servicio.
+  > Servidor a servidor, sin bitácora, caché por SHA-256 del token y respuesta recortada al alcance
+  > del rol (H-01). Cualquier OTRO destino sigue prohibido. Ver `17_KNOWN_ISSUES.md`, B-01.
 - **Una sesión abierta antes de esa fecha no lo lleva.** El endpoint que lo necesita lo comprueba
   y responde con un mensaje que pide volver a entrar, no con un `500`.
 
@@ -319,6 +427,8 @@ se cerró así; lo que sigue es el estado, no historia.
   'self'`, `object-src 'none'`, `frame-ancestors 'none'`, `base-uri 'self'`), `nosniff`,
   anti-clickjacking y `crossOriginResourcePolicy: 'cross-origin'` (el frontend descarga la
   matriz/órdenes desde otro origen). **HSTS solo en producción.**
+- **`TRUST_PROXY` (2026-10-16).** Número de proxies de confianza delante del backend (`saltosProxy` en `app.config.ts`, `app.set('trust proxy', n)` en `main.ts`). Detrás del Gateway de `*.quito.gob.ec` y del nginx del frontend es **2**; sin ella, `req.ip` es la IP del último proxy y `ThrottlerGuard` contaría a todos los usuarios como uno. Vacía = no se toca (desarrollo); en preproducción es **1** (nginx → app). Solo un entero: `validar-entorno.ts` detiene el arranque con `true`, una IP o un negativo. Instalación detrás del Gateway: `INSTALACION-PRODUCCION.md` y `docker-compose.gateway.yml`.
+- **Tres ambientes (2026-10-16): LOCAL-DESARROLLO, PREPRODUCCIÓN (el servidor actual, `http://<IP_PREPRODUCCION>:5180`, sin Gateway) y PRODUCCIÓN (servidor nuevo detrás del Gateway, `https://gestion-sigoc.quito.gob.ec`).** La tabla, el recorrido de una versión y el empaquetado están en `DESPLIEGUE.md`, «Los tres ambientes». Los paquetes los arma `scripts/empaquetar.sh <preproduccion|produccion> <portal>`: misma imagen de backend en los dos servidores, frontend compilado con el portal de cada uno. Plantillas: `.env.preproduccion.example` y `.env.produccion.example`; guías: `COMANDOS-PREPRODUCCION.md` e `INSTALACION-PRODUCCION.md`.
 - **CORS sin reflejo abierto.** Se retiró el respaldo `origin: true` (devolvía el origen de quien
   preguntara con `credentials:true`). En producción `CORS_ORIGINS` es **obligatorio**; en
   desarrollo el respaldo es una lista local explícita, nunca «cualquiera».
@@ -344,8 +454,21 @@ se cerró así; lo que sigue es el estado, no historia.
 
 ## 6. Reglas invariables
 
-1. **Las reglas de descanso viven solo en `talento-operativo`.** Si aparecen en otro submódulo,
-   es un defecto. Ver skill `reglas-descanso`.
+1. **Las reglas de descanso viven en DOS lugares, y solo en ellos.** Fuera de estos dos, una
+   regla de descanso es un defecto. Ver skill `reglas-descanso`.
+
+   | Dónde | Qué reglas |
+   |---|---|
+   | `talento-operativo` | Todas las del **personal**, y **RN-44** (patrulla consecutiva) y **RN-25** (tope de salidas pesadas) del **conductor**. Transporte consume las dos del conductor por `ElegibilidadService.evaluadorDeConduccion`, como veredictos por lote. |
+   | La política de tramos de `transporte` (`transporte/application/politicas/asignacion-conductor.policy.ts`), **desde el 2026-10-14** | Cuatro del **conductor**: la ausencia, el nombramiento (RN-26/33), el solapamiento (VAL-21) y la jornada (VAL-22). |
+
+   - **La jornada del conductor (VAL-22) se mide como el lapso del primer al último tramo** (D8),
+     con `DAF_MAX_JORNADA_HORAS`.
+   - **Esas cuatro reglas se movieron porque solo se miden bien por tramo y con traslados**: un
+     «dejar y retirar» ocupa al conductor en sus dos tramos y no entre medio.
+   - **El tope anterior de horas al volante ya no se aplica al conductor.** Era el VAL-22 clásico,
+     con `JORNADA_MAXIMA_HORAS`; ahora rige `DAF_MAX_JORNADA_HORAS` sobre el lapso.
+     `JORNADA_MAXIMA_HORAS` sigue rigiendo al **personal**.
 
    > **Desde el 2026-09-08 se evalúan sobre la ventana EFECTIVA de cada persona, no la del
    > operativo (RN-66).** `t_asignacion_personal` lleva un **turno propio**
@@ -441,6 +564,19 @@ perderías el rastro de qué se acordó con el Product Owner y qué se supuso.
 | Catálogos de los nueve formularios | `docs/FASE2-documentacion-funcional.md` §16.3 |
 | Agregados, objetos de valor, eventos | `docs/FASE3-analisis-dominio.md` |
 | Contratos de API | `docs/FASE4-arquitectura-tecnica.md` §8 |
+| **«Planificar el día» (DAF, 4 pasos): resumen, candidatos, simulación, vehículos que salen, acta y hojas de ruta** | **`docs/CONTRATO-planificar-dia.md`** |
+| **Rediseño de «Personal y disponibilidad» (P-07): alta desde Auth con correo del servidor, 409 de cédula/solape/ausencia pasada, ausencias del maestro, operativos de una persona, situaciones nuevas** | **`docs/CONTRATO-personal-rediseno.md`** |
+| **Rediseño de «Catálogos del cuadro» (P-08): `puedeEliminar` en la lista, zonales de administración, copias en otros formularios, duplicados 409** | **`docs/CONTRATO-catalogos-rediseno.md`** |
+| **Ajustes de «Catálogos del cuadro» (2026-10-13): tipos en MAYÚSCULAS, zonales en formato título, DMQ editable, orden de motivos, script de limpieza** | **`docs/CONTRATO-catalogos-ajustes.md`** |
+| **Cada formulario con su configuración propia (2026-10-13): `t_zonal_formulario`, rutas `/administracion/catalogos/:codigo/…`, 404 con formulario ajeno, copias retiradas** | **`docs/CONTRATO-zonal-por-formulario.md`** |
+| **Rediseño de «Formularios del cuadro» (P-09, 2026-10-13): sin áreas al crear/editar (solo en Catálogos), número/código/áreas → 400, duplicados 409 `FORMULARIO_DUPLICADO`, prefijo general único entre formularios, nombre en MAYÚSCULAS, `GET numero-libre`** | **`docs/CONTRATO-formularios-rediseno.md`** |
+| **«Mis operativos» por rango (P-02, 2026-10-13): `desde`/`hasta` (y `fecha` por compatibilidad), máximo `MIS_OPERATIVOS_RANGO_MAX_DIAS`, `GET /operativos/rango`, `cuadroEstado` y `admiteEdicion` por fila, orden fecha desc + identificador** | **`docs/CONTRATO-mis-operativos-rango.md`** |
+| **Ocupación por tramos (Transporte DAF, 2026-10-14): una sola fuente, el PATCH clásico delega, RN-44/RN-25 en la política de tramos, el adicional hereda por tramos, 409 `CAMBIO_CON_TRANSPORTE`, traza por asignación del optimizador** | **`docs/CONTRATO-ocupacion-por-tramos.md`** |
+| **Horas libres (Transporte DAF, 2026-10-14): `GET /transporte/huecos/:fecha` y `/conductores/:id/huecos-libres`, bruto / útil mínimo / aprovechable, horas extra** | **`docs/CONTRATO-huecos-libres.md`** |
+| **Conteo por formulario (2026-10-16): `GET /operativos/conteo?fecha=` → `[{ formularioId, total }]`, el «N hoy» del selector del registro; todos los permitidos (0 si no hay), misma visibilidad que el listado, fecha sin cuadro → 0** | **`docs/CONTRATO-conteo-formularios.md`** |
+| **Compartir unidad (2026-10-19): la DAF comparte con `POST /transporte/tramos/compartir` y `GET /transporte/tramos/:operativoId/compartibles`, un intervalo para la política, liberación del anfitrión; `GET /operativos/coincidencias-transporte` (mismo día, punto, zonal y horario, solo el ámbito del rol, RN-48), `compartirConOperativoId` / `justificacionExclusivo` en alta y edición (404 ajeno, 409 `COMPARTIR_NO_COMPATIBLE` / `COMPARTIR_CON_EXCLUSIVO`, aviso `COMPARTIR_RETIRADO`), regla única `politicas/compartir-tramo.ts`, puerto `RegistroCompatibilidadCompartir`; desde el 2026-10-20 el «completo» comparte unidad (clase CONTENIDO, `contiene` / `contenidoEn`, `completo`); desde el 2026-10-21 los asientos se cuentan por momento (`personasConInvitado`, `asientosPorMomento`)** | **`docs/CONTRATO-compartir-unidad.md`** |
+| **Ausencias de conductores (2026-10-16): `GET/POST/DELETE /administracion/conductores/:id/ausencias` y `GET /administracion/conductores/ausencias?desde=`, permiso `flota:ausencias`, mismas reglas que el personal (409 `AUSENCIA_SOLAPADA` / `AUSENCIA_PASADA`, traza sin motivo), `tramosAfectados` avisa sin retirar** | **`docs/CONTRATO-ausencias-conductor.md`** |
+| **Notas del operativo en las tablas (2026-10-19): `notas` = bitácora (`NOTA`, con el nombre del autor) + la solicitud de compartir (`COMPARTIDA`, armada de `oper_compartir_con_id`, no de la bitácora), la más reciente primero; autores en UNA consulta por lote (`conAutores`); `oper_compartir_solicitado_por/_en` (migración `20261019150000`); `observaciones` no cambia. **Desde el mismo día también en la Jornada, la Matriz y su PDF** (regla única `common/notas/notas-operativo.ts`, autores con `common/notas/autores.ts`; en la Jornada, una COMPARTIDA hacia un formulario que el rol no ve no se nombra, RN-48; el PDF imprime una línea por nota con el rol y la hora). La orden de servicio no la lleva** | **`docs/CONTRATO-notas-operativo.md`** |
 | Diccionario de datos, restricciones, índices | `docs/FASE4-diseno-base-datos.md` |
 
 ---
@@ -454,3 +590,6 @@ perderías el rastro de qué se acordó con el Product Owner y qué se supuso.
 5. Commits cortos, en español, estilo convencional, una línea. **Nunca atribuyas a Claude ni a IA.**
 6. Antes de dar por terminada una tarea: `npm run build` y `npm run lint` con código de salida 0.
 7. No subir `.claude/`, `.env`, `dist/`, `node_modules/` ni archivos temporales.
+8. **No escribir IP de servidores en nada versionado** (código, comentarios, pruebas, `.env.example`,
+   compose, documentación): se usan marcadores (`<IP_SERVIDOR_AUTH>`, `<IP_PREPRODUCCION>`) o el nombre
+   de host público. Las IP concretas van solo en los paquetes de despliegue, que no se versionan.

@@ -13,6 +13,15 @@
  * SIN `VentanaCargaGuard`, por el mismo motivo que en M-06 y M-10: la ventana gobierna
  * la carga del cuadro, no la administración de catálogos. Un conductor nuevo tiene que
  * poder darse de alta a las siete de la tarde.
+ *
+ * FLOTA Y GARAJES (2026-10-14): indicadores (`GET flota/resumen`), aviso previo a la baja
+ * (`GET …/:id/impacto-baja`), reactivar (`PATCH …/:id/reactivar`) y baja del garaje
+ * (`DELETE ubicaciones-flota/:id`). Contrato: `docs/CONTRATO-flota-y-garajes.md`.
+ *
+ * MANTENIMIENTO EN LA PESTAÑA VEHÍCULOS (2026-10-20): `GET flota/vehiculos/disponibilidad?fecha=`
+ * devuelve la disponibilidad de cada vehículo en la fecha y sus paradas de la semana (D3), con el
+ * permiso de la pantalla (`flota:administrar`) y no con `transporte:vehiculos:ver`, que el
+ * administrador general no tiene. Las bajas guardan fecha y autor y dan el motivo real (D1, D2).
  */
 
 import {
@@ -29,17 +38,23 @@ import {
 } from '@nestjs/common';
 
 import { RequierePermiso } from '../../../common/auth/decorators/requiere-permiso.decorator';
+import { ValidacionError } from '../../../common/errors/errores-dominio';
+import { fechaIsoEnZona } from '../../../common/utilidades/marca-tiempo';
 import { UsuarioActual } from '../../../common/auth/decorators/usuario-actual.decorator';
 import { IdentidadGuard } from '../../../common/auth/guards/identidad.guard';
 import { PermisosGuard } from '../../../common/auth/guards/permisos.guard';
 import type { UsuarioAutenticado } from '../../../common/auth/interfaces/usuario-autenticado.interface';
-import { FlotaService } from '../application/flota.service';
+import { FlotaService, type ImpactoBaja } from '../application/flota.service';
+import type { ResumenFlota } from '../application/politicas/datos-flota';
+import type { DisponibilidadDeVehiculo } from '../application/politicas/semana-mantenimiento';
+import { ParametrosTransporteService } from '../application/parametros-transporte.service';
 import {
   ActualizarConductorDto,
   ActualizarVehiculoDto,
   aConductorResponse,
   aUbicacionResponse,
   ActualizarUbicacionDto,
+  aFechaFlota,
   CrearUbicacionDto,
   type UbicacionResponseDto,
   aVehiculoResponse,
@@ -54,6 +69,25 @@ interface BajaResponseDto<T> {
   registro: T;
   operativosHistoricos: number;
   mensaje: string;
+  /** Conductores activos que quedaron sin vehículo habitual (baja de un vehículo; si no, vacío). */
+  conductoresSinVehiculo: { id: number; nombreCompleto: string }[];
+}
+
+/** Los indicadores de la pantalla y la anticipación del aviso de documentos. */
+interface ResumenFlotaResponseDto extends ResumenFlota {
+  /** DAF_DIAS_AVISO_VENCIMIENTO: «vence en ≤ N días». */
+  diasAviso: number;
+  /** DAF_KM_MAXIMO: tope del kilometraje (A2), para avisar en el formulario antes de guardar. */
+  kmMaximo: number;
+}
+
+/** La disponibilidad de la flota en una fecha y las paradas de su semana (D3, 2026-10-20). */
+interface DisponibilidadFlotaResponseDto {
+  /** La fecha elegida (AAAA-MM-DD). */
+  fecha: string;
+  /** El último día de la semana (fecha + 6). */
+  hasta: string;
+  vehiculos: DisponibilidadDeVehiculo[];
 }
 
 /**
@@ -74,7 +108,29 @@ interface BajaResponseDto<T> {
 @UseGuards(IdentidadGuard, PermisosGuard)
 @RequierePermiso('flota:administrar')
 export class AdministracionFlotaController {
-  constructor(private readonly flota: FlotaService) {}
+  constructor(
+    private readonly flota: FlotaService,
+    private readonly parametros: ParametrosTransporteService,
+  ) {}
+
+  // ─────────────────────────── Indicadores ───────────────────────────
+
+  @Get('flota/resumen')
+  async resumen(): Promise<ResumenFlotaResponseDto> {
+    const [diasAviso, kmMaximo] = await Promise.all([
+      this.parametros.leerDiasAvisoVencimiento(),
+      this.parametros.leerKmMaximo(),
+    ]);
+    return { ...(await this.flota.resumen(diasAviso)), diasAviso, kmMaximo };
+  }
+
+  /** D3: sin `fecha`, hoy en Quito. Dos consultas para toda la flota. */
+  @Get('flota/vehiculos/disponibilidad')
+  async disponibilidad(
+    @Query('fecha') fecha?: string,
+  ): Promise<DisponibilidadFlotaResponseDto> {
+    return this.flota.disponibilidad(fechaValida(fecha ?? fechaIsoEnZona()));
+  }
 
   // ─────────────────────────── Conductores ───────────────────────────
 
@@ -94,7 +150,10 @@ export class AdministracionFlotaController {
     @Body() dto: CrearConductorDto,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<{ id: number; nombreCompleto: string }> {
-    const conductor = await this.flota.crearConductor(dto, usuario.usuarioId);
+    const conductor = await this.flota.crearConductor(
+      conFechasDeConductor(dto),
+      usuario.usuarioId,
+    );
 
     return { id: conductor.id, nombreCompleto: conductor.nombreCompleto };
   }
@@ -107,7 +166,7 @@ export class AdministracionFlotaController {
   ): Promise<{ id: number; nombreCompleto: string }> {
     const conductor = await this.flota.actualizarConductor(
       id,
-      dto,
+      conFechasDeConductor(dto),
       usuario.usuarioId,
     );
 
@@ -125,6 +184,30 @@ export class AdministracionFlotaController {
       registro: { id: baja.registro.id, activo: baja.registro.activo },
       operativosHistoricos: baja.operativosHistoricos,
       mensaje: baja.mensaje,
+      conductoresSinVehiculo: baja.conductoresSinVehiculo,
+    };
+  }
+
+  @Get('conductores/:id/impacto-baja')
+  async impactoBajaConductor(
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<ImpactoBaja> {
+    return this.flota.impactoBajaConductor(id);
+  }
+
+  @Patch('conductores/:id/reactivar')
+  async reactivarConductor(
+    @Param('id', ParseIntPipe) id: number,
+    @UsuarioActual() usuario: UsuarioAutenticado,
+  ): Promise<{ id: number; nombreCompleto: string; activo: boolean }> {
+    const conductor = await this.flota.reactivarConductor(
+      id,
+      usuario.usuarioId,
+    );
+    return {
+      id: conductor.id,
+      nombreCompleto: conductor.nombreCompleto,
+      activo: conductor.activo,
     };
   }
 
@@ -138,7 +221,8 @@ export class AdministracionFlotaController {
       incluirInactivos === 'true',
     );
 
-    return vehiculos.map(aVehiculoResponse);
+    const dias = await this.parametros.leerDiasAvisoVencimiento();
+    return vehiculos.map((v) => aVehiculoResponse(v, dias));
   }
 
   @Post('vehiculos')
@@ -147,7 +231,11 @@ export class AdministracionFlotaController {
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<VehiculoResponseDto> {
     return aVehiculoResponse(
-      await this.flota.crearVehiculo(dto, usuario.usuarioId),
+      await this.flota.crearVehiculo(
+        conFechasDeVehiculo(dto),
+        usuario.usuarioId,
+      ),
+      await this.parametros.leerDiasAvisoVencimiento(),
     );
   }
 
@@ -158,7 +246,12 @@ export class AdministracionFlotaController {
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<VehiculoResponseDto> {
     return aVehiculoResponse(
-      await this.flota.actualizarVehiculo(id, dto, usuario.usuarioId),
+      await this.flota.actualizarVehiculo(
+        id,
+        conFechasDeVehiculo(dto),
+        usuario.usuarioId,
+      ),
+      await this.parametros.leerDiasAvisoVencimiento(),
     );
   }
 
@@ -170,10 +263,32 @@ export class AdministracionFlotaController {
     const baja = await this.flota.desactivarVehiculo(id, usuario.usuarioId);
 
     return {
-      registro: aVehiculoResponse(baja.registro),
+      registro: aVehiculoResponse(
+        baja.registro,
+        await this.parametros.leerDiasAvisoVencimiento(),
+      ),
       operativosHistoricos: baja.operativosHistoricos,
       mensaje: baja.mensaje,
+      conductoresSinVehiculo: baja.conductoresSinVehiculo,
     };
+  }
+
+  @Get('vehiculos/:id/impacto-baja')
+  async impactoBajaVehiculo(
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<ImpactoBaja> {
+    return this.flota.impactoBajaVehiculo(id);
+  }
+
+  @Patch('vehiculos/:id/reactivar')
+  async reactivarVehiculo(
+    @Param('id', ParseIntPipe) id: number,
+    @UsuarioActual() usuario: UsuarioAutenticado,
+  ): Promise<VehiculoResponseDto> {
+    return aVehiculoResponse(
+      await this.flota.reactivarVehiculo(id, usuario.usuarioId),
+      await this.parametros.leerDiasAvisoVencimiento(),
+    );
   }
 
   // ─────────── Ubicaciones de reposo de la flota · RN-DAF-03 ───────────
@@ -210,7 +325,8 @@ export class AdministracionFlotaController {
     const filas = await this.flota.listarUbicaciones(
       incluirInactivas === 'true',
     );
-    return filas.map(aUbicacionResponse);
+    const usos = await this.flota.usosDeUbicaciones();
+    return filas.map((u) => aUbicacionResponse(u, usos.get(u.id)));
   }
 
   @Post('ubicaciones-flota')
@@ -219,7 +335,9 @@ export class AdministracionFlotaController {
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<UbicacionResponseDto> {
     return aUbicacionResponse(
-      await this.flota.crearUbicacion(dto.nombre, usuario.usuarioId),
+      await this.flota.crearUbicacion(dto.nombre, usuario.usuarioId, {
+        zonalId: dto.zonalId,
+      }),
     );
   }
 
@@ -236,8 +354,97 @@ export class AdministracionFlotaController {
     @Body() dto: ActualizarUbicacionDto,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<UbicacionResponseDto> {
-    return aUbicacionResponse(
+    return this.conUsos(
       await this.flota.actualizarUbicacion(id, dto, usuario.usuarioId),
     );
   }
+
+  /** Baja del garaje (D2): deja de estar activo y autorizado. Lo ya declarado se conserva. */
+  @Delete('ubicaciones-flota/:id')
+  async darDeBajaUbicacion(
+    @Param('id', ParseIntPipe) id: number,
+    @UsuarioActual() usuario: UsuarioAutenticado,
+  ): Promise<UbicacionResponseDto> {
+    return this.conUsos(
+      await this.flota.darDeBajaUbicacion(id, usuario.usuarioId),
+    );
+  }
+
+  @Patch('ubicaciones-flota/:id/reactivar')
+  async reactivarUbicacion(
+    @Param('id', ParseIntPipe) id: number,
+    @UsuarioActual() usuario: UsuarioAutenticado,
+  ): Promise<UbicacionResponseDto> {
+    return this.conUsos(
+      await this.flota.reactivarUbicacion(id, usuario.usuarioId),
+    );
+  }
+
+  private async conUsos(
+    ubicacion: Parameters<typeof aUbicacionResponse>[0],
+  ): Promise<UbicacionResponseDto> {
+    const usos = await this.flota.usosDeUbicaciones([ubicacion.id]);
+    return aUbicacionResponse(ubicacion, usos.get(ubicacion.id));
+  }
+}
+
+/** AAAA-MM-DD que exista en el calendario; si no, 400 con la frase para el usuario. */
+function fechaValida(texto: string): string {
+  const partes = /^(d{4})-(d{2})-(d{2})$/.exec(texto);
+  const fecha = partes ? new Date(`${texto}T00:00:00.000Z`) : null;
+  if (
+    !fecha ||
+    Number.isNaN(fecha.getTime()) ||
+    fecha.toISOString().slice(0, 10) !== texto
+  ) {
+    throw new ValidacionError(
+      `«${texto}» no es una fecha válida. Se escribe como AAAA-MM-DD.`,
+      { fecha: texto },
+    );
+  }
+  return texto;
+}
+
+/**
+ * Las fechas de la ficha viajan como AAAA-MM-DD; el servicio las recibe como Date. Solo se
+ * devuelven las que vinieron: una clave `undefined` pisaría el valor actual en la traza.
+ */
+function soloPresentes(fechas: Record<string, string | null | undefined>) {
+  return Object.fromEntries(
+    Object.entries(fechas)
+      .filter(([, valor]) => valor !== undefined)
+      .map(([campo, valor]) => [campo, aFechaFlota(valor)]),
+  ) as Record<string, Date | null>;
+}
+
+function conFechasDeConductor<
+  T extends {
+    actaParqueaderoDesde?: string | null;
+    actaParqueaderoHasta?: string | null;
+  },
+>(dto: T) {
+  const { actaParqueaderoDesde, actaParqueaderoHasta, ...resto } = dto;
+  return {
+    ...resto,
+    ...(soloPresentes({ actaParqueaderoDesde, actaParqueaderoHasta }) as {
+      actaParqueaderoDesde?: Date | null;
+      actaParqueaderoHasta?: Date | null;
+    }),
+  };
+}
+
+function conFechasDeVehiculo<
+  T extends {
+    matriculaVencimiento?: string | null;
+    soatVencimiento?: string | null;
+  },
+>(dto: T) {
+  const { matriculaVencimiento, soatVencimiento, ...resto } = dto;
+  return {
+    ...resto,
+    ...(soloPresentes({ matriculaVencimiento, soatVencimiento }) as {
+      matriculaVencimiento?: Date | null;
+      soatVencimiento?: Date | null;
+    }),
+  };
 }

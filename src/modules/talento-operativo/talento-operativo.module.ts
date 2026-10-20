@@ -26,6 +26,7 @@
 import { Module } from '@nestjs/common';
 
 import { ConfiguracionModule } from '../configuracion/configuracion.module';
+import { AuthDirectorioModule } from '../identidad/auth-directorio.module';
 import { CoberturaTurnosService } from './application/cobertura-turnos.service';
 import { DisponibilidadService } from './application/disponibilidad.service';
 import { ElegibilidadService } from './application/elegibilidad.service';
@@ -47,7 +48,9 @@ import { PersonalController } from './presentation/personal.controller';
  * lo exponga no es un descuido, es la decisión.
  */
 @Module({
-  imports: [ConfiguracionModule],
+  // AuthDirectorioModule (2026-10-08): el alta de origen AUTH toma de Auth el correo
+  // institucional. Es un módulo sin dependencias: no crea ciclo con IdentidadModule.
+  imports: [ConfiguracionModule, AuthDirectorioModule],
   controllers: [AdministracionPersonalController, PersonalController],
   providers: [
     FuncionariosService,

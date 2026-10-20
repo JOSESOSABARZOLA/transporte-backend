@@ -10,7 +10,8 @@
  * ═══════════════════════════════════════════════════════════════════════════════
  * `resolverTokens(apartados, fuente)` es la única verdad para los datos y los faltantes. Aquí se
  * fijan sus reglas: un token es obligatorio solo si la plantilla lo usa (D15), salvo los
- * estructurales (cargo/dependencia/NUT) y el firmante (F22); `numeroOrden`/`ciudadFecha`/
+ * estructurales (dependencia del destinatario y la tabla de control) y el firmante (F22); el cargo
+ * del destinatario nunca falta (sale de su ficha, en blanco si no lo tiene); `numeroOrden`/`ciudadFecha`/
  * `fechaEmision` NUNCA son faltantes (D14/D16); un dato vacío o en blanco cuenta como faltante.
  *
  * Y cada faltante ya NO es una cadena sino `{ token, etiqueta, origen }` (D16): hay una prueba POR
@@ -54,7 +55,6 @@ const FUENTE_LLENA: FuenteTokens = {
   numeroMemorando: 'MEM-001',
   fechaMemorando: '17 de junio de 2026',
   designado: 'Mgs. PÉREZ JUAN (Director)',
-  nut: 'NUT-9',
   elaboradoPor: 'Analista',
   firmante: 'DIRECTOR X',
   firmanteCargo: 'DIRECTOR',
@@ -72,11 +72,13 @@ describe('tokensUsados', () => {
     const usados = tokensUsados([
       {
         titulo: '{{siglasUnidad}}',
-        etiqueta: '{{nut}}',
+        etiqueta: '{{elaboradoPor}}',
         contenido: '{{numeroMemorando}}',
       },
     ]);
-    expect(usados).toEqual(new Set(['siglasUnidad', 'nut', 'numeroMemorando']));
+    expect(usados).toEqual(
+      new Set(['siglasUnidad', 'elaboradoPor', 'numeroMemorando']),
+    );
   });
 });
 
@@ -98,13 +100,8 @@ const TOKENS_DEL_CUERPO: {
     origen: 'persona',
     estructural: false,
   },
-  {
-    token: 'cargo',
-    campo: 'cargo',
-    etiqueta: 'Cargo del destinatario',
-    origen: 'persona',
-    estructural: true,
-  },
+  // El cargo del destinatario ya no está aquí (2026-10-08): sale de su ficha y, si no lo tiene, va
+  // en blanco; nunca es faltante. Lo fija su propia prueba más abajo.
   {
     token: 'dependencia',
     campo: 'dependencia',
@@ -133,19 +130,13 @@ const TOKENS_DEL_CUERPO: {
     origen: 'plantilla',
     estructural: false,
   },
-  {
-    token: 'nut',
-    campo: 'nut',
-    etiqueta: 'NUT',
-    origen: 'cuadro',
-    estructural: true,
-  },
+  // TABLA DE CONTROL (2026-10-08): de la plantilla y estructurales —la tabla siempre se imprime—.
   {
     token: 'elaboradoPor',
     campo: 'elaboradoPor',
     etiqueta: 'Elaborado por',
-    origen: 'cuadro',
-    estructural: false,
+    origen: 'plantilla',
+    estructural: true,
   },
   {
     token: 'direccionResponsable',
@@ -158,8 +149,8 @@ const TOKENS_DEL_CUERPO: {
     token: 'siglasUnidad',
     campo: 'siglasUnidad',
     etiqueta: 'Siglas de la unidad',
-    origen: 'configuracion',
-    estructural: false,
+    origen: 'plantilla',
+    estructural: true,
   },
   {
     token: 'firmante',
@@ -280,12 +271,11 @@ describe('resolverTokens · faltantes', () => {
   });
 
   it('D15: un token que la plantilla NO usa y no es estructural, no cuenta como faltante', () => {
-    // `elaboradoPor`, `siglasUnidad`, `ciudadFecha`, `direccionResponsable` no están en PLANTILLA.
+    // `designado`, `ciudadFecha`, `direccionResponsable` no están en PLANTILLA.
     const faltantes = resolverTokens(
       PLANTILLA,
       fuente({
-        elaboradoPor: '',
-        siglasUnidad: '',
+        designado: '',
         ciudadFecha: '',
         direccionResponsable: '',
       }),
@@ -307,29 +297,50 @@ describe('resolverTokens · faltantes', () => {
     ]);
   });
 
-  it('los estructurales (cargo/dependencia/NUT) faltan aunque la plantilla no los nombre', () => {
+  it('el cargo del destinatario vacío NUNCA es faltante, aunque la plantilla use {{cargo}} (2026-10-08)', () => {
+    const conCargo: ApartadoConTokens[] = [
+      { titulo: 'PARA', contenido: 'Cargo: {{cargo}}' },
+    ];
+    const { valores, faltantes } = resolverTokens(
+      conCargo,
+      fuente({ cargo: '' }),
+    );
+    expect(faltantes.map((f) => f.token)).not.toContain('cargo');
+    expect(valores.cargo).toBe('');
+  });
+
+  it('los estructurales (dependencia y la tabla de control) faltan aunque la plantilla no los nombre', () => {
     const sinPlantilla: ApartadoConTokens[] = [
       { titulo: 'APARTADO', contenido: 'Texto sin tokens.' },
     ];
     const faltantes = resolverTokens(
       sinPlantilla,
-      fuente({ cargo: '', dependencia: '', nut: '' }),
+      fuente({
+        cargo: '',
+        dependencia: '',
+        elaboradoPor: '',
+        siglasUnidad: '',
+      }),
     ).faltantes;
     expect(faltantes).toEqual<Faltante[]>([
-      { token: 'cargo', etiqueta: 'Cargo del destinatario', origen: 'persona' },
       {
         token: 'dependencia',
         etiqueta: 'Dependencia del destinatario',
         origen: 'persona',
       },
-      { token: 'nut', etiqueta: 'NUT', origen: 'cuadro' },
+      {
+        token: 'siglasUnidad',
+        etiqueta: 'Siglas de la unidad',
+        origen: 'plantilla',
+      },
+      { token: 'elaboradoPor', etiqueta: 'Elaborado por', origen: 'plantilla' },
     ]);
   });
 
   it('cuenta como faltante lo vacío o en blanco, no solo lo ausente', () => {
     const faltantes = resolverTokens(
       PLANTILLA,
-      fuente({ nut: '   ', numeroMemorando: '' }),
+      fuente({ elaboradoPor: '   ', numeroMemorando: '' }),
     ).faltantes;
     expect(faltantes).toEqual<Faltante[]>([
       {
@@ -337,7 +348,7 @@ describe('resolverTokens · faltantes', () => {
         etiqueta: 'Número de memorando',
         origen: 'plantilla',
       },
-      { token: 'nut', etiqueta: 'NUT', origen: 'cuadro' },
+      { token: 'elaboradoPor', etiqueta: 'Elaborado por', origen: 'plantilla' },
     ]);
   });
 
@@ -366,7 +377,6 @@ describe('resolverTokens · faltantes', () => {
       fuente({
         cargo: '',
         dependencia: '',
-        nut: '',
         numeroMemorando: '',
         fechaEmision: '',
         firmanteCargo: '',
@@ -376,7 +386,6 @@ describe('resolverTokens · faltantes', () => {
     // `fechaEmision` NO aparece: se calcula (D16). `numeroOrden` tampoco (D14). El firmante (cargo y
     // dependencia) vive en la plantilla del Director, pero se agrupa aparte como «firmante» (2026-10-05).
     expect(faltantes).toEqual<Faltante[]>([
-      { token: 'cargo', etiqueta: 'Cargo del destinatario', origen: 'persona' },
       {
         token: 'dependencia',
         etiqueta: 'Dependencia del destinatario',
@@ -387,7 +396,6 @@ describe('resolverTokens · faltantes', () => {
         etiqueta: 'Número de memorando',
         origen: 'plantilla',
       },
-      { token: 'nut', etiqueta: 'NUT', origen: 'cuadro' },
       {
         token: 'firmanteCargo',
         etiqueta: 'Cargo del firmante',
@@ -401,17 +409,67 @@ describe('resolverTokens · faltantes', () => {
     ]);
 
     // Y se pueden AGRUPAR por origen para el aviso de borrador (E21): persona / plantilla / firmante /
-    // cuadro / configuración (2026-10-05).
+    // configuración. El origen «cuadro» se retiró con el NUT (2026-10-08).
     const porOrigen = (origen: OrigenFaltante) =>
       faltantes.filter((f) => f.origen === origen).map((f) => f.token);
-    expect(porOrigen('persona')).toEqual(['cargo', 'dependencia']);
+    expect(porOrigen('persona')).toEqual(['dependencia']);
     expect(porOrigen('plantilla')).toEqual(['numeroMemorando']);
     expect(porOrigen('firmante')).toEqual([
       'firmanteCargo',
       'firmanteDependencia',
     ]);
-    expect(porOrigen('cuadro')).toEqual(['nut']);
     expect(porOrigen('configuracion')).toEqual([]);
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   SIN NUT Y CON LA TABLA DE CONTROL EN LA PLANTILLA (2026-10-08)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+describe('resolverTokens · tabla de control (2026-10-08)', () => {
+  const SIN_TOKENS: ApartadoConTokens[] = [
+    { titulo: 'APARTADO', contenido: 'Texto sin tokens.' },
+  ];
+
+  it('el NUT ya no existe: un {{nut}} en la plantilla no es faltante ni tiene valor', () => {
+    const { valores, faltantes } = resolverTokens(
+      plantillaCon('nut'),
+      FUENTE_LLENA,
+    );
+
+    expect(faltantes).toEqual([]);
+    expect(valores).not.toHaveProperty('nut');
+  });
+
+  it('sin «elaborado por» o sin siglas en la plantilla, faltan con origen «plantilla»', () => {
+    const faltantes = resolverTokens(
+      SIN_TOKENS,
+      fuente({ elaboradoPor: '', siglasUnidad: '' }),
+    ).faltantes;
+
+    expect(faltantes).toEqual<Faltante[]>([
+      {
+        token: 'siglasUnidad',
+        etiqueta: 'Siglas de la unidad',
+        origen: 'plantilla',
+      },
+      { token: 'elaboradoPor', etiqueta: 'Elaborado por', origen: 'plantilla' },
+    ]);
+  });
+
+  it('con una versión de plantilla ANTERIOR, solo se exigen si la plantilla los usa (como entonces)', () => {
+    const legada = fuente({
+      elaboradoPor: '',
+      siglasUnidad: '',
+      tablaControlLegada: true,
+    });
+
+    expect(resolverTokens(SIN_TOKENS, legada).faltantes).toEqual([]);
+    expect(
+      resolverTokens(plantillaCon('elaboradoPor'), legada).faltantes.map(
+        (f) => f.token,
+      ),
+    ).toEqual(['elaboradoPor']);
   });
 });
 
@@ -421,5 +479,37 @@ describe('resolverTokens · valores', () => {
     expect(valores.numeroMemorando).toBe('MEM-001');
     expect(valores.nombre).toBe('PÉREZ JUAN');
     expect(valores.numeroOrden).toBeNull();
+  });
+});
+
+describe('resolverTokens · trámite de Inspección (2026-10-07)', () => {
+  const USA_TRAMITE: ApartadoConTokens[] = [
+    {
+      titulo: 'Trámite',
+      contenido:
+        'Atender {{tramiteCodigo}} ({{tramiteSitra}}), {{tramiteMateria}}.',
+    },
+  ];
+
+  it('con trámite, sus tokens toman el valor de la copia guardada', () => {
+    const { valores } = resolverTokens(USA_TRAMITE, {
+      ...FUENTE_LLENA,
+      tramiteCodigo: 'DENUNCIA-26-3415',
+      tramiteSitra: 'AMC-ECU9500',
+      tramiteMateria: 'Espacio público',
+    });
+
+    expect(valores.tramiteCodigo).toBe('DENUNCIA-26-3415');
+    expect(valores.tramiteSitra).toBe('AMC-ECU9500');
+    expect(valores.tramiteMateria).toBe('Espacio público');
+  });
+
+  it('sin trámite, la plantilla que lo usa NO deja la orden en borrador', () => {
+    const { valores, faltantes } = resolverTokens(USA_TRAMITE, FUENTE_LLENA);
+
+    expect(valores.tramiteCodigo).toBe('');
+    expect(faltantes.map((faltante) => faltante.token)).not.toContain(
+      'tramiteCodigo',
+    );
   });
 });

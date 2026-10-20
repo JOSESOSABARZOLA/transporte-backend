@@ -24,6 +24,7 @@ import type {
   MatrizRepository,
   OperativoDeMatriz,
 } from '../infrastructure/matriz.repository';
+import { aMatrizResponse } from '../presentation/dto/matriz.dto';
 import { MatrizConsolidadaService } from './matriz-consolidada.service';
 
 const JORNADA = new Date(Date.UTC(2026, 6, 31));
@@ -368,5 +369,63 @@ describe('MatrizConsolidadaService · exportación', () => {
     const documento = await servicio.exportar(JORNADA);
 
     expect(documento.contenido.byteLength).toBeGreaterThan(2000);
+  });
+});
+
+/*
+  NOTAS EN LA MATRIZ (2026-10-19, plan «notas-jornada-matriz»). La Dirección ve el día entero: la
+  COMPARTIDA va siempre completa, con su identificador y el operativo al que lleva.
+*/
+describe('MatrizConsolidadaService · notas de la celda Observaciones', () => {
+  it('cada fila trae sus notas con autor, la COMPARTIDA completa y la más reciente primero', async () => {
+    // Lo que la fila de pantalla lee además de lo que prueba este caso.
+    const deFila = (base: OperativoDeMatriz) =>
+      ({
+        ...base,
+        formulario: { politicaVehiculo: PoliticaVehiculo.REQUERIDO },
+        tiposControl: [],
+      }) as unknown as OperativoDeMatriz;
+    const conNotas = {
+      ...deFila(operativo(2, 1)),
+      creadoPor: 14,
+      creadoPorRol: RolDepartamental.DMIP_OPERATIVOS,
+      creadoEn: new Date('2026-07-31T13:00:00.000Z'),
+      compartirCon: { id: 1, identificador: 'OP-001' },
+      compartirSolicitadoPor: null,
+      compartirSolicitadoEn: null,
+      observaciones: [
+        {
+          id: 5,
+          texto: 'Pruebas tecnicas 3',
+          creadoPor: 99,
+          creadoPorRol: RolDepartamental.DMIP_OPERATIVOS,
+          creadoEn: new Date('2026-07-31T13:40:00.000Z'),
+        },
+      ],
+      autores: { 14: 'Persona Que Registra' },
+    } as unknown as OperativoDeMatriz;
+    const { servicio } = armar({
+      formularios: [
+        {
+          ...formulario(1, 'OPERATIVOS FIJOS'),
+          prefijos: [],
+        } as unknown as FormularioDeMatriz,
+      ],
+      operativos: [deFila(operativo(1, 1)), conNotas],
+    });
+
+    const respuesta = aMatrizResponse(await servicio.componer(JORNADA));
+    const fila = respuesta.secciones[0].filas.find((una) => una.id === 2);
+
+    expect(
+      fila?.notas.map((nota) => [nota.tipo, nota.texto, nota.autor]),
+    ).toEqual([
+      // Sin nombre para el 99: el rol en palabras.
+      ['NOTA', 'Pruebas tecnicas 3', 'DMIP · Unidad de Operativos'],
+      // Sin fecha de solicitud: la de creación (13:00), y el creador como autor.
+      ['COMPARTIDA', 'Comparte con OP-001', 'Persona Que Registra'],
+    ]);
+    expect(fila?.notas[1].operativoRelacionadoId).toBe(1);
+    expect(fila?.observaciones).toEqual(['Pruebas tecnicas 3']);
   });
 });

@@ -52,6 +52,45 @@ export class CapacidadFlotaController {
     );
   }
 
+  /**
+   * La capacidad CALCULADA del día (2026-10-06): turnos − ausencias + libres activados; flota −
+   * taller. Con lo declarado al lado, para «Confirmar» o «Corregir (con observación)».
+   */
+  @Get(':fecha/calculada')
+  @RequierePermiso('flota:capacidad:ver')
+  async calculada(@Param('fecha') fecha: string): Promise<{
+    fecha: string;
+    calculada: { conductoresHabiles: number; vehiculosHabiles: number };
+    detalle: {
+      conductoresConTurno: number;
+      conductoresAusentes: number;
+      libresActivados: number;
+      flota: number;
+      enTaller: number;
+    };
+    declarada: {
+      conductoresHabiles: number;
+      vehiculosHabiles: number;
+      observacion: string | null;
+      declaradoEn: string;
+    } | null;
+  }> {
+    const resultado = await this.capacidad.calcular(exigirFecha(fecha));
+    return {
+      fecha,
+      calculada: resultado.calculada,
+      detalle: resultado.detalle,
+      declarada: resultado.declarada
+        ? {
+            conductoresHabiles: resultado.declarada.conductoresHabiles,
+            vehiculosHabiles: resultado.declarada.vehiculosHabiles,
+            observacion: resultado.declarada.observacion,
+            declaradoEn: resultado.declarada.declaradoEn.toISOString(),
+          }
+        : null,
+    };
+  }
+
   /** RF-057. La DAF declara cuántos vehículos y conductores tiene hábiles. */
   @Put(':fecha')
   @RequierePermiso('flota:capacidad:declarar')

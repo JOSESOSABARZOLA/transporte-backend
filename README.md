@@ -39,7 +39,7 @@ servicios de aplicación nunca lo inyectan.
 | `DATABASE_URL` | `postgresql://…/transportedb?schema=public&connection_limit=10&pool_timeout=20` | **`connection_limit` es obligatorio**: sin él Prisma abre 57 conexiones por instancia contra un tope de 100 |
 | `CORS_ORIGINS` | `http://localhost:5180` | Lista blanca |
 | `TZ` | `America/Guayaquil` | **Crítico**: las ventanas de carga dependen de ella |
-| `AUTH_EXCHANGE_URL` | `http://172.20.136.127:10004/auth/exchange` | Canje con Auth central |
+| `AUTH_EXCHANGE_URL` | `http://<IP_SERVIDOR_AUTH>:10004/auth/exchange` | Canje con Auth central |
 | `AUTH_JWT_SECRET` | — | **Secreto.** Verifica lo que Auth firmó |
 | `AUTH_SUBSYSTEM_ID` | `11` | SIGOC |
 | `SESSION_JWT_SECRET` | — | **Secreto, y distinto del anterior.** Firma la cookie de este módulo |

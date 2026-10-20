@@ -251,7 +251,7 @@ export function verificarSesion(token: string): ContenidoSesion {
  *
  * POR QUÉ LOS DOS ÚLTIMOS SON CONDICIONALES, Y NO ES UNA CONCESIÓN GRATUITA.
  *
- * El Auth desplegado en desarrollo —172.20.136.127:10004, comprobado el 2026-08-17—
+ * El Auth desplegado en desarrollo —su API en el 10004, comprobado el 2026-08-17—
  * firma tokens de sesión con **solo tres reclamaciones**: `{userId, iat, exp}`. No trae
  * `tokenType`, ni `subsystemId`, ni `sessionId`, ni `roleIds`. El código de
  * `project_auth/auth` 1.6.5 sí las firma, así que **lo desplegado va por detrás del

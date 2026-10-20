@@ -1,0 +1,36 @@
+# Microservicio: transporte · Modulo: Cuadro de Colores
+# Archivo: docker-compose.gateway.yml
+# Responsabilidad: Overlay para servir el modulo DETRAS DEL GATEWAY de *.quito.gob.ec
+#   (servidor de pruebas y el de produccion del nuevo data center). Se usa
+#   SIEMPRE junto al de produccion:
+#
+#     docker compose -p gestion --env-file .env.prod \
+#       -f docker-compose.prod.yml -f docker-compose.gateway.yml up -d
+#
+#   Esquema (2026-10-16):
+#     Gateway (TLS)  --location /-->  transporte-front:5180   (red externa `amc`)
+#     transporte-front  --/api/-->    transporte-app:3003     (red interna del proyecto)
+#     transporte-app    ------->      transportedb:5432       (red interna, sin puerto)
+#
+#   - El Gateway resuelve el contenedor POR SU NOMBRE (`transporte-front`) en la red `amc`;
+#     por eso los `container_name` del de produccion no se cambian aqui.
+#   - NINGUN puerto se publica en el host: el 80 y el 443 son del Gateway, y el backend y la
+#     base solo se alcanzan por la red interna. `!reset` vacia la lista que trae el de
+#     produccion (Docker Compose >= 2.24; comprobar con `docker compose version`).
+#   - La red `amc` se crea FUERA de compose (`docker network create amc`): si falta, `up`
+#     falla en vez de dejar el sitio en 502 sin aviso.
+#   - Detras de este esquema el backend necesita TRUST_PROXY=2 (Gateway -> nginx -> app).
+
+services:
+  transporte-app:
+    ports: !reset []
+
+  transporte-front:
+    ports: !reset []
+    networks:
+      - default
+      - amc
+
+networks:
+  amc:
+    external: true

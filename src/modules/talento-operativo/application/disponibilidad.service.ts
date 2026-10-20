@@ -34,17 +34,22 @@ import { CODIGOS_ERROR } from '../../../common/errors/codigos-error';
 import {
   AutorizacionError,
   RecursoNoEncontradoError,
+  ReglaNegocioError,
   ValidacionError,
 } from '../../../common/errors/errores-dominio';
+import { fechaIsoEnZona } from '../../../common/utilidades/marca-tiempo';
 import {
   DisponibilidadRepository,
+  type AusenciaDelMaestro,
   type NuevaAusencia,
+  type OperativoDeLaPersona,
 } from '../infrastructure/disponibilidad.repository';
 import { FuncionariosService } from './funcionarios.service';
 import {
   comoFechaIso,
   ESTADOS_DE_PERSONA,
   ESTADOS_QUE_EXCLUYEN,
+  estadoDeAusencia,
   seSolapan,
 } from './reglas-personal';
 
@@ -94,6 +99,43 @@ export class DisponibilidadService {
       hasta,
       ESTADOS_QUE_EXCLUYEN,
     );
+  }
+
+  /**
+   * Ausencias en curso y próximas de TODO el maestro al alcance de quien consulta, en una
+   * sola consulta (rediseño de P-07, B5). Sin el motivo: la lista solo dice «Ausente del … al
+   * …»; el motivo se lee persona a persona, en su modal, con `listarDe`.
+   */
+  async delMaestro(
+    desde: Date,
+    roles: readonly RolDepartamental[],
+  ): Promise<AusenciaDelMaestro[]> {
+    const alcance = await this.funcionarios.direccionesAlAlcance(roles);
+    return this.repositorio.vigentesYProximas(
+      desde,
+      alcance,
+      ESTADOS_QUE_EXCLUYEN,
+    );
+  }
+
+  /**
+   * Operativos activos de una persona entre dos fechas (rediseño de P-07, B6).
+   *
+   * Lo pide el modal de ausencias para AVISAR, no para bloquear: registrar la ausencia no
+   * retira a la persona de esos operativos y no se notifica a nadie —no hay canal para eso—,
+   * así que la pantalla dice cuáles son para que quien registra avise al responsable.
+   * Misma vara de alcance que las ausencias (H-01): de otra dirección, 403.
+   */
+  async operativosDe(
+    funcionarioId: number,
+    desde: Date,
+    hasta: Date,
+    roles: readonly RolDepartamental[],
+  ): Promise<OperativoDeLaPersona[]> {
+    const funcionario = await this.funcionarios.obtener(funcionarioId);
+    await this.exigirSuDepartamento(funcionario, roles);
+    this.exigirRango(desde, hasta);
+    return this.repositorio.operativosEntre(funcionarioId, desde, hasta);
   }
 
   /** Si una persona concreta está excluida en la fecha indicada. */
@@ -177,6 +219,7 @@ export class DisponibilidadService {
     id: number,
     usuarioId: number,
     roles: readonly RolDepartamental[],
+    hoy: string = fechaIsoEnZona(),
   ): Promise<void> {
     const funcionario = await this.funcionarios.obtener(funcionarioId);
     const ausencia = await this.repositorio.buscarPorId(id);
@@ -190,6 +233,25 @@ export class DisponibilidadService {
 
     await this.exigirSuDepartamento(funcionario, roles);
     await this.exigirAutoria(ausencia, funcionario, usuarioId, roles);
+
+    /*
+      UNA AUSENCIA QUE YA TERMINÓ NO SE QUITA (rediseño de P-07, B7, 2026-10-08). Es historia:
+      explica por qué esa persona no salió en los cuadros de esos días, y borrarla dejaría la
+      matriz de entonces sin su porqué. «Hoy» es el de Quito, no el del servidor.
+    */
+    if (
+      estadoDeAusencia(
+        comoFechaIso(ausencia.desde),
+        comoFechaIso(ausencia.hasta),
+        hoy,
+      ) === 'PASADA'
+    ) {
+      throw new ReglaNegocioError(
+        CODIGOS_ERROR.AUSENCIA_PASADA,
+        `La ausencia del ${comoFechaIso(ausencia.desde)} al ${comoFechaIso(ausencia.hasta)} ya terminó y forma parte del historial: no se puede quitar.`,
+        { ausenciaId: ausencia.id },
+      );
+    }
 
     await this.repositorio.ejecutarEnTransaccion(async (cliente) => {
       await this.repositorio.eliminar(id, cliente);
@@ -256,8 +318,11 @@ export class DisponibilidadService {
       ),
     );
 
+    // 409 desde el 2026-10-08 (rediseño de P-07): no es un dato mal escrito, es un choque con lo
+    // que ya está registrado. Con su código propio, el modal lo distingue del rango invertido.
     if (choque) {
-      throw new ValidacionError(
+      throw new ReglaNegocioError(
+        CODIGOS_ERROR.AUSENCIA_SOLAPADA,
         `La persona ya tiene registrado un período del ${comoFechaIso(choque.desde)} al ${comoFechaIso(choque.hasta)}, que se cruza con el que intenta registrar. Retire el anterior o ajuste las fechas.`,
         {
           periodoExistenteId: choque.id,

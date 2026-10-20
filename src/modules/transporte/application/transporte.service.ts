@@ -32,6 +32,7 @@
 
 import { Injectable } from '@nestjs/common';
 import {
+  EstadoTransporte,
   PoliticaVehiculo,
   type Conductor,
   type Vehiculo,
@@ -48,7 +49,6 @@ import {
   OperativosService,
   type Autor,
 } from '../../operativos/application/operativos.service';
-import { RangoHorario } from '../../operativos/domain/rango-horario';
 import type { OperativoCompleto } from '../../operativos/infrastructure/operativos.repository';
 import { ElegibilidadService } from '../../talento-operativo/application/elegibilidad.service';
 import type { NivelFatiga } from '../../talento-operativo/application/politicas/indice-fatiga.policy';
@@ -56,7 +56,7 @@ import {
   FlotaRepository,
   type ConductorConVehiculo,
 } from '../infrastructure/flota.repository';
-import { verificarOcupacionVehiculo } from './politicas/ocupacion-vehiculo';
+import { PlanificacionTransporteService } from './planificacion-transporte.service';
 
 /**
  * Resultado de una asignación, con lo que la respuesta necesita nombrar.
@@ -96,7 +96,7 @@ export interface ConductorDisponible {
   /**
    * Semáforo de carga del conductor (FRMS / ISO 39001+45001, 2026-09-24). ADVISORY: da
    * visibilidad de cuánto lleva ese día/período para repartir de forma pareja; NO bloquea (la
-   * fatiga que impide conducir la comprueba `verificarConductor` al asignar). Lo calcula
+   * restricción de descanso la comprueba la asignación por tramos). Lo calcula
    * `talento-operativo` y aquí solo se adjunta. Ausente si no se pudo calcular.
    */
   nivelCarga?: NivelFatiga;
@@ -110,6 +110,7 @@ export class TransporteService {
     private readonly elegibilidad: ElegibilidadService,
     private readonly cuadros: CuadroDiarioService,
     private readonly logger: LoggerService,
+    private readonly planificacion: PlanificacionTransporteService,
   ) {}
 
   // ─────────────────────────── Consulta ───────────────────────────
@@ -225,7 +226,13 @@ export class TransporteService {
    *   1. El operativo existe y la jornada admite escritura (RN-58).
    *   2. **INV-13**: el formulario habilita vehículo. Es de este submódulo.
    *   3. Conductor y vehículo existen, están activos y el vehículo no está en taller.
-   *   4. **POL-02**: el descanso del conductor, que decide `talento-operativo`.
+   *   4. La asignación POR TRAMOS (2026-10-14): todos los tramos del operativo pasan a ese
+   *      conductor y vehículo con las MISMAS reglas que «Planificar el día» —solapamiento y
+   *      traslado por tramo, jornada, turno, asientos, la placa ocupada (RN-DAF-01) y el descanso
+   *      que decide `talento-operativo` (RN-44, RN-25)—. Hay una sola fuente de ocupación: un
+   *      «dejar y retirar» ocupa al conductor en sus dos tramos, no en todo el operativo.
+   *
+   * El contrato no cambia (regla 3): siguen siendo exactamente dos campos.
    */
   async asignar(
     operativoId: number,
@@ -240,32 +247,19 @@ export class TransporteService {
     const conductor = await this.exigirConductor(datos.conductorId);
     const vehiculo = await this.exigirVehiculoUtilizable(
       datos.vehiculoId,
-      operativo,
+      operativo.cuadro.fecha,
     );
 
-    // VAL-19 a VAL-22. El veredicto llega hecho: los antecedentes del conductor no
-    // cruzan la frontera de `talento-operativo`.
-    const veredicto = await this.elegibilidad.verificarConductor(conductor.id, {
-      fecha: operativo.cuadro.fecha,
-      horaInicio: operativo.horaInicio,
-      horaFin: operativo.horaFin,
-      esPatrulla: operativo.formulario.esPatrulla,
-      operativoId,
-    });
-
-    if (!veredicto.elegible) {
-      throw new ReglaNegocioError(
-        veredicto.codigo ?? CODIGOS_ERROR.PERSONA_NO_DISPONIBLE,
-        veredicto.motivo ?? 'El conductor no puede recibir esta asignación.',
-        { operativoId, conductorId: conductor.id },
-      );
-    }
-
-    const actualizado = await this.operativos.asignarTransporte(
-      operativoId,
-      datos,
+    await this.planificacion.asignarBloque(
+      {
+        fecha: operativo.cuadro.fecha,
+        operativoIds: [operativoId],
+        conductorId: conductor.id,
+        vehiculoId: vehiculo.id,
+      },
       autor,
     );
+    const actualizado = await this.operativos.obtener(operativoId, autor);
 
     // Evento `TransporteAsignado`, después de confirmar.
     this.logger.log('Transporte asignado', {
@@ -348,10 +342,16 @@ export class TransporteService {
     // rechazarlo obligaría a la pantalla a comprobar el estado antes de cada clic. Mismo
     // criterio que `declararPropiosMedios`.
 
-    const actualizado = await this.operativos.desasignarTransporte(
-      operativoId,
-      autor,
-    );
+    // Desde la ocupación por tramos (2026-10-14) se vacían también sus TRAMOS: si quedaran
+    // asignados, el conductor seguiría ocupado aunque el operativo dijera «pendiente».
+    // `liberarOperativo` sincroniza el operativo al terminar; lo de propios medios no tiene
+    // tramos y vuelve a pendiente por la vía de siempre.
+    const actualizado =
+      operativo.estadoTransporte === EstadoTransporte.PROPIOS_MEDIOS
+        ? await this.operativos.desasignarTransporte(operativoId, autor)
+        : await this.planificacion
+            .liberarOperativo(operativoId, autor)
+            .then(() => this.operativos.obtener(operativoId, autor));
 
     // Evento `TransporteDesasignado`, después de confirmar.
     this.logger.log('Transporte desasignado', {
@@ -419,17 +419,17 @@ export class TransporteService {
   }
 
   /**
-   * El vehículo existe, está activo, no está en taller y no está ya ocupado.
+   * El vehículo existe, está activo y no está en taller.
    *
-   * RECIBE EL OPERATIVO ENTERO Y NO SOLO LA FECHA desde el 2026-08-28: la última
-   * comprobación necesita el horario que se pretende ocupar y el identificador que hay
-   * que excluir al reasignar, y los dos viven en el operativo.
+   * QUE NO ESTÉ YA OCUPADO (RN-DAF-01) ya no se mira aquí desde el 2026-10-14: lo comprueba la
+   * asignación por tramos, tramo a tramo, contra los tramos de la placa con otro conductor. Mirarlo
+   * con el horario entero del operativo daba por ocupada la placa en el intervalo libre de un
+   * «dejar y retirar».
    */
   private async exigirVehiculoUtilizable(
     id: number,
-    operativo: OperativoCompleto,
+    fecha: Date,
   ): Promise<Vehiculo> {
-    const fecha = operativo.cuadro.fecha;
     const vehiculo = await this.flota.buscarVehiculo(id);
 
     if (!vehiculo) {
@@ -456,34 +456,6 @@ export class TransporteService {
         CODIGOS_ERROR.PERSONA_NO_DISPONIBLE,
         `El vehículo de placa ${vehiculo.placa} registra ${ausencia.estado.toLowerCase().replace('_', ' ')} hasta el ${ausencia.hasta.toISOString().slice(0, 10)}.`,
         { vehiculoId: id },
-      );
-    }
-
-    // RN-DAF-01. Y por último, que no esté ya sirviendo a otro operativo que se cruce.
-    // Va al final a propósito: es la única comprobación que consulta los operativos del
-    // día, y no tiene sentido pagarla si el vehículo ya estaba descartado por baja o por
-    // taller.
-    const ocupaciones = await this.flota.asignacionesDelVehiculoEn(
-      id,
-      fecha,
-      operativo.id,
-    );
-
-    const veredicto = verificarOcupacionVehiculo(
-      vehiculo.placa,
-      ocupaciones.map((ocupacion) => ({
-        identificador: ocupacion.identificador,
-        rango: RangoHorario.de(ocupacion.horaInicio, ocupacion.horaFin),
-      })),
-      RangoHorario.de(operativo.horaInicio, operativo.horaFin),
-    );
-
-    if (!veredicto.libre) {
-      throw new ReglaNegocioError(
-        CODIGOS_ERROR.VEHICULO_OCUPADO,
-        veredicto.motivo ??
-          `El vehículo de placa ${vehiculo.placa} ya está asignado a otro operativo con este horario.`,
-        { operativoId: operativo.id, vehiculoId: id },
       );
     }
 

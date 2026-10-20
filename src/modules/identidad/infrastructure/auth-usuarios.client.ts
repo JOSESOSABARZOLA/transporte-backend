@@ -42,33 +42,11 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { ApplicationError } from '../../../common/errors/application.error';
 import { CODIGOS_ERROR } from '../../../common/errors/codigos-error';
+import { conBearer } from '../../../common/auth/con-bearer';
 import { appConfig } from '../../../config/app.config';
 
 /** Cinco segundos, el mismo tope que el canje. Auth responde en milisegundos o no responde. */
 const ESPERA_MAXIMA_MS = 5000;
-
-/**
- * `Bearer <token>`. **EL PREFIJO NO ES OPCIONAL Y SU AUSENCIA NO SE PARECE A UN ERROR.**
- *
- * Comprobado contra el Auth desplegado el 2026-08-21:
- *
- * ```
- * sin cabecera      → 500 {"message":"Token no encontrado"}
- * Authorization: X  → 500 {"message":"Token no encontrado"}      ← indistinguible
- * Bearer X          → 500 {"message":"Token incorrecto o expirado"}
- * ```
- *
- * Es decir: un token **pelado se descarta como si no existiera**, y Auth contesta lo mismo
- * que a una petición anónima. La primera versión de este cliente lo enviaba así, copiando
- * al otro módulo del ecosistema que consume `/users` —que reenvía la cabecera entera del
- * navegador, y por eso ya trae el prefijo—, y el directorio salía vacío con un mensaje que
- * culpaba a la sesión del administrador.
- *
- * Se tolera que el token llegue ya prefijado para que reenviar una cabecera tal cual no
- * produzca `Bearer Bearer …`.
- */
-const conBearer = (token: string): string =>
-  /^Bearer\s/i.test(token) ? token : `Bearer ${token}`;
 
 /**
  * Un usuario de Auth, ya normalizado.

@@ -30,8 +30,11 @@ import {
   Prisma,
   type Operativo,
   type RolDepartamental,
+  TipoTransporte,
 } from '@prisma/client';
 
+import { autoresPorIds } from '../../../common/notas/autores';
+import { firmantesDeNotas } from '../../../common/notas/notas-operativo';
 import { RepositorioPrisma } from '../../../common/persistencia/repositorio-prisma';
 import { PrismaService } from '../../../prisma/prisma.service';
 
@@ -51,12 +54,50 @@ export type OperativoCompleto = Prisma.OperativoGetPayload<{
     tiposControl: { include: { tipo: true } };
     zonales: { include: { zonal: true } };
     instituciones: { include: { institucion: true } };
-    personal: { include: { funcionario: true } };
+    personal: { include: { funcionario: true; tramiteInspeccion: true } };
     observaciones: true;
     origen: { select: { id: true; identificador: true } };
+    compartirCon: { select: { id: true; identificador: true } };
     _count: { select: { adicionales: true } };
   };
+}> & {
+  /**
+   * Nombre de cada usuario que firma una nota o la solicitud de compartir (2026-10-19), por
+   * `usua_id`. Lo llena `conAutores` con UNA consulta por lote; sin él, las notas dicen el rol.
+   * Opcional: lo que no viaja a la tabla (transacciones intermedias, pruebas) no lo necesita.
+   */
+  autores?: Record<number, string>;
+};
+
+/**
+ * Un operativo visto como posible ANFITRIÓN de compartir unidad (2026-10-19): lo que decide sus
+ * tramos, su punto y hora, y el nombre de su personal para la sugerencia del registro. Sin
+ * teléfono ni cédula: la sugerencia solo nombra.
+ */
+export type OperativoParaCoincidencia = Prisma.OperativoGetPayload<{
+  select: typeof SELECCION_COINCIDENCIA;
 }>;
+
+const SELECCION_COINCIDENCIA = {
+  id: true,
+  identificador: true,
+  cuadroId: true,
+  puntoEncuentroId: true,
+  horaInicio: true,
+  horaFin: true,
+  tipoTransporte: true,
+  esMacrooperativo: true,
+  compartirConId: true,
+  formulario: { select: { numero: true } },
+  zonales: {
+    select: { zonalId: true },
+    orderBy: { orden: 'asc' },
+  },
+  personal: {
+    select: { funcionario: { select: { apellidos: true, nombres: true } } },
+    orderBy: [{ esResponsable: 'desc' }, { id: 'asc' }],
+  },
+} satisfies Prisma.OperativoSelect;
 
 /** Carga anticipada común a todas las lecturas. Evita la consulta por fila. */
 const RELACIONES = {
@@ -81,7 +122,8 @@ const RELACIONES = {
     orderBy: { institucion: { sigla: 'asc' } },
   },
   personal: {
-    include: { funcionario: true },
+    // Con el trámite de Inspección copiado a cada inspector (2026-10-07), para la fila y la orden.
+    include: { funcionario: true, tramiteInspeccion: true },
     // El responsable primero: es el nombre que encabeza la fila del cuadro.
     orderBy: [{ esResponsable: 'desc' }, { id: 'asc' }],
   },
@@ -94,6 +136,8 @@ const RELACIONES = {
   // horario, su personal ni su transporte. Traerlo completo abriría además una cadena de
   // cargas anidadas sobre la tabla que más se lee.
   origen: { select: { id: true, identificador: true } },
+  // COMPARTIR UNIDAD (2026-10-19): con quién pide viajar, por su identificador para nombrarlo.
+  compartirCon: { select: { id: true, identificador: true } },
   // Cuántos adicionales cuelgan de este operativo. Es un conteo y no la lista por lo
   // mismo: la fila del cuadro solo necesita saber que existen, y la baja necesita saber
   // que impiden borrarlo.
@@ -127,27 +171,12 @@ export interface DatosOperativo {
   origenId: number | null;
   /** Lote del registro-patrulla (Form 5/6). El mismo para los N; nulo en el resto. */
   grupoRegistro: string | null;
-  /**
-   * ═══════════════════════════════════════════════════════════════════════════════
-   * TRANSPORTE HEREDADO DE OTRO OPERATIVO. Solo para adicionales. 2026-08-21.
-   *
-   * **NO CONTRADICE RN-40.** La regla dice que la DAF es quien escribe conductor y
-   * vehículo, y sigue siendo cierta: estos valores **no llegan del cliente** —
-   * `CrearAdicionalDto` no los admite y el servidor los rechazaría— sino que el servicio
-   * los **copia del operativo del que nace el adicional**, donde ya los puso la DAF.
-   *
-   * Se hereda una decisión suya, no se toma una nueva. Y queda en la traza, porque un
-   * operativo que nace `ASIGNADO` sin que la DAF lo haya tocado es algo que quien audite
-   * tiene que poder explicar.
-   *
-   * LOS DOS VIAJAN JUNTOS O NINGUNO: `ck_operativo_transporte` exige que `ASIGNADO`
-   * lleve conductor **y** vehículo, y que los otros dos estados no lleven ninguno.
-   * ═══════════════════════════════════════════════════════════════════════════════
-   */
-  transporte: {
-    conductorId: number;
-    vehiculoId: number;
-  } | null;
+  /** Transporte pedido y macrooperativo (2026-10-06). Sin valor, los del esquema. */
+  tipoTransporte?: TipoTransporte;
+  esMacrooperativo?: boolean;
+  /** Compartir unidad (2026-10-19): el anfitrión con el que pide viajar, y la justificación. */
+  compartirConId?: number | null;
+  justificacionExclusivo?: string | null;
   rol: RolDepartamental;
   usuarioId: number;
 }
@@ -163,11 +192,23 @@ export interface CambiosOperativo {
   puntoLibre?: string | null;
   tipoControlId?: number | null;
   tipoLibre?: string | null;
+  tipoTransporte?: TipoTransporte;
+  esMacrooperativo?: boolean;
+  compartirConId?: number | null;
+  justificacionExclusivo?: string | null;
+  /** Quién pidió compartir y cuándo (2026-10-19). Los fija `solicitudDeCompartir`. */
+  compartirSolicitadoPor?: number | null;
+  compartirSolicitadoEn?: Date | null;
 }
 
 /** Criterios de la consulta. El filtro por rol NO es opcional: lo impone PER-02. */
 export interface FiltroOperativos {
-  fecha?: Date;
+  /**
+   * Rango de fechas del cuadro, ambos extremos inclusive (2026-10-13). Un solo día es
+   * desde = hasta. Sin ninguno de los dos, no se filtra por fecha.
+   */
+  desde?: Date;
+  hasta?: Date;
   formularioCodigo?: string;
   /**
    * Roles bajo los que se ve. `null` = ve la jornada completa (Dirección/DAF). Es una
@@ -187,11 +228,29 @@ export class OperativosRepository extends RepositorioPrisma {
 
   // ─────────────────────────── Lectura ───────────────────────────
 
+  /**
+   * Pone a cada operativo el nombre de quien firmó sus notas y su solicitud de compartir
+   * (2026-10-19, plan «acciones-icono-notas»). UNA consulta para todo el lote, nunca por fila:
+   * `oobs_creado_por` y `oper_compartir_solicitado_por` no tienen FK (como `oper_creado_por`),
+   * así que no hay relación que incluir. Solo el nombre: nada más de la cuenta.
+   */
+  async conAutores<T extends OperativoCompleto>(
+    operativos: T[],
+    cliente?: Prisma.TransactionClient,
+  ): Promise<T[]> {
+    const ids = firmantesDeNotas(operativos);
+    if (ids.length === 0) return operativos;
+
+    const autores = await autoresPorIds(cliente ?? this.prisma, ids);
+    return operativos.map((operativo) => ({ ...operativo, autores }));
+  }
+
   async buscarPorId(id: number): Promise<OperativoCompleto | null> {
-    return this.prisma.operativo.findFirst({
+    const operativo = await this.prisma.operativo.findFirst({
       where: { id, activo: true },
       include: RELACIONES,
     });
+    return operativo ? (await this.conAutores([operativo]))[0] : null;
   }
 
   /**
@@ -236,18 +295,36 @@ export class OperativosRepository extends RepositorioPrisma {
       this.prisma.operativo.findMany({
         where,
         include: RELACIONES,
-        orderBy: [
-          { cuadroId: 'desc' },
-          { formularioId: 'asc' },
-          { secuencial: 'asc' },
-        ],
+        // Fecha del cuadro descendente y luego identificador (2026-10-13): con un rango, lo más
+        // reciente primero; dentro del día, el orden del identificador que ve la pantalla.
+        orderBy: [{ cuadro: { fecha: 'desc' } }, { identificador: 'asc' }],
         skip: (filtro.pagina - 1) * filtro.tamanio,
         take: filtro.tamanio,
       }),
       this.prisma.operativo.count({ where }),
     ]);
 
-    return { datos, total };
+    return { datos: await this.conAutores(datos), total };
+  }
+
+  /**
+   * Cuántos operativos VIGENTES tiene cada formulario con el mismo filtro del listado
+   * (2026-10-16), sin paginar. Alimenta el «N hoy» del selector de formularios del registro.
+   * Mismo `condiciones` que `listar`: los activos, del rango y visibles para los roles. Una
+   * sola consulta agrupada; el formulario sin operativos no aparece en el mapa.
+   */
+  async contarPorFormulario(
+    filtro: Omit<FiltroOperativos, 'pagina' | 'tamanio'>,
+  ): Promise<Map<number, number>> {
+    const grupos = await this.prisma.operativo.groupBy({
+      by: ['formularioId'],
+      where: condiciones(filtro),
+      _count: { _all: true },
+    });
+
+    return new Map(
+      grupos.map((grupo) => [grupo.formularioId, grupo._count._all]),
+    );
   }
 
   /**
@@ -310,6 +387,83 @@ export class OperativosRepository extends RepositorioPrisma {
     });
   }
 
+  /**
+   * Operativos que COINCIDEN con uno en captura para compartir unidad (2026-10-19): mismo cuadro,
+   * mismo punto de encuentro, alguna zonal en común, transporte de la DAF y activos. El cruce de
+   * horario y la compatibilidad de tramos los decide el servicio. Misma visibilidad que el listado
+   * (PER-02, RN-48): nunca devuelve operativos de formularios ajenos. Una sola consulta, acotada.
+   */
+  async buscarCoincidencias(filtro: {
+    fecha: Date;
+    puntoEncuentroId: number;
+    zonalId: number;
+    excluirOperativoId?: number;
+    visiblesPara: RolDepartamental[] | null;
+  }): Promise<OperativoParaCoincidencia[]> {
+    const where = condiciones({
+      desde: filtro.fecha,
+      hasta: filtro.fecha,
+      visiblesPara: filtro.visiblesPara,
+    });
+    return this.prisma.operativo.findMany({
+      where: {
+        ...where,
+        puntoEncuentroId: filtro.puntoEncuentroId,
+        tipoTransporte: { not: TipoTransporte.PROPIOS_MEDIOS },
+        zonales: { some: { zonalId: filtro.zonalId } },
+        ...(filtro.excluirOperativoId
+          ? { id: { not: filtro.excluirOperativoId } }
+          : {}),
+      },
+      select: SELECCION_COINCIDENCIA,
+      orderBy: [{ horaInicio: 'asc' }, { identificador: 'asc' }],
+      // Un punto y un día dan pocos operativos; el tope protege la consulta en tiempo real.
+      take: 50,
+    });
+  }
+
+  /**
+   * Los operativos pedidos por id, con la MISMA visibilidad del listado (2026-10-19). Resuelve el
+   * anfitrión raíz de una coincidencia y valida el destino al guardar: uno ajeno no aparece, y el
+   * servicio responde 404 sin revelar que existe.
+   */
+  async buscarParaCompartir(
+    ids: readonly number[],
+    visiblesPara: RolDepartamental[] | null,
+  ): Promise<OperativoParaCoincidencia[]> {
+    if (ids.length === 0) return [];
+    const where = condiciones({ visiblesPara });
+    return this.prisma.operativo.findMany({
+      where: { ...where, id: { in: [...new Set(ids)] } },
+      select: SELECCION_COINCIDENCIA,
+    });
+  }
+
+  /**
+   * Quienes ya piden viajar en la unidad de cada anfitrión (2026-10-19, «la misma unidad»): los
+   * operativos activos con `compartirConId` hacia alguno de `anfitrionIds`, con la misma visibilidad
+   * del listado. Con ellos, la unidad del registro es la del grupo entero, no solo la del anfitrión:
+   * un «solo retirar» puede viajar con el retiro de un «dejar y retirar» que ya se unió.
+   */
+  async miembrosDeUnidad(
+    anfitrionIds: readonly number[],
+    visiblesPara: RolDepartamental[] | null,
+    excluirOperativoId?: number,
+  ): Promise<OperativoParaCoincidencia[]> {
+    if (anfitrionIds.length === 0) return [];
+    const where = condiciones({ visiblesPara });
+    return this.prisma.operativo.findMany({
+      where: {
+        ...where,
+        compartirConId: { in: [...new Set(anfitrionIds)] },
+        tipoTransporte: { not: TipoTransporte.PROPIOS_MEDIOS },
+        ...(excluirOperativoId ? { id: { not: excluirOperativoId } } : {}),
+      },
+      select: SELECCION_COINCIDENCIA,
+      take: 50,
+    });
+  }
+
   // ─────────────────────────── Escritura ───────────────────────────
 
   async crear(
@@ -341,17 +495,20 @@ export class OperativosRepository extends RepositorioPrisma {
         },
         origenId: datos.origenId,
         grupoRegistro: datos.grupoRegistro,
-        // Sin transporte heredado, los tres campos quedan como nacen siempre (RN-40):
-        // conductor y vehículo nulos, estado PENDIENTE. Es el valor por defecto del
-        // esquema, y se escribe explícito para que la alternativa se lea de un vistazo.
-        conductorId: datos.transporte?.conductorId ?? null,
-        vehiculoId: datos.transporte?.vehiculoId ?? null,
-        estadoTransporte: datos.transporte
-          ? EstadoTransporte.ASIGNADO
-          : EstadoTransporte.PENDIENTE,
-        // El momento del servidor, no un dato del cliente. Mismo criterio que
-        // `actualizarTransporte`, donde lo pone la DAF.
-        asignadoEn: datos.transporte ? new Date() : null,
+        tipoTransporte: datos.tipoTransporte,
+        esMacrooperativo: datos.esMacrooperativo,
+        compartirConId: datos.compartirConId ?? null,
+        justificacionExclusivo: datos.justificacionExclusivo ?? null,
+        // Quién pidió compartir y cuándo (2026-10-19): al registrar, quien registra y ahora.
+        compartirSolicitadoPor: datos.compartirConId ? datos.usuarioId : null,
+        compartirSolicitadoEn: datos.compartirConId ? new Date() : null,
+        // RN-40: conductor y vehículo nacen nulos y el estado PENDIENTE, también en el adicional
+        // (desde el 2026-10-14 ya no hereda: la DAF lo asigna por tramos). Es el valor por
+        // defecto del esquema, y se escribe explícito para que se lea de un vistazo.
+        conductorId: null,
+        vehiculoId: null,
+        estadoTransporte: EstadoTransporte.PENDIENTE,
+        asignadoEn: null,
         creadoPorRol: datos.rol,
         creadoPor: datos.usuarioId,
         modificadoPorRol: datos.rol,
@@ -501,8 +658,191 @@ export class OperativosRepository extends RepositorioPrisma {
         activo: true,
         cuadro: { fecha },
         estadoTransporte: { not: EstadoTransporte.PROPIOS_MEDIOS },
+        // Transporte requerido (2026-10-07): quien registra pidió PROPIOS_MEDIOS, así que no
+        // solicita vehículo a la DAF y no es demanda de flota.
+        tipoTransporte: { not: TipoTransporte.PROPIOS_MEDIOS },
         formulario: { politicaVehiculo: { not: PoliticaVehiculo.NO_APLICA } },
       },
+    });
+  }
+
+  /**
+   * Transporte requerido (2026-10-07). ¿El operativo ya tiene transporte asignado? Lo tiene si la
+   * DAF le puso conductor (asignación clásica) o si alguno de sus tramos tiene conductor
+   * (planificación por tramos). Es lo que obliga a CONFIRMAR antes de cambiarle el tipo.
+   */
+  async tieneTransporteAsignado(id: number): Promise<boolean> {
+    const [operativo, tramos] = await Promise.all([
+      this.prisma.operativo.findUnique({
+        where: { id },
+        select: { conductorId: true },
+      }),
+      this.prisma.tramoTransporte.count({
+        where: { operativoId: id, conductorId: { not: null } },
+      }),
+    ]);
+    return (operativo?.conductorId ?? null) !== null || tramos > 0;
+  }
+
+  /**
+   * Conductor y placa de cada operativo del listado (2026-10-13), para la celda «Conductor» de
+   * «Mis operativos». Es solo LECTURA de lo que escribió la DAF (RN-40 intacta). Dos consultas
+   * para toda la página —la asignación clásica y los tramos—, nunca una por fila. Cada operativo
+   * recibe los pares distintos en el orden en que aparecen: primero la asignación clásica, luego
+   * los tramos por hora de inicio.
+   */
+  async transporteDeOperativos(
+    ids: readonly number[],
+  ): Promise<Map<number, { conductor: string; placa: string | null }[]>> {
+    const resultado = new Map<
+      number,
+      { conductor: string; placa: string | null }[]
+    >();
+    if (ids.length === 0) return resultado;
+
+    const [clasicos, tramos] = await Promise.all([
+      this.prisma.operativo.findMany({
+        where: { id: { in: [...ids] }, conductorId: { not: null } },
+        select: {
+          id: true,
+          conductor: { select: { nombreCompleto: true } },
+          vehiculo: { select: { placa: true } },
+        },
+      }),
+      this.prisma.tramoTransporte.findMany({
+        where: { operativoId: { in: [...ids] }, conductorId: { not: null } },
+        select: {
+          operativoId: true,
+          conductor: { select: { nombreCompleto: true } },
+          vehiculo: { select: { placa: true } },
+        },
+        orderBy: [{ horaInicio: 'asc' }, { id: 'asc' }],
+      }),
+    ]);
+
+    const sumar = (
+      id: number,
+      conductor: string | undefined,
+      placa: string | null,
+    ): void => {
+      if (!conductor) return;
+      const lista = resultado.get(id) ?? [];
+      if (
+        !lista.some((par) => par.conductor === conductor && par.placa === placa)
+      ) {
+        lista.push({ conductor, placa });
+      }
+      resultado.set(id, lista);
+    };
+
+    for (const fila of clasicos) {
+      sumar(
+        fila.id,
+        fila.conductor?.nombreCompleto,
+        fila.vehiculo?.placa ?? null,
+      );
+    }
+    for (const tramo of tramos) {
+      if (tramo.operativoId === null) continue;
+      sumar(
+        tramo.operativoId,
+        tramo.conductor?.nombreCompleto,
+        tramo.vehiculo?.placa ?? null,
+      );
+    }
+    return resultado;
+  }
+
+  /**
+   * Transporte requerido (2026-10-07). El registro cambió el tipo de transporte: los tramos ya no
+   * corresponden y se BORRAN (la DAF los regenera con el tipo nuevo). Si había transporte
+   * asignado, además se libera el conductor y el vehículo del operativo, vuelve a PENDIENTE y,
+   * cuando el tipo nuevo sigue pidiendo vehículo, se marca `oper_transporte_liberado_en` para que
+   * la DAF vea la alerta ALV-07 hasta reasignarlo.
+   *
+   * Es la ÚNICA escritura de transporte que no hace la DAF, y no la decide el cliente: solo
+   * libera (pone a nulo), nunca asigna. RN-40 sigue intacta.
+   */
+  async liberarPorCambio(
+    id: number,
+    opciones: { conTransporte: boolean; marcarLiberado: boolean },
+    cliente: Prisma.TransactionClient,
+  ): Promise<void> {
+    await this.soltarInvitadosDe(id, cliente);
+    await cliente.tramoTransporte.deleteMany({ where: { operativoId: id } });
+    if (!opciones.conTransporte) return;
+    await cliente.operativo.update({
+      where: { id },
+      data: {
+        conductorId: null,
+        vehiculoId: null,
+        estadoTransporte: EstadoTransporte.PENDIENTE,
+        asignadoEn: null,
+        transporteLiberadoEn: opciones.marcarLiberado ? new Date() : null,
+      },
+    });
+  }
+
+  /**
+   * Compartir unidad (2026-10-19): si los tramos que se van a BORRAR eran ANFITRIONES, quienes
+   * viajaban en su unidad se quedan sin ella. Sin esto la FK (`ON DELETE SET NULL`) solo borraba la
+   * marca y el invitado seguía con el conductor y la placa de una unidad que ya no va. Se les quita
+   * conductor, placa y marca; y su reflejo vuelve a PENDIENTE si ya no les queda ningún tramo
+   * asignado (si les queda otro, la DAF lo sincroniza en su siguiente escritura). Solo libera.
+   */
+  private async soltarInvitadosDe(
+    operativoId: number,
+    cliente: Prisma.TransactionClient,
+  ): Promise<void> {
+    const propios = await cliente.tramoTransporte.findMany({
+      where: { operativoId },
+      select: { id: true },
+    });
+    if (propios.length === 0) return;
+    const invitados = await cliente.tramoTransporte.findMany({
+      where: {
+        compartidoConTramoId: { in: propios.map((t) => t.id) },
+        NOT: { operativoId },
+      },
+      select: { id: true, operativoId: true },
+    });
+    if (invitados.length === 0) return;
+    await cliente.tramoTransporte.updateMany({
+      where: { id: { in: invitados.map((t) => t.id) } },
+      data: { conductorId: null, vehiculoId: null, compartidoConTramoId: null },
+    });
+    const operativos = [
+      ...new Set(
+        invitados
+          .map((t) => t.operativoId)
+          .filter((id): id is number => id !== null),
+      ),
+    ];
+    for (const id of operativos) {
+      const asignados = await cliente.tramoTransporte.count({
+        where: { operativoId: id, conductorId: { not: null } },
+      });
+      if (asignados > 0) continue;
+      await cliente.operativo.updateMany({
+        where: { id, estadoTransporte: EstadoTransporte.ASIGNADO },
+        data: {
+          conductorId: null,
+          vehiculoId: null,
+          estadoTransporte: EstadoTransporte.PENDIENTE,
+          asignadoEn: null,
+        },
+      });
+    }
+  }
+
+  /** ALV-07 se apaga cuando la DAF vuelve a resolver el transporte del operativo. */
+  async limpiarTransporteLiberado(
+    id: number,
+    cliente: Prisma.TransactionClient,
+  ): Promise<void> {
+    await cliente.operativo.update({
+      where: { id },
+      data: { transporteLiberadoEn: null },
     });
   }
 
@@ -711,11 +1051,18 @@ export class OperativosRepository extends RepositorioPrisma {
  * listado y la consulta directa no pueden discrepar, o la pantalla mostraría una fila
  * que al abrirse responde 403.
  */
-function condiciones(filtro: FiltroOperativos): Prisma.OperativoWhereInput {
+function condiciones(
+  filtro: Omit<FiltroOperativos, 'pagina' | 'tamanio'>,
+): Prisma.OperativoWhereInput {
   const where: Prisma.OperativoWhereInput = { activo: true };
 
-  if (filtro.fecha) {
-    where.cuadro = { fecha: filtro.fecha };
+  if (filtro.desde || filtro.hasta) {
+    where.cuadro = {
+      fecha: {
+        ...(filtro.desde ? { gte: filtro.desde } : {}),
+        ...(filtro.hasta ? { lte: filtro.hasta } : {}),
+      },
+    };
   }
 
   if (filtro.formularioCodigo) {

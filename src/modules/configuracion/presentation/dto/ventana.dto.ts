@@ -22,6 +22,7 @@ import { RolDepartamental, TipoVentana } from '@prisma/client';
 import {
   IsBoolean,
   IsEnum,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
@@ -30,10 +31,15 @@ import {
   MaxLength,
   Min,
   MinLength,
+  Validate,
+  ValidatorConstraint,
+  type ValidationArguments,
+  type ValidatorConstraintInterface,
 } from 'class-validator';
 
+import { resolverMensajeVentana } from '../../../../common/auth/application/mensaje-ventana';
 import { exigirEnumerado } from '../../../../common/utilidades/enumerado';
-import { PATRON_HORA } from '../../../../common/utilidades/hora';
+import { aMinutos, PATRON_HORA } from '../../../../common/utilidades/hora';
 import type { EstadoVentana } from '../../application/ventana-carga.service';
 
 const MENSAJE_HORA =
@@ -65,10 +71,41 @@ export class ConsultarVentanaDto {
   rol?: RolDepartamental;
 }
 
+/** Los tipos que se pueden elegir desde el 2026-10-07. SEMANAL e INTERVALO ya no se ofrecen. */
+export const TIPOS_VENTANA_ELEGIBLES: TipoVentana[] = [
+  TipoVentana.DIARIO,
+  TipoVentana.LABORABLE,
+  TipoVentana.SIN_RESTRICCION,
+];
+
+export const MENSAJE_CIERRE_POSTERIOR =
+  'La hora de cierre debe ser posterior a la de apertura.';
+
+/**
+ * El cierre va DESPUÉS de la apertura cuando las dos viajan en la misma petición (2026-10-07).
+ * Cuando solo llega una, la comprobación sobre la ventana combinada la hace el servicio
+ * (`reglas-ventana.ts`) con el mismo mensaje.
+ */
+@ValidatorConstraint({ name: 'cierrePosteriorAApertura', async: false })
+class CierrePosteriorAApertura implements ValidatorConstraintInterface {
+  validate(cierre: unknown, argumentos: ValidationArguments): boolean {
+    const { horaApertura } = argumentos.object as ActualizarVentanaDto;
+    if (typeof cierre !== 'string' || typeof horaApertura !== 'string')
+      return true;
+    if (!PATRON_HORA.test(cierre) || !PATRON_HORA.test(horaApertura))
+      return true;
+    return aMinutos(cierre) > aMinutos(horaApertura);
+  }
+
+  defaultMessage(): string {
+    return MENSAJE_CIERRE_POSTERIOR;
+  }
+}
+
 export class ActualizarVentanaDto {
-  @IsEnum(TipoVentana, {
+  @IsIn(TIPOS_VENTANA_ELEGIBLES, {
     message:
-      'El tipo de ventana admite estos valores: SEMANAL, DIARIO, INTERVALO.',
+      'El tipo de ventana admite estos valores: DIARIO, LABORABLE, SIN_RESTRICCION.',
   })
   @IsOptional()
   tipo?: TipoVentana;
@@ -90,6 +127,7 @@ export class ActualizarVentanaDto {
   @IsOptional()
   diaCierre?: number | null;
 
+  @Validate(CierrePosteriorAApertura)
   @Matches(PATRON_HORA, { message: MENSAJE_HORA })
   @IsString({ message: MENSAJE_HORA })
   @IsOptional()
@@ -122,6 +160,12 @@ export interface VentanaEstadoResponseDto {
   diaApertura: number | null;
   diaCierre: number | null;
   mensaje: string;
+  /** El horario calculado de las horas reales (2026-10-06): lo que se muestra como horario. */
+  horarioTexto: string;
+  /** Solo la DAF: el motivo de su hora de apertura (RN-56), o null. */
+  motivoApertura: string | null;
+  /** El texto libre del administrador, como nota secundaria. */
+  notaAdministrador: string | null;
   evaluadoEn: string;
 }
 
@@ -135,6 +179,8 @@ export interface VentanaResponseDto {
   horaCierre: string | null;
   zonaHoraria: string;
   mensajeCierre: string;
+  /** El mensaje con `{cierre}` / `{apertura}` ya reemplazados (2026-10-07): lo que lee la tabla. */
+  mensajeResuelto: string;
   activo: boolean;
 }
 
@@ -151,6 +197,9 @@ export function aVentanaEstadoResponse(
     diaApertura: estado.diaApertura,
     diaCierre: estado.diaCierre,
     mensaje: estado.mensaje,
+    horarioTexto: estado.horarioTexto,
+    motivoApertura: estado.motivoApertura,
+    notaAdministrador: estado.notaAdministrador,
     evaluadoEn: estado.evaluadoEn.toISOString(),
   };
 }
@@ -175,6 +224,11 @@ export function aVentanaResponse(ventana: {
     horaCierre: ventana.horaCierre,
     zonaHoraria: ventana.zonaHoraria,
     mensajeCierre: ventana.mensajeCierre,
+    mensajeResuelto: resolverMensajeVentana(
+      ventana.mensajeCierre,
+      ventana.horaApertura,
+      ventana.horaCierre,
+    ),
     activo: ventana.activo,
   };
 }

@@ -151,3 +151,26 @@ export function diaIsoEnZona(
   }
   return dia;
 }
+
+/**
+ * Día de calendario en la zona indicada, como `AAAA-MM-DD`.
+ *
+ * Es «hoy» para las reglas que comparan fechas de calendario (`@db.Date`): una ausencia
+ * pasada, en curso o próxima. A las 20H00 de Quito ya es mañana en UTC, así que «hoy» con
+ * `toISOString()` adelantaría el día cinco horas antes de tiempo.
+ */
+export function fechaIsoEnZona(
+  fecha: Date = new Date(),
+  zonaHoraria: string = appConfig.zonaHoraria,
+): string {
+  return formateador(
+    `fecha:${zonaHoraria}`,
+    () =>
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: zonaHoraria,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }),
+  ).format(fecha);
+}

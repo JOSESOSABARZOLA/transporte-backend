@@ -47,6 +47,9 @@ import type {
   SeccionMatriz,
 } from './matriz-consolidada.service';
 import type { OperativoDeMatriz } from '../infrastructure/matriz.repository';
+import { notasDeOperativo } from '../../../common/notas/notas-operativo';
+import { NOMBRE_ROL } from '../../../common/roles/catalogo-roles';
+import { marcaDeTiempo } from '../../../common/utilidades/marca-tiempo';
 import { textoDeTipoControl } from './tipo-control-texto';
 import { comoHoraInstitucional } from './reglas-matriz';
 import {
@@ -635,8 +638,58 @@ function celdasCompartidas(operativo: OperativoDeMatriz): (string | null)[] {
       '—',
     operativo.conductor?.nombreCompleto ?? pendiente(operativo),
     operativo.vehiculo?.placa ?? pendiente(operativo),
-    operativo.observaciones.map((nota) => nota.texto).join('\n') || '—',
+    observacionesDelPdf(operativo),
   ];
+}
+
+/** Posición de la columna OBSERVACIONES en `celdasCompartidas`. */
+const COLUMNA_OBSERVACIONES = 10;
+
+/** `dd/mm HHhMM` en la hora de Quito: `2026-10-20T08:40…-05:00` → `20/10 08H40`. */
+function fechaCortaInstitucional(fechaIso: string): string {
+  const marca = marcaDeTiempo(new Date(fechaIso));
+  return `${marca.slice(8, 10)}/${marca.slice(5, 7)} ${marca.slice(11, 13)}H${marca.slice(14, 16)}`;
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════
+ * LAS OBSERVACIONES DEL PDF, UNA POR RENGLÓN Y CON VIÑETA. 2026-10-19 (plan
+ * «notas-jornada-matriz», J6).
+ *
+ * Todas, la más reciente primero, las mismas notas que la pantalla (`notasDeOperativo`):
+ *   · NOTA       → «• Pruebas tecnicas 3 (DMIP · Unidad de Operativos, 20/10 08H40)». El documento
+ *                  firmado nombra el ROL de quien la escribió, no a la persona (J8).
+ *   · COMPARTIDA → «• Comparte con OCPMO-001-20-OCT-2026 (20/10 08H41)».
+ * Sin notas, «—». La celda envuelve y la fila crece (`medirFila`): no se corta nada.
+ * ═══════════════════════════════════════════════════════════════════════════════
+ */
+function observacionesDelPdf(operativo: OperativoDeMatriz): string {
+  const rolDeNota = new Map(
+    operativo.observaciones.map((nota) => [
+      `nota-${nota.id}`,
+      nota.creadoPorRol,
+    ]),
+  );
+  const lineas = notasDeOperativo(operativo).map((nota) => {
+    const cuando = fechaCortaInstitucional(nota.fecha);
+    const rol = rolDeNota.get(nota.id);
+    return nota.tipo === 'NOTA' && rol
+      ? `• ${nota.texto} (${NOMBRE_ROL[rol]}, ${cuando})`
+      : `• ${nota.texto} (${cuando})`;
+  });
+  return lineas.join('\n') || '—';
+}
+
+/**
+ * Lo que se COMPARA para fusionar un lote: las celdas, con las observaciones reducidas a su TEXTO.
+ * Dos notas iguales escritas a otra hora (o por otro rol) siguen fusionándose (J6).
+ */
+function clavesDeFusion(operativo: OperativoDeMatriz): (string | null)[] {
+  const celdas = celdasCompartidas(operativo);
+  celdas[COLUMNA_OBSERVACIONES] = notasDeOperativo(operativo)
+    .map((nota) => nota.texto)
+    .join('\n');
+  return celdas;
 }
 
 /**
@@ -816,7 +869,7 @@ function medirBloque(
   const celdasPorCodigo = ordenados.map((operativo) =>
     celdasCompartidas(operativo),
   );
-  const fusionadas = columnasFusionadas(celdasPorCodigo);
+  const fusionadas = columnasFusionadas(ordenados.map(clavesDeFusion));
   const grupos = gruposDePersona(ordenados);
   const anchoPersonal = COLUMNAS[COLUMNA_PERSONAL].ancho - 6;
   const anchoTelefono = COLUMNAS[COLUMNA_TELEFONO].ancho - 6;

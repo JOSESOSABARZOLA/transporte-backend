@@ -112,6 +112,8 @@ export class AdicionalesController {
         dto,
         { usuarioId: usuario.usuarioId, rol: usuario.rol },
         usuario.roles,
+        // Para volver a preguntar a Inspección por los trámites elegidos (2026-10-07).
+        usuario.tokenAuth,
       ),
     );
   }

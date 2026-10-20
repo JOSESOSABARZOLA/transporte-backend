@@ -30,12 +30,13 @@
  * operativo a otro día o a otro formulario es registrar otro y retirar este.
  */
 
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayNotEmpty,
   IsArray,
   IsBoolean,
+  IsEnum,
   IsInt,
   IsNotEmpty,
   IsOptional,
@@ -49,9 +50,14 @@ import {
   ValidateNested,
 } from 'class-validator';
 
-import type { PoliticaVehiculo } from '@prisma/client';
+import {
+  TipoTransporte,
+  type EstadoCuadro,
+  type PoliticaVehiculo,
+} from '@prisma/client';
 
 import { PaginacionDto } from '../../../../common/dto/paginacion.dto';
+import { notasDeOperativo } from '../../../../common/notas/notas-operativo';
 import type { Alerta } from '../../application/politicas/alertas-operativo';
 import { estadoDeComposicion } from '../../application/politicas/composicion-personal';
 import type { OperativoCompleto } from '../../infrastructure/operativos.repository';
@@ -63,6 +69,33 @@ const MENSAJE_HORA_INICIO =
   'La hora de inicio debe ser una hora en punto o y media, escrita como HH:MM.';
 const MENSAJE_HORA_FIN =
   'La hora de fin debe ser una hora en punto o y media, escrita como HH:MM.';
+
+/**
+ * El trámite de Inspección que el operador eligió para un inspector (2026-10-07).
+ *
+ * VIAJA SOLO EL CÓDIGO. El resto —SITRA, predio, zonal, materia— lo copia el servidor tras volver
+ * a preguntar a Inspección: lo que manda el navegador no se cree.
+ */
+export class TramiteElegidoDto {
+  @MaxLength(60, {
+    message: 'El código del trámite de Inspección es demasiado largo.',
+  })
+  @IsNotEmpty({ message: 'Indique el código del trámite de Inspección.' })
+  @IsString({ message: 'El código del trámite de Inspección no es válido.' })
+  codigoTramite: string;
+}
+
+/**
+ * Cambio del trámite de Inspección de una persona ya asignada (2026-10-07). `null` lo quita.
+ */
+export class FijarTramitePersonalDto {
+  @MaxLength(60, {
+    message: 'El código del trámite de Inspección es demasiado largo.',
+  })
+  @IsString({ message: 'El código del trámite de Inspección no es válido.' })
+  @IsOptional()
+  codigoTramite?: string | null;
+}
 
 /**
  * Una persona asignada con su VENTANA HORARIA PROPIA, opcional (2026-09-08).
@@ -100,6 +133,15 @@ export class PersonaConHorarioDto {
   @IsInt({ message: 'La cantidad de operativos debe ser un número entero.' })
   @IsOptional()
   cantidad?: number;
+
+  /**
+   * Trámite de Inspección de esta persona (2026-10-07). Solo para inspectores (General o Técnico).
+   * Con cantidad > 1 en el 8, las N copias llevan el mismo trámite.
+   */
+  @ValidateNested()
+  @Type(() => TramiteElegidoDto)
+  @IsOptional()
+  tramiteInspeccion?: TramiteElegidoDto;
 }
 
 /**
@@ -277,6 +319,54 @@ export class CrearOperativoDto {
   @IsArray({ message: 'Las notas se indican como una lista.' })
   @IsOptional()
   observaciones?: string[];
+  /**
+   * Transporte que se PIDE a la DAF (2026-10-06): COMPLETO (por defecto), SOLO_INICIO, SOLO_FIN,
+   * INICIO_Y_FIN o PROPIOS_MEDIOS. No es conductor ni vehículo: RN-40 sigue intacta.
+   */
+  @IsEnum(TipoTransporte, {
+    message:
+      'El transporte admite COMPLETO, SOLO_INICIO, SOLO_FIN, INICIO_Y_FIN o PROPIOS_MEDIOS.',
+  })
+  @IsOptional()
+  tipoTransporte?: TipoTransporte;
+
+  /** Macrooperativo: la DAF lo prioriza al asignar. */
+  @IsBoolean({ message: 'Indique si es un macrooperativo.' })
+  @IsOptional()
+  esMacrooperativo?: boolean;
+
+  /**
+   * COMPARTIR UNIDAD (2026-10-19). El operativo con el que quien registra pide viajar en la misma
+   * unidad: mismo día, punto y horario, de su ámbito. Es una INTENCIÓN que la DAF ejecuta (RN-40).
+   * `null` la retira.
+   */
+  @IsInt({
+    message: 'El operativo con el que se comparte se indica con su número.',
+  })
+  @Min(1, {
+    message: 'El operativo con el que se comparte se indica con su número.',
+  })
+  @IsOptional()
+  compartirConOperativoId?: number | null;
+
+  /**
+   * Por qué pide vehículo exclusivo (2026-10-19), cuando el registro detectó otro operativo en el
+   * mismo punto y horario. Solo con `esMacrooperativo`. `null` la retira.
+   */
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString({ message: 'La justificación del vehículo exclusivo es un texto.' })
+  @MinLength(10, {
+    message:
+      'Explique en al menos 10 caracteres por qué necesita vehículo exclusivo.',
+  })
+  @MaxLength(300, {
+    message:
+      'La justificación del vehículo exclusivo admite hasta 300 caracteres.',
+  })
+  @IsOptional()
+  justificacionExclusivo?: string | null;
 }
 
 /**
@@ -398,6 +488,21 @@ export class CrearAdicionalDto {
   @IsArray({ message: 'Las notas se indican como una lista.' })
   @IsOptional()
   observaciones?: string[];
+  /**
+   * Transporte que se PIDE a la DAF (2026-10-06): COMPLETO (por defecto), SOLO_INICIO, SOLO_FIN,
+   * INICIO_Y_FIN o PROPIOS_MEDIOS. No es conductor ni vehículo: RN-40 sigue intacta.
+   */
+  @IsEnum(TipoTransporte, {
+    message:
+      'El transporte admite COMPLETO, SOLO_INICIO, SOLO_FIN, INICIO_Y_FIN o PROPIOS_MEDIOS.',
+  })
+  @IsOptional()
+  tipoTransporte?: TipoTransporte;
+
+  /** Macrooperativo: la DAF lo prioriza al asignar. */
+  @IsBoolean({ message: 'Indique si es un macrooperativo.' })
+  @IsOptional()
+  esMacrooperativo?: boolean;
 }
 
 /**
@@ -496,6 +601,63 @@ export class ActualizarOperativoDto {
   @IsArray({ message: 'Las notas se indican como una lista.' })
   @IsOptional()
   observacionesNuevas?: string[];
+  /**
+   * Transporte que se PIDE a la DAF (2026-10-06): COMPLETO (por defecto), SOLO_INICIO, SOLO_FIN,
+   * INICIO_Y_FIN o PROPIOS_MEDIOS. No es conductor ni vehículo: RN-40 sigue intacta.
+   */
+  @IsEnum(TipoTransporte, {
+    message:
+      'El transporte admite COMPLETO, SOLO_INICIO, SOLO_FIN, INICIO_Y_FIN o PROPIOS_MEDIOS.',
+  })
+  @IsOptional()
+  tipoTransporte?: TipoTransporte;
+
+  /** Macrooperativo: la DAF lo prioriza al asignar. */
+  @IsBoolean({ message: 'Indique si es un macrooperativo.' })
+  @IsOptional()
+  esMacrooperativo?: boolean;
+
+  /**
+   * COMPARTIR UNIDAD (2026-10-19). El operativo con el que quien registra pide viajar en la misma
+   * unidad: mismo día, punto y horario, de su ámbito. Es una INTENCIÓN que la DAF ejecuta (RN-40).
+   * `null` la retira.
+   */
+  @IsInt({
+    message: 'El operativo con el que se comparte se indica con su número.',
+  })
+  @Min(1, {
+    message: 'El operativo con el que se comparte se indica con su número.',
+  })
+  @IsOptional()
+  compartirConOperativoId?: number | null;
+
+  /**
+   * Por qué pide vehículo exclusivo (2026-10-19), cuando el registro detectó otro operativo en el
+   * mismo punto y horario. Solo con `esMacrooperativo`. `null` la retira.
+   */
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString({ message: 'La justificación del vehículo exclusivo es un texto.' })
+  @MinLength(10, {
+    message:
+      'Explique en al menos 10 caracteres por qué necesita vehículo exclusivo.',
+  })
+  @MaxLength(300, {
+    message:
+      'La justificación del vehículo exclusivo admite hasta 300 caracteres.',
+  })
+  @IsOptional()
+  justificacionExclusivo?: string | null;
+
+  /**
+   * Transporte requerido (2026-10-07). Confirma que, al cambiar el tipo de transporte —o, desde el
+   * 2026-10-14, el horario o la zonal— de un operativo que YA tiene transporte asignado, se libera
+   * la asignación. Sin ella, 409.
+   */
+  @IsBoolean({ message: 'Indique si confirma liberar el transporte asignado.' })
+  @IsOptional()
+  confirmarLiberacion?: boolean;
 }
 
 /** Baja lógica. Exige la versión por el mismo motivo que la edición. */
@@ -557,6 +719,15 @@ export class ActualizarTurnoPersonalDto {
   @IsNotEmpty({ message: 'Indique la hora de fin del turno de la persona.' })
   @IsString({ message: 'La hora de fin del turno no es válida.' })
   horaFin: string;
+
+  /**
+   * Ocupación por tramos (2026-10-14). Si el nuevo turno cambia la ventana del operativo y este ya
+   * tiene transporte asignado, sus tramos dejan de corresponder: confirma que se libera. Sin ella,
+   * 409 `CAMBIO_CON_TRANSPORTE`.
+   */
+  @IsBoolean({ message: 'Indique si confirma liberar el transporte asignado.' })
+  @IsOptional()
+  confirmarLiberacion?: boolean;
 }
 
 /**
@@ -632,6 +803,26 @@ export class EditarPatrullaDto {
   @IsArray({ message: 'Las notas se indican como una lista.' })
   @IsOptional()
   observacionesNuevas?: string[];
+  /**
+   * Transporte que se PIDE a la DAF (2026-10-06): COMPLETO (por defecto), SOLO_INICIO, SOLO_FIN,
+   * INICIO_Y_FIN o PROPIOS_MEDIOS. No es conductor ni vehículo: RN-40 sigue intacta.
+   */
+  @IsEnum(TipoTransporte, {
+    message:
+      'El transporte admite COMPLETO, SOLO_INICIO, SOLO_FIN, INICIO_Y_FIN o PROPIOS_MEDIOS.',
+  })
+  @IsOptional()
+  tipoTransporte?: TipoTransporte;
+
+  /** Macrooperativo: la DAF lo prioriza al asignar. */
+  @IsBoolean({ message: 'Indique si es un macrooperativo.' })
+  @IsOptional()
+  esMacrooperativo?: boolean;
+
+  /** Transporte requerido (2026-10-07). Ver `ActualizarOperativoDto.confirmarLiberacion`. */
+  @IsBoolean({ message: 'Indique si confirma liberar el transporte asignado.' })
+  @IsOptional()
+  confirmarLiberacion?: boolean;
 }
 
 /**
@@ -654,9 +845,130 @@ export class FiltroOperativosDto extends PaginacionDto {
   @IsOptional()
   fecha?: string;
 
+  /** Rango Desde–Hasta (2026-10-13), fechas locales inclusive. No se mezcla con `fecha`. */
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'La fecha «Desde» se escribe como AAAA-MM-DD.',
+  })
+  @IsOptional()
+  desde?: string;
+
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'La fecha «Hasta» se escribe como AAAA-MM-DD.',
+  })
+  @IsOptional()
+  hasta?: string;
+
   @MaxLength(40, { message: 'El código de formulario es demasiado largo.' })
   @IsOptional()
   formulario?: string;
+}
+
+/** `GET /operativos/conteo` (2026-10-16): la fecha del cuadro es obligatoria. */
+export class FiltroConteoDto {
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'La fecha se escribe como AAAA-MM-DD.',
+  })
+  @IsNotEmpty({ message: 'Indique la fecha de la jornada.' })
+  fecha: string;
+}
+
+/**
+ * Coincidencias para compartir unidad (2026-10-19): el operativo EN CAPTURA, visto por lo que
+ * decide si comparte con otro. El horario es la envolvente de su personal, que calcula la pantalla.
+ */
+export class FiltroCoincidenciasDto {
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'La fecha se escribe como AAAA-MM-DD.',
+  })
+  @IsNotEmpty({ message: 'Indique la fecha de la jornada.' })
+  fecha: string;
+
+  @Type(() => Number)
+  @IsInt({ message: 'Indique el punto de encuentro.' })
+  @Min(1, { message: 'Indique el punto de encuentro.' })
+  puntoEncuentroId: number;
+
+  @Type(() => Number)
+  @IsInt({ message: 'Indique la zonal.' })
+  @Min(1, { message: 'Indique la zonal.' })
+  zonalId: number;
+
+  @Matches(/^([01]\d|2[0-3]):(00|30)$/, {
+    message: 'La hora de inicio se escribe HH:MM, en punto o y media.',
+  })
+  horaInicio: string;
+
+  @Matches(/^([01]\d|2[0-3]):(00|30)$/, {
+    message: 'La hora de fin se escribe HH:MM, en punto o y media.',
+  })
+  horaFin: string;
+
+  /** Solo modalidades con transporte de la DAF: con propios medios no hay unidad que compartir. */
+  @IsEnum(
+    [
+      TipoTransporte.COMPLETO,
+      TipoTransporte.SOLO_INICIO,
+      TipoTransporte.SOLO_FIN,
+      TipoTransporte.INICIO_Y_FIN,
+    ],
+    {
+      message:
+        'Las coincidencias se buscan para COMPLETO, SOLO_INICIO, SOLO_FIN o INICIO_Y_FIN.',
+    },
+  )
+  tipoTransporte: TipoTransporte;
+
+  /** Vehículo exclusivo pedido por el borrador: no comparte, pero la coincidencia se informa. */
+  @Transform(
+    ({ value }: { value: unknown }) => value === 'true' || value === true,
+  )
+  @IsBoolean({ message: 'Indique si pide vehículo exclusivo.' })
+  @IsOptional()
+  esMacrooperativo?: boolean;
+
+  /** Al editar: el propio operativo no se cuenta como coincidencia. */
+  @Type(() => Number)
+  @IsInt({ message: 'El operativo a excluir se indica con su número.' })
+  @Min(1, { message: 'El operativo a excluir se indica con su número.' })
+  @IsOptional()
+  excluirOperativoId?: number;
+}
+
+/**
+ * Un operativo que coincide para compartir unidad (2026-10-19). Solo nombra al personal (sin
+ * teléfono ni cédula) y solo del ámbito del rol (RN-48).
+ */
+export interface CoincidenciaTransporteDto {
+  operativoId: number;
+  identificador: string;
+  formularioNumero: number;
+  personal: string[];
+  horaInicio: string;
+  horaFin: string;
+  tipoTransporte: TipoTransporte;
+  esMacrooperativo: boolean;
+  compatible: boolean;
+  /** Por qué no puede compartir, en palabras del funcionario. Ausente si es compatible. */
+  motivo?: string;
+  /**
+   * Traslados que harían juntos en la misma unidad («dejar», «retirar», «todo el operativo»).
+   * Basta uno para ser compatible (2026-10-19, «la misma unidad»).
+   */
+  comparte: string[];
+  /**
+   * Traslados del nuevo que NO viajan con nadie pero no se cruzan con la unidad: los hace la misma
+   * unidad después, si su agenda lo permite (lo confirma la DAF).
+   */
+  propios: string[];
+  /** Con quién viaja cada traslado de `comparte` (la unidad es la del grupo: «retirar» con OCPMO-002). */
+  comparteCon: { tipo: string; con: string }[];
+  /**
+   * «Completo» (2026-10-20): los traslados de la unidad que el «completo» del nuevo abarca («dejar»,
+   * «retirar»): la unidad lo acompaña todo el día y además deja o retira a los otros.
+   */
+  contiene: string[];
+  /** El «completo» de la unidad dentro del que viajan los traslados del nuevo, o `null`. */
+  contenidoEn: string | null;
 }
 
 // ─────────────────────────── Respuesta ───────────────────────────
@@ -742,6 +1054,21 @@ export interface PersonaAsignadaDto {
    */
   horaInicio: string;
   horaFin: string;
+  /**
+   * Trámite de Inspección copiado a esta persona en este operativo (2026-10-07). Nulo si no tiene.
+   * Es la COPIA guardada al elegirlo, no una consulta en vivo a Inspección.
+   */
+  tramiteInspeccion: TramiteGuardadoDto | null;
+}
+
+/** El trámite de Inspección guardado de una persona asignada (2026-10-07). */
+export interface TramiteGuardadoDto {
+  codigoTramite: string;
+  nroSitra: string | null;
+  predio: string | null;
+  zonal: string | null;
+  materia: string | null;
+  tipoTramite: string | null;
 }
 
 /**
@@ -767,6 +1094,26 @@ export interface ObservacionDto {
   creadoEn: string;
 }
 
+/**
+ * Una NOTA de la celda «Observaciones» de P-01/P-02 (2026-10-19, plan «acciones-icono-notas»).
+ *
+ *   · `NOTA`       → una fila de la bitácora (`t_operativo_observacion`), con el nombre de quien
+ *                    la escribió (el rol si el usuario ya no existe).
+ *   · `COMPARTIDA` → la solicitud de compartir unidad (`oper_compartir_con_id`). NO es una fila
+ *                    de la bitácora: se arma de la intención, que es la fuente (N1), así que no
+ *                    va en la orden de servicio; desde el 2026-10-19 sí en la Jornada y la Matriz.
+ *
+ * Solo el nombre del autor: nada más de su cuenta.
+ */
+export interface NotaOperativoDto {
+  id: string;
+  tipo: 'NOTA' | 'COMPARTIDA';
+  texto: string;
+  autor: string;
+  fecha: string;
+  operativoRelacionadoId: number | null;
+}
+
 export interface OperativoResponseDto {
   id: number;
   identificador: string;
@@ -774,6 +1121,8 @@ export interface OperativoResponseDto {
   /** Lote del registro-patrulla (Form 5/6): agrupa los N en las listas. Nulo en el resto. */
   grupoRegistro: string | null;
   cuadroFecha: string;
+  /** Estado del cuadro de la fila (2026-10-13): con un rango, cada fila puede ser de otro. */
+  cuadroEstado: EstadoCuadro;
   /**
    * RN-20 no tiene nada que ver con esto: aquí «adicional» es la salida extraordinaria
    * del 2026-08-20, no la captura libre de un punto o un tipo de control.
@@ -805,17 +1154,75 @@ export interface OperativoResponseDto {
     areasPendientes: string[];
   };
   estadoTransporte: string;
+  /** Transporte pedido (2026-10-06). */
+  tipoTransporte: TipoTransporte;
+  esMacrooperativo: boolean;
+  /** Compartir unidad (2026-10-19): el anfitrión con el que pide viajar. Nulo si no lo pidió. */
+  compartirCon: { id: number; identificador: string } | null;
+  /** Por qué pide vehículo exclusivo (2026-10-19). Nulo si no lo justificó. */
+  justificacionExclusivo: string | null;
+  /**
+   * Avisos de la ESCRITURA que la devolvió (2026-10-19): `COMPARTIR_RETIRADO` si una edición dejó
+   * de coincidir con el anfitrión y la intención se retiró. Ausente si no hay ninguno.
+   */
+  avisos?: string[];
   alertaActiva: boolean;
   /** POL-06. Derivadas por el servidor: el frontend no las calcula, las pinta. */
   alertas: Alerta[];
   /** Notas del operativo (bitácora append-only, 2026-09-09), en el orden en que se escribieron. */
   observaciones: ObservacionDto[];
+  /** Las notas de la celda Observaciones (2026-10-19), la más reciente primero. */
+  notas: NotaOperativoDto[];
   creadoPorRol: string;
   creadoPor: number;
   modificadoPorRol: string;
   modificadoPor: number;
   version: number;
   creadoEn: string;
+}
+
+/**
+ * Fila del listado «Mis operativos» (2026-10-13). `admiteEdicion` lo decide el servidor —cuadro
+ * no cerrado, cuadro vigente y ventana abierta— para que la pantalla no lo recalcule. La
+ * propiedad de la fila (si es del usuario) sigue resolviéndola el cliente.
+ */
+export interface OperativoListadoDto extends OperativoResponseDto {
+  admiteEdicion: boolean;
+  /**
+   * Conductor y placa que asignó la DAF (2026-10-13), para la celda «Conductor». Vacío si aún no
+   * hay. Varios pares si los tramos van con conductores distintos. Solo lectura: RN-40 intacta.
+   */
+  transporteAsignado: { conductor: string; placa: string | null }[];
+}
+
+/**
+ * Operativos vigentes de un formulario en la jornada (2026-10-16): el «N hoy» del selector de
+ * formularios del registro. Va una fila por formulario permitido, con 0 si no tiene.
+ */
+export interface ConteoFormularioDto {
+  formularioId: number;
+  total: number;
+}
+
+/** Lo que la pantalla necesita para validar un rango sin consultar (2026-10-13). */
+export interface RangoConsultaDto {
+  /** Fecha del cuadro vigente, AAAA-MM-DD: mañana en America/Guayaquil. */
+  fechaVigente: string;
+  /** `MIS_OPERATIVOS_RANGO_MAX_DIAS`. */
+  rangoMaxDias: number;
+}
+
+/**
+ * Las notas de la celda «Observaciones» (2026-10-19): las de la bitácora y, si pidió compartir
+ * unidad, la tarjeta COMPARTIDA. La más reciente primero; a igual fecha, la compartida delante.
+ * El autor sale de `autores` (un lote por consulta, sin N+1); si falta, el rol en palabras.
+ */
+export function notasDelOperativo(
+  operativo: OperativoCompleto,
+): NotaOperativoDto[] {
+  // La regla vive en `common/notas` desde el 2026-10-19: la usan también la Jornada, la Matriz
+  // y su PDF (plan «notas-jornada-matriz», J1). Mismo resultado que antes.
+  return notasDeOperativo(operativo, operativo.autores ?? {});
 }
 
 export function aOperativoResponse(
@@ -827,6 +1234,7 @@ export function aOperativoResponse(
     secuencial: operativo.secuencial,
     grupoRegistro: operativo.grupoRegistro,
     cuadroFecha: operativo.cuadro.fecha.toISOString().slice(0, 10),
+    cuadroEstado: operativo.cuadro.estado,
     // Se deriva de `origenId` y no de `origen`, que es la relación cargada: los dos dicen
     // lo mismo, pero la columna es la fuente y la relación su reflejo.
     esAdicional: operativo.origenId !== null,
@@ -899,9 +1307,28 @@ export function aOperativoResponse(
       // Ventana efectiva: la propia si la tiene, o la del operativo (2026-09-08).
       horaInicio: fila.horaInicio ?? operativo.horaInicio,
       horaFin: fila.horaFin ?? operativo.horaFin,
+      tramiteInspeccion: fila.tramiteInspeccion
+        ? {
+            codigoTramite: fila.tramiteInspeccion.codigoTramite,
+            nroSitra: fila.tramiteInspeccion.nroSitra,
+            predio: fila.tramiteInspeccion.predio,
+            zonal: fila.tramiteInspeccion.zonal,
+            materia: fila.tramiteInspeccion.materia,
+            tipoTramite: fila.tramiteInspeccion.tipoTramite,
+          }
+        : null,
     })),
     composicion: composicionDe(operativo),
     estadoTransporte: operativo.estadoTransporte,
+    tipoTransporte: operativo.tipoTransporte,
+    esMacrooperativo: operativo.esMacrooperativo,
+    compartirCon: operativo.compartirCon
+      ? {
+          id: operativo.compartirCon.id,
+          identificador: operativo.compartirCon.identificador,
+        }
+      : null,
+    justificacionExclusivo: operativo.justificacionExclusivo,
     alertaActiva: operativo.alertaActiva,
     alertas: (operativo.alertas as Alerta[] | null) ?? [],
     observaciones: operativo.observaciones.map((nota) => ({
@@ -909,6 +1336,7 @@ export function aOperativoResponse(
       creadoPorRol: nota.creadoPorRol,
       creadoEn: nota.creadoEn.toISOString(),
     })),
+    notas: notasDelOperativo(operativo),
     creadoPorRol: operativo.creadoPorRol,
     creadoPor: operativo.creadoPor,
     modificadoPorRol: operativo.modificadoPorRol,

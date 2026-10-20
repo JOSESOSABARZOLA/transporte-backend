@@ -13,12 +13,18 @@
  * `t_formulario` y sus satélites se sembraban en la semilla; agregar el décimo formulario
  * exigía escribir SQL y desplegar. Con el rango de `form_numero` ampliado a 1..99 (migración
  * 20260929120000), un formulario es puro dato, y este servicio es esa escritura: crea el
- * formulario con sus áreas, su rol dueño (una fila ESCRITURA) y su prefijo predeterminado, en
- * una sola transacción con la auditoría dentro (regla 5).
+ * formulario con su rol dueño (una fila ESCRITURA) y su prefijo general, en una sola
+ * transacción con la auditoría dentro (regla 5). Las áreas se le configuran después.
  *
  * NÚMERO Y CÓDIGO SON INMUTABLES tras el alta: los referencian los operativos y la identidad
  * legible del formulario. La edición cambia todo lo demás. La baja es SIEMPRE lógica
  * (`activo=false`): las FK de `Operativo` son RESTRICT y un formulario con historia no se borra.
+ *
+ * REDISEÑO DE P-09 (2026-10-13). Las áreas ya NO se escriben aquí: el formulario nace sin áreas
+ * y se le configuran en Catálogos del cuadro (`AreasFormularioService`). El prefijo solo cambia
+ * si es distinto y solo en su fila general; no puede repetir el de otro formulario. Número,
+ * código y prefijo repetidos son 409. El nombre se guarda en MAYÚSCULAS. Las reglas puras viven
+ * en `politicas/formulario-admin.ts`.
  *
  * LOS COLORES SE ELIGEN DE LA PALETA (`esColorDePaleta`), no se teclean: el manual de marca no
  * admite hexadecimales fuera de la paleta institucional.
@@ -26,11 +32,18 @@
  */
 
 import { Injectable } from '@nestjs/common';
-import { AccionAuditoria, PoliticaVehiculo, type Prisma } from '@prisma/client';
+import {
+  AccionAuditoria,
+  PoliticaVehiculo,
+  TipoTransporte,
+  type Prisma,
+} from '@prisma/client';
 
 import { AuditoriaService } from '../../../common/auditoria/auditoria.service';
+import { CODIGOS_ERROR } from '../../../common/errors/codigos-error';
 import {
   RecursoNoEncontradoError,
+  ReglaNegocioError,
   ValidacionError,
 } from '../../../common/errors/errores-dominio';
 import { LoggerService } from '../../../common/logger/logger.service';
@@ -40,7 +53,14 @@ import {
   type DatosNuevoFormulario,
   type FormularioCompleto,
 } from '../infrastructure/formularios.repository';
-import { AreasFormularioService } from './areas-formulario.service';
+import {
+  decidirCambioDePrefijo,
+  mensajePrefijoRepetido,
+  nombreDeFormulario,
+  normalizarPrefijo,
+  numeroLibreMasBajo,
+  prefijoUsadoPorOtro,
+} from './politicas/formulario-admin';
 import {
   CrearFormularioDto,
   ActualizarFormularioDto,
@@ -56,7 +76,6 @@ export interface ResultadoBajaFormulario {
 export class FormulariosAdminService {
   constructor(
     private readonly repositorio: FormulariosRepository,
-    private readonly areasFormulario: AreasFormularioService,
     private readonly auditoria: AuditoriaService,
     private readonly logger: LoggerService,
   ) {}
@@ -66,29 +85,40 @@ export class FormulariosAdminService {
     return this.repositorio.listarTodos();
   }
 
+  /** El número libre más bajo del 1 al 99, el que la pantalla sugiere al crear (o `null`). */
+  async numeroLibre(): Promise<number | null> {
+    const usados = await this.repositorio.numerosYCodigosUsados();
+    return numeroLibreMasBajo(usados.map((fila) => fila.numero));
+  }
+
   /**
-   * Crea el formulario y sus satélites (áreas, rol dueño con ESCRITURA, prefijo predeterminado)
-   * en una sola transacción. Número y código únicos; color de la paleta; al menos un área.
+   * Crea el formulario con su rol dueño (ESCRITURA) y su prefijo general en una sola
+   * transacción. Número, código y prefijo únicos (409); color de la paleta. Nace SIN áreas.
    */
   async crear(
     dto: CrearFormularioDto,
     usuarioId: number,
   ): Promise<FormularioCompleto> {
     const codigo = dto.codigo.trim();
+    const prefijo = normalizarPrefijo(dto.prefijo);
 
     await this.exigirNumeroYCodigoLibres(dto.numero, codigo);
+    await this.exigirPrefijoLibre(prefijo, null);
     this.exigirColorDePaleta(dto.colorFondo, dto.colorAcento, dto.colorNombre);
 
-    const areas = [...new Set(dto.areas)];
     const datos: DatosNuevoFormulario = {
       numero: dto.numero,
       codigo,
-      nombre: dto.nombre.trim(),
+      nombre: nombreDeFormulario(dto.nombre),
       colorFondo: dto.colorFondo.toUpperCase(),
       colorAcento: dto.colorAcento.toUpperCase(),
       colorNombre: dto.colorNombre.trim(),
       rolDueno: dto.rolDueno,
       politicaVehiculo: dto.politicaVehiculo ?? PoliticaVehiculo.CONDICIONAL,
+      // Transporte requerido (2026-10-07): un formulario nuevo sugiere PROPIOS_MEDIOS salvo que el
+      // administrador configure otro. Es solo la sugerencia del combo; quien registra decide.
+      tipoTransporteDefecto:
+        dto.tipoTransportePorDefecto ?? TipoTransporte.PROPIOS_MEDIOS,
       condicionanteNoct: dto.condicionanteNoct ?? false,
       esPatrulla: dto.esPatrulla ?? false,
       capturaLibrePunto: dto.capturaLibrePunto ?? false,
@@ -103,15 +133,14 @@ export class FormulariosAdminService {
 
     await this.repositorio.ejecutarEnTransaccion(async (cliente) => {
       const formulario = await this.repositorio.crearFormulario(datos, cliente);
-      await this.repositorio.igualarAreas(formulario.id, areas, cliente);
       await this.repositorio.sincronizarRolDueno(
         formulario.id,
         dto.rolDueno,
         cliente,
       );
-      await this.repositorio.fijarPrefijoPredeterminado(
+      await this.repositorio.crearPrefijoGeneral(
         formulario.id,
-        dto.prefijo.trim(),
+        prefijo,
         cliente,
       );
 
@@ -152,10 +181,9 @@ export class FormulariosAdminService {
   }
 
   /**
-   * Edita un formulario. NO cambia número ni código (el DTO no los declara). Los cambios de
-   * área se delegan en `AreasFormularioService` (que ya trae sus dos puertas: no dejarlo sin
-   * áreas y no descolgar personal de la jornada viva). El resto —nombre, colores de paleta,
-   * política, banderas, orden, activo, rol dueño y prefijo— se aplica en una transacción.
+   * Edita un formulario. Número, código y áreas no llegan (el DTO los rechaza con 400). El
+   * resto —nombre, colores de paleta, política, banderas, orden, activo, rol dueño y prefijo
+   * general— se aplica en una transacción. Guardar sin cambios no escribe nada.
    */
   async actualizar(
     codigo: string,
@@ -186,18 +214,12 @@ export class FormulariosAdminService {
       );
     }
 
-    if (dto.areas !== undefined) {
-      if (!formulario.activo) {
-        throw new ValidacionError(
-          `Reactive el formulario ${formulario.nombre} antes de cambiar sus áreas.`,
-          { codigo },
-        );
-      }
-      await this.areasFormulario.reemplazar(
-        codigo,
-        [...new Set(dto.areas)],
-        usuarioId,
-      );
+    const prefijo = decidirCambioDePrefijo(formulario.prefijos, dto.prefijo);
+    if (prefijo.accion === 'rechazar') {
+      throw new ValidacionError(prefijo.mensaje, { codigo });
+    }
+    if (prefijo.accion === 'actualizar') {
+      await this.exigirPrefijoLibre(prefijo.prefijo, formulario.id);
     }
 
     const data: Prisma.FormularioUncheckedUpdateInput = {};
@@ -242,8 +264,10 @@ export class FormulariosAdminService {
       set();
     };
 
-    texto(dto.nombre, formulario.nombre, 'form_nombre', () => {
-      data.nombre = dto.nombre?.trim();
+    const nombre =
+      dto.nombre === undefined ? undefined : nombreDeFormulario(dto.nombre);
+    texto(nombre, formulario.nombre, 'form_nombre', () => {
+      data.nombre = nombre;
     });
     if (dto.colorFondo !== undefined) {
       data.colorFondo = dto.colorFondo.toUpperCase();
@@ -274,6 +298,17 @@ export class FormulariosAdminService {
         campo: 'form_politica_vehiculo',
         valorAnterior: formulario.politicaVehiculo,
         valorNuevo: dto.politicaVehiculo,
+      });
+    }
+    if (
+      dto.tipoTransportePorDefecto !== undefined &&
+      dto.tipoTransportePorDefecto !== formulario.tipoTransporteDefecto
+    ) {
+      data.tipoTransporteDefecto = dto.tipoTransportePorDefecto;
+      cambios.push({
+        campo: 'form_tipo_transporte_defecto',
+        valorAnterior: formulario.tipoTransporteDefecto,
+        valorNuevo: dto.tipoTransportePorDefecto,
       });
     }
     if (dto.orden !== undefined && dto.orden !== formulario.orden) {
@@ -354,6 +389,16 @@ export class FormulariosAdminService {
     bandera(dto.activo, formulario.activo, 'form_activo', () => {
       data.activo = dto.activo;
     });
+    if (prefijo.accion === 'actualizar') {
+      const anterior =
+        formulario.prefijos.find((fila) => fila.id === prefijo.id)?.prefijo ??
+        '';
+      cambios.push({
+        campo: 'fpre_prefijo',
+        valorAnterior: anterior,
+        valorNuevo: prefijo.prefijo,
+      });
+    }
 
     await this.repositorio.ejecutarEnTransaccion(async (cliente) => {
       if (Object.keys(data).length > 0) {
@@ -370,10 +415,10 @@ export class FormulariosAdminService {
           cliente,
         );
       }
-      if (dto.prefijo !== undefined) {
-        await this.repositorio.fijarPrefijoPredeterminado(
-          formulario.id,
-          dto.prefijo.trim(),
+      if (prefijo.accion === 'actualizar') {
+        await this.repositorio.actualizarPrefijo(
+          prefijo.id,
+          prefijo.prefijo,
           cliente,
         );
       }
@@ -464,7 +509,8 @@ export class FormulariosAdminService {
     const usados = await this.repositorio.numerosYCodigosUsados();
 
     if (usados.some((fila) => fila.numero === numero)) {
-      throw new ValidacionError(
+      throw new ReglaNegocioError(
+        CODIGOS_ERROR.FORMULARIO_DUPLICADO,
         `Ya existe un formulario con el número ${numero}.`,
         { numero },
       );
@@ -474,11 +520,27 @@ export class FormulariosAdminService {
     if (
       usados.some((fila) => fila.codigo.toUpperCase() === codigoNormalizado)
     ) {
-      throw new ValidacionError(
+      throw new ReglaNegocioError(
+        CODIGOS_ERROR.FORMULARIO_DUPLICADO,
         `Ya existe un formulario con el código ${codigo}.`,
         { codigo },
       );
     }
+  }
+
+  /** 409 si el prefijo ya lo usa otro formulario (`formularioId` es `null` en un alta). */
+  private async exigirPrefijoLibre(
+    prefijo: string,
+    formularioId: number | null,
+  ): Promise<void> {
+    const enUso = await this.repositorio.prefijosEnUso();
+    if (!prefijoUsadoPorOtro(prefijo, formularioId, enUso)) return;
+
+    throw new ReglaNegocioError(
+      CODIGOS_ERROR.FORMULARIO_DUPLICADO,
+      mensajePrefijoRepetido(prefijo),
+      { prefijo },
+    );
   }
 
   private async exigirFormulario(codigo: string): Promise<FormularioCompleto> {

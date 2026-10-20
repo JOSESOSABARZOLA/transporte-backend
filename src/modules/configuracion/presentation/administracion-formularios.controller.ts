@@ -13,7 +13,11 @@
  * `FormularioRolGuard` (el administrador no participa en ningún formulario: los administra todos).
  *
  * Convive con `AdministracionAreasController` bajo la misma base `administracion/formularios`:
- * las rutas no chocan (`:codigo/areas` allí; aquí `GET`, `POST`, `PUT :codigo`, `DELETE :codigo`).
+ * las rutas no chocan (`:codigo/areas` allí; aquí `GET`, `GET paleta`, `GET numero-libre`,
+ * `POST`, `PUT :codigo`, `DELETE :codigo`).
+ *
+ * LAS ÁREAS SE ESCRIBEN SOLO EN `:codigo/areas` (2026-10-13). Crear y editar el formulario ya no
+ * las aceptan: la respuesta las trae, para mostrarlas en solo lectura.
  */
 
 import {
@@ -40,6 +44,10 @@ import {
   PALETA_FORMULARIOS,
   type ColorFormulario,
 } from '../domain/paleta-formularios';
+import {
+  prefijoGeneral,
+  prefijoMostrado,
+} from '../application/politicas/formulario-admin';
 import type { FormularioCompleto } from '../infrastructure/formularios.repository';
 import {
   ActualizarFormularioDto,
@@ -57,6 +65,8 @@ interface FormularioResponseDto {
   colorNombre: string;
   rolDueno: string;
   politicaVehiculo: string;
+  /** Tipo de transporte de un operativo nuevo que no lo indica (2026-10-07). */
+  tipoTransportePorDefecto: string;
   condicionanteNoct: boolean;
   esPatrulla: boolean;
   capturaLibrePunto: boolean;
@@ -69,19 +79,25 @@ interface FormularioResponseDto {
   orden: number;
   activo: boolean;
   areas: string[];
+  /** El prefijo GENERAL (sin área, ordinario): el único editable. `null` si numera solo por área. */
+  prefijo: string | null;
+  /** El que se muestra en la tabla: el general o, si no lo hay, el primero. */
+  prefijoMostrado: string | null;
+  /** Todos sus prefijos, para mostrarlos en solo lectura y validar en vivo entre formularios. */
+  prefijos: PrefijoResponseDto[];
+}
+
+/** Una fila de `t_formulario_prefijo`. */
+interface PrefijoResponseDto {
   prefijo: string;
+  /** Área a la que aplica, o `null` si es general. */
+  area: string | null;
+  predeterminado: boolean;
+  adicional: boolean;
 }
 
 /** Convierte la fila completa (con áreas y prefijos) al contrato que consume la pantalla. */
 function aRespuesta(formulario: FormularioCompleto): FormularioResponseDto {
-  const predeterminado =
-    formulario.prefijos.find(
-      (prefijo) =>
-        prefijo.esPredeterminado &&
-        !prefijo.esAdicional &&
-        prefijo.areaAplica === null,
-    ) ?? formulario.prefijos[0];
-
   return {
     id: formulario.id,
     numero: formulario.numero,
@@ -92,6 +108,7 @@ function aRespuesta(formulario: FormularioCompleto): FormularioResponseDto {
     colorNombre: formulario.colorNombre,
     rolDueno: formulario.rolDueno,
     politicaVehiculo: formulario.politicaVehiculo,
+    tipoTransportePorDefecto: formulario.tipoTransporteDefecto,
     condicionanteNoct: formulario.condicionanteNoct,
     esPatrulla: formulario.esPatrulla,
     capturaLibrePunto: formulario.capturaLibrePunto,
@@ -104,7 +121,17 @@ function aRespuesta(formulario: FormularioCompleto): FormularioResponseDto {
     orden: formulario.orden,
     activo: formulario.activo,
     areas: formulario.areas.map((area) => area.area),
-    prefijo: predeterminado?.prefijo ?? '',
+    prefijo: prefijoGeneral(formulario.prefijos)?.prefijo ?? null,
+    prefijoMostrado: prefijoMostrado(formulario.prefijos),
+    prefijos: formulario.prefijos
+      .slice()
+      .sort((a, b) => a.id - b.id)
+      .map((fila) => ({
+        prefijo: fila.prefijo,
+        area: fila.areaAplica,
+        predeterminado: fila.esPredeterminado,
+        adicional: fila.esAdicional,
+      })),
   };
 }
 
@@ -125,6 +152,12 @@ export class AdministracionFormulariosController {
   @Get('paleta')
   obtenerPaleta(): readonly ColorFormulario[] {
     return PALETA_FORMULARIOS;
+  }
+
+  /** El número libre más bajo (1..99) que la pantalla sugiere al crear; `null` si no queda. */
+  @Get('numero-libre')
+  async numeroLibre(): Promise<{ numero: number | null }> {
+    return { numero: await this.formularios.numeroLibre() };
   }
 
   @Post()

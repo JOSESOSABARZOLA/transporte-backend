@@ -19,10 +19,30 @@ import type {
   Disponibilidad,
   EstadoDisponibilidad,
   Prisma,
+  RolDepartamental,
 } from '@prisma/client';
 
 import { RepositorioPrisma } from '../../../common/persistencia/repositorio-prisma';
 import { PrismaService } from '../../../prisma/prisma.service';
+
+/**
+ * Una ausencia del maestro, SIN el motivo. La lista de P-07 solo necesita saber quién falta y
+ * entre qué fechas; el motivo puede ser un dato de salud (RN-30) y se lee persona a persona.
+ */
+export interface AusenciaDelMaestro {
+  id: number;
+  funcionarioId: number;
+  estado: EstadoDisponibilidad;
+  desde: Date;
+  hasta: Date;
+}
+
+/** Un operativo activo al que la persona está asignada, con la fecha de su jornada. */
+export interface OperativoDeLaPersona {
+  operativoId: number;
+  identificador: string;
+  fecha: Date;
+}
 
 export interface NuevaAusencia {
   funcionarioId: number;
@@ -95,6 +115,84 @@ export class DisponibilidadRepository extends RepositorioPrisma {
         .map((fila) => fila.funcionarioId)
         .filter((id): id is number => id !== null),
     );
+  }
+
+  /**
+   * Ausencias excluyentes EN CURSO o PRÓXIMAS (terminan el día `desde` o después) de las fichas
+   * de las direcciones indicadas. UNA consulta para toda la lista de P-07: antes se pedían
+   * persona a persona, una petición por fila visible. Sin el motivo, a propósito.
+   */
+  async vigentesYProximas(
+    desde: Date,
+    direcciones: readonly RolDepartamental[],
+    estados: EstadoDisponibilidad[],
+  ): Promise<AusenciaDelMaestro[]> {
+    if (direcciones.length === 0) return [];
+
+    const filas = await this.prisma.disponibilidad.findMany({
+      where: {
+        funcionarioId: { not: null },
+        estado: { in: estados },
+        hasta: { gte: desde },
+        funcionario: { direccion: { in: [...direcciones] } },
+      },
+      select: {
+        id: true,
+        funcionarioId: true,
+        estado: true,
+        desde: true,
+        hasta: true,
+      },
+      orderBy: [{ desde: 'asc' }, { id: 'asc' }],
+    });
+
+    return filas.flatMap((fila) =>
+      fila.funcionarioId === null
+        ? []
+        : [{ ...fila, funcionarioId: fila.funcionarioId }],
+    );
+  }
+
+  /**
+   * Operativos ACTIVOS a los que la persona está asignada con jornada dentro del rango
+   * (extremos inclusivos). Es lo que el modal de ausencias avisa: registrar la ausencia NO
+   * retira a la persona de ellos, y alguien tiene que reemplazarla.
+   */
+  async operativosEntre(
+    funcionarioId: number,
+    desde: Date,
+    hasta: Date,
+  ): Promise<OperativoDeLaPersona[]> {
+    const filas = await this.prisma.asignacionPersonal.findMany({
+      where: {
+        funcionarioId,
+        operativo: {
+          activo: true,
+          cuadro: { fecha: { gte: desde, lte: hasta } },
+        },
+      },
+      select: {
+        operativo: {
+          select: {
+            id: true,
+            identificador: true,
+            cuadro: { select: { fecha: true } },
+          },
+        },
+      },
+    });
+
+    return filas
+      .map((fila) => ({
+        operativoId: fila.operativo.id,
+        identificador: fila.operativo.identificador,
+        fecha: fila.operativo.cuadro.fecha,
+      }))
+      .sort(
+        (uno, otro) =>
+          uno.fecha.getTime() - otro.fecha.getTime() ||
+          uno.identificador.localeCompare(otro.identificador),
+      );
   }
 
   async buscarPorId(id: number): Promise<Disponibilidad | null> {

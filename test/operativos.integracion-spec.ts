@@ -237,10 +237,26 @@ describe('Operativos · integración', () => {
         },
         prefijos: {
           create: [
-            { prefijo: 'IG', areaAplica: AreaPersonal.GENERAL, esAdicional: false },
-            { prefijo: 'IT', areaAplica: AreaPersonal.TECNICO, esAdicional: false },
-            { prefijo: 'IGA', areaAplica: AreaPersonal.GENERAL, esAdicional: true },
-            { prefijo: 'ITA', areaAplica: AreaPersonal.TECNICO, esAdicional: true },
+            {
+              prefijo: 'IG',
+              areaAplica: AreaPersonal.GENERAL,
+              esAdicional: false,
+            },
+            {
+              prefijo: 'IT',
+              areaAplica: AreaPersonal.TECNICO,
+              esAdicional: false,
+            },
+            {
+              prefijo: 'IGA',
+              areaAplica: AreaPersonal.GENERAL,
+              esAdicional: true,
+            },
+            {
+              prefijo: 'ITA',
+              areaAplica: AreaPersonal.TECNICO,
+              esAdicional: true,
+            },
           ],
         },
       },
@@ -412,7 +428,10 @@ describe('Operativos · integración', () => {
     return formulario.id;
   };
 
-  const crearPunto = async (nombre: string, zonalId: number): Promise<number> => {
+  const crearPunto = async (
+    nombre: string,
+    zonalId: number,
+  ): Promise<number> => {
     const punto = await prisma.puntoEncuentro.create({
       data: { nombre: `${PREFIJO} ${nombre}`, zonalId },
     });
@@ -494,7 +513,11 @@ describe('Operativos · integración', () => {
       const respuesta = await registrar(
         INSPECCIONES,
         registroTurnos([
-          { funcionarioId: inspectorGeneralA, horaInicio: '09:00', horaFin: '11:00' },
+          {
+            funcionarioId: inspectorGeneralA,
+            horaInicio: '09:00',
+            horaFin: '11:00',
+          },
           // Sin turno propio: hereda el horario del operativo.
           { funcionarioId: inspectorGeneralB },
         ]),
@@ -502,7 +525,11 @@ describe('Operativos · integración', () => {
 
       const personal = (
         respuesta.body as {
-          personal: { funcionarioId: number; horaInicio: string; horaFin: string }[];
+          personal: {
+            funcionarioId: number;
+            horaInicio: string;
+            horaFin: string;
+          }[];
         }
       ).personal;
       expect(
@@ -517,7 +544,11 @@ describe('Operativos · integración', () => {
       const respuesta = await registrar(
         INSPECCIONES,
         registroTurnos([
-          { funcionarioId: inspectorGeneralA, horaInicio: '07:00', horaFin: '11:00' },
+          {
+            funcionarioId: inspectorGeneralA,
+            horaInicio: '07:00',
+            horaFin: '11:00',
+          },
         ]),
       );
       expect(respuesta.status).toBeGreaterThanOrEqual(400);
@@ -534,8 +565,16 @@ describe('Operativos · integración', () => {
         tipoControlId: tipoControlPorArea,
         institucionesIds: [institucion],
         personal: [
-          { funcionarioId: inspectorGeneralA, horaInicio: '06:00', horaFin: '14:00' },
-          { funcionarioId: inspectorGeneralB, horaInicio: '14:00', horaFin: '18:00' },
+          {
+            funcionarioId: inspectorGeneralA,
+            horaInicio: '06:00',
+            horaFin: '14:00',
+          },
+          {
+            funcionarioId: inspectorGeneralB,
+            horaInicio: '14:00',
+            horaFin: '18:00',
+          },
         ],
       }).expect(201);
 
@@ -574,8 +613,16 @@ describe('Operativos · integración', () => {
         tipoControlId: tipoControlPorArea,
         institucionesIds: [institucion],
         personal: [
-          { funcionarioId: inspectorGeneralA, horaInicio: '08:00', horaFin: '12:00' },
-          { funcionarioId: inspectorGeneralB, horaInicio: '10:00', horaFin: '14:00' },
+          {
+            funcionarioId: inspectorGeneralA,
+            horaInicio: '08:00',
+            horaFin: '12:00',
+          },
+          {
+            funcionarioId: inspectorGeneralB,
+            horaInicio: '10:00',
+            horaFin: '14:00',
+          },
         ],
       }).expect(201);
 
@@ -590,7 +637,9 @@ describe('Operativos · integración', () => {
 
       // Se adelanta el inicio de la primera persona a 06:00: la envolvente pasa a 06:00–14:00.
       const editado = await request(servidor())
-        .patch(`${API}/operativos/${cuerpoCreado.id}/personal/${inspectorGeneralA}`)
+        .patch(
+          `${API}/operativos/${cuerpoCreado.id}/personal/${inspectorGeneralA}`,
+        )
         .set(como(INSPECCIONES))
         .send({ horaInicio: '06:00', horaFin: '12:00' })
         .expect(200);
@@ -598,11 +647,17 @@ describe('Operativos · integración', () => {
       const cuerpoEditado = editado.body as {
         horaInicio: string;
         horaFin: string;
-        personal: { funcionarioId: number; horaInicio: string; horaFin: string }[];
+        personal: {
+          funcionarioId: number;
+          horaInicio: string;
+          horaFin: string;
+        }[];
       };
       // La persona editada lleva su nuevo turno…
       expect(
-        cuerpoEditado.personal.find((p) => p.funcionarioId === inspectorGeneralA),
+        cuerpoEditado.personal.find(
+          (p) => p.funcionarioId === inspectorGeneralA,
+        ),
       ).toMatchObject({ horaInicio: '06:00', horaFin: '12:00' });
       // …y la ventana del operativo se re-derivó (envolvente 06:00–14:00).
       expect(cuerpoEditado.horaInicio).toBe('06:00');
@@ -619,7 +674,11 @@ describe('Operativos · integración', () => {
         tipoControlId: tipoControlPorArea,
         institucionesIds: [institucion],
         personal: [
-          { funcionarioId: inspectorTecnicoA, horaInicio: '08:00', horaFin: '12:00' },
+          {
+            funcionarioId: inspectorTecnicoA,
+            horaInicio: '08:00',
+            horaFin: '12:00',
+          },
         ],
       }).expect(201);
 
@@ -667,7 +726,9 @@ describe('Operativos · integración', () => {
         INSPECCIONES,
         registroPorArea({ personalIds: [inspectorGeneralA] }),
       ).expect(201);
-      expect((respuesta.body as OperativoRespuesta).identificador).toMatch(/^IG-/);
+      expect((respuesta.body as OperativoRespuesta).identificador).toMatch(
+        /^IG-/,
+      );
     });
 
     it('personal de área TECNICO genera el identificador con prefijo IT', async () => {
@@ -679,7 +740,9 @@ describe('Operativos · integración', () => {
           horaFin: '10:00',
         }),
       ).expect(201);
-      expect((respuesta.body as OperativoRespuesta).identificador).toMatch(/^IT-/);
+      expect((respuesta.body as OperativoRespuesta).identificador).toMatch(
+        /^IT-/,
+      );
     });
 
     it('mezclar áreas (General y Técnico) se rechaza en lugar de adivinar el prefijo', async () => {
@@ -708,7 +771,9 @@ describe('Operativos · integración', () => {
         [inspectorGeneralB],
         '12:00',
       ).expect(201);
-      expect((adicionalG.body as OperativoRespuesta).identificador).toMatch(/^IGA-/);
+      expect((adicionalG.body as OperativoRespuesta).identificador).toMatch(
+        /^IGA-/,
+      );
 
       const tecnico = await registrar(
         INSPECCIONES,
@@ -723,7 +788,9 @@ describe('Operativos · integración', () => {
         [inspectorTecnicoB],
         '14:00',
       ).expect(201);
-      expect((adicionalT.body as OperativoRespuesta).identificador).toMatch(/^ITA-/);
+      expect((adicionalT.body as OperativoRespuesta).identificador).toMatch(
+        /^ITA-/,
+      );
     });
   });
 
@@ -807,8 +874,14 @@ describe('Operativos · integración', () => {
 
     it('caso 5 · dos registros concurrentes reciben secuenciales distintos', async () => {
       const [una, otra] = await Promise.all([
-        registrar(INSPECCIONES, registroValido({ horaInicio: '20:00', horaFin: '22:00' })),
-        registrar(INSPECCIONES, registroValido({ horaInicio: '21:00', horaFin: '23:00' })),
+        registrar(
+          INSPECCIONES,
+          registroValido({ horaInicio: '20:00', horaFin: '22:00' }),
+        ),
+        registrar(
+          INSPECCIONES,
+          registroValido({ horaInicio: '21:00', horaFin: '23:00' }),
+        ),
       ]);
 
       expect(una.status).toBe(201);
@@ -1139,6 +1212,54 @@ describe('Operativos · integración', () => {
     });
   });
 
+  describe('conteo por formulario (2026-10-16)', () => {
+    type Conteo = { formularioId: number; total: number }[];
+
+    it('el «N hoy» coincide con lo que el mismo rol ve en el listado', async () => {
+      const [conteo, listado] = await Promise.all([
+        request(servidor())
+          .get(`${API}/operativos/conteo?fecha=${FECHA}`)
+          .set(como(INSPECCIONES))
+          .expect(200),
+        request(servidor())
+          .get(`${API}/operativos?fecha=${FECHA}&tamanio=200`)
+          .set(como(INSPECCIONES))
+          .expect(200),
+      ]);
+
+      const delInsp = (conteo.body as Conteo).find(
+        (fila) => fila.formularioId === formularioInspecciones,
+      );
+      expect(delInsp?.total).toBe(
+        (listado.body as { meta: { total: number } }).meta.total,
+      );
+      // No ve el de Operativos: tampoco lo cuenta.
+      expect(
+        (conteo.body as Conteo).some(
+          (fila) => fila.formularioId === formularioOperativos,
+        ),
+      ).toBe(false);
+    });
+
+    it('una fecha sin cuadro devuelve los formularios con 0', async () => {
+      const respuesta = await request(servidor())
+        .get(`${API}/operativos/conteo?fecha=2031-01-01`)
+        .set(como(INSPECCIONES))
+        .expect(200);
+
+      const conteo = respuesta.body as Conteo;
+      expect(conteo.length).toBeGreaterThan(0);
+      expect(conteo.every((fila) => fila.total === 0)).toBe(true);
+    });
+
+    it('una fecha mal escrita responde 400', async () => {
+      await request(servidor())
+        .get(`${API}/operativos/conteo?fecha=17-10-2026`)
+        .set(como(INSPECCIONES))
+        .expect(400);
+    });
+  });
+
   describe('edición', () => {
     it('modifica el horario y sube la versión, sin tocar el identificador', async () => {
       const creado = await registrar(
@@ -1274,7 +1395,9 @@ describe('Operativos · integración', () => {
       const operativo = creado.body as OperativoRespuesta;
 
       await request(servidor())
-        .delete(`${API}/operativos/${operativo.id}?version=${operativo.version}`)
+        .delete(
+          `${API}/operativos/${operativo.id}?version=${operativo.version}`,
+        )
         .set(como(INSPECCIONES))
         .expect(200);
 
@@ -1304,7 +1427,9 @@ describe('Operativos · integración', () => {
       const eliminado = creado.body as OperativoRespuesta;
 
       await request(servidor())
-        .delete(`${API}/operativos/${eliminado.id}?version=${eliminado.version}`)
+        .delete(
+          `${API}/operativos/${eliminado.id}?version=${eliminado.version}`,
+        )
         .set(como(INSPECCIONES))
         .expect(200);
 
@@ -1359,7 +1484,9 @@ describe('Operativos · integración', () => {
       });
 
       const baja = await request(servidor())
-        .delete(`${API}/operativos/${operativo.id}?version=${operativo.version}`)
+        .delete(
+          `${API}/operativos/${operativo.id}?version=${operativo.version}`,
+        )
         .set(como(INSPECCIONES))
         .expect(200);
 
@@ -1386,7 +1513,9 @@ describe('Operativos · integración', () => {
       const operativo = creado.body as OperativoRespuesta;
 
       await request(servidor())
-        .delete(`${API}/operativos/${operativo.id}?version=${operativo.version}`)
+        .delete(
+          `${API}/operativos/${operativo.id}?version=${operativo.version}`,
+        )
         .set(como(INSPECCIONES))
         .expect(200);
 
@@ -1395,7 +1524,10 @@ describe('Operativos · integración', () => {
         orderBy: { id: 'asc' },
       });
 
-      expect(trazas.map((traza) => traza.accion)).toEqual(['CREAR', 'ELIMINAR']);
+      expect(trazas.map((traza) => traza.accion)).toEqual([
+        'CREAR',
+        'ELIMINAR',
+      ]);
       expect(trazas[1].rol).toBe(RolDepartamental.DMIP_INSPECCIONES);
     });
   });
@@ -1430,8 +1562,7 @@ describe('Operativos · integración', () => {
               institucionIds: [institucion],
               origenId: null,
               // Un operativo nace sin transporte: los dos campos son de la DAF (RN-40).
-              // Solo un adicional los recibe al nacer, heredados de su origen.
-              transporte: null,
+              // El adicional también nace sin ellos y luego hereda por tramos (2026-10-14).
               rol: RolDepartamental.DMIP_INSPECCIONES,
               usuarioId: 2,
             },
@@ -1677,8 +1808,16 @@ describe('Operativos · integración', () => {
           tipoControlId: tipoControlPorArea,
           institucionesIds: [institucion],
           personal: [
-            { funcionarioId: inspectorGeneralB, horaInicio: '08:00', horaFin: '12:00' },
-            { funcionarioId: inspectorTecnicoA, horaInicio: '08:00', horaFin: '12:00' },
+            {
+              funcionarioId: inspectorGeneralB,
+              horaInicio: '08:00',
+              horaFin: '12:00',
+            },
+            {
+              funcionarioId: inspectorTecnicoA,
+              horaInicio: '08:00',
+              horaFin: '12:00',
+            },
           ],
         }).expect(201);
 
@@ -1724,7 +1863,11 @@ describe('Operativos · integración', () => {
           tipoControlId: tipoControlPorArea,
           institucionesIds: [institucion],
           personal: [
-            { funcionarioId: inspectorGeneralA, horaInicio: '08:00', horaFin: '12:00' },
+            {
+              funcionarioId: inspectorGeneralA,
+              horaInicio: '08:00',
+              horaFin: '12:00',
+            },
           ],
         }).expect(201);
 
@@ -1800,8 +1943,16 @@ describe('Operativos · integración', () => {
           tipoControlId: tipoControlPorArea,
           institucionesIds: [institucion],
           personal: [
-            { funcionarioId: inspectorGeneralA, horaInicio: '08:00', horaFin: '12:00' },
-            { funcionarioId: inspectorTecnicoA, horaInicio: '08:00', horaFin: '12:00' },
+            {
+              funcionarioId: inspectorGeneralA,
+              horaInicio: '08:00',
+              horaFin: '12:00',
+            },
+            {
+              funcionarioId: inspectorTecnicoA,
+              horaInicio: '08:00',
+              horaFin: '12:00',
+            },
           ],
         }).expect(201);
 
@@ -1830,9 +1981,7 @@ describe('Operativos · integración', () => {
           orderBy: { id: 'asc' },
         });
         expect(
-          despues.every((o) =>
-            o.observaciones.some((n) => n.texto === nota),
-          ),
+          despues.every((o) => o.observaciones.some((n) => n.texto === nota)),
         ).toBe(true);
 
         // Reemplazar al Técnico por OTRO Técnico (misma área): el código IT no cambia.

@@ -11,7 +11,10 @@
 import { AccionAuditoria, RolDepartamental } from '@prisma/client';
 
 import type { AuditoriaService } from '../../../common/auditoria/auditoria.service';
-import { RecursoNoEncontradoError } from '../../../common/errors/errores-dominio';
+import {
+  RecursoNoEncontradoError,
+  ValidacionError,
+} from '../../../common/errors/errores-dominio';
 import type { LoggerService } from '../../../common/logger/logger.service';
 import type { CuadroDiarioService } from '../../cuadro-diario/application/cuadro-diario.service';
 import type { OperativosService } from '../../operativos/application/operativos.service';
@@ -19,6 +22,7 @@ import type {
   CapacidadFlotaRepository,
   DatosCapacidad,
 } from '../infrastructure/capacidad-flota.repository';
+import type { PlanificacionTransporteRepository } from '../infrastructure/planificacion-transporte.repository';
 import { CapacidadFlotaService } from './capacidad-flota.service';
 
 const CLIENTE = { marca: 'transaccion' };
@@ -41,9 +45,53 @@ const armar = (
     declarada?: ReturnType<typeof capacidad> | null;
     demanda?: number;
     sinCuadro?: Error;
+    /**
+     * Lo que los turnos/flota dan como capacidad CALCULADA (2026-10-06). Por defecto 15/15, la
+     * cifra que declaran casi todos los casos: así declararla es CONFIRMAR, sin observación.
+     */
+    calculada?: { conductores: number; vehiculos: number };
+    ausentes?: number[];
+    activados?: number[];
+    enTaller?: number[];
   } = {},
 ) => {
-  const { declarada = null, demanda = 0, sinCuadro } = opciones;
+  const {
+    declarada = null,
+    demanda = 0,
+    sinCuadro,
+    calculada = { conductores: 15, vehiculos: 15 },
+    ausentes = [],
+    activados = [],
+    enTaller = [],
+  } = opciones;
+
+  // Conductores 1..n con turno DIA y vehículos 1..m: la capacidad calculada coincide con lo pedido.
+  const idsConductores = Array.from(
+    { length: calculada.conductores },
+    (_, i) => i + 1,
+  );
+  const planificacion = {
+    conductoresActivos: jest
+      .fn()
+      .mockResolvedValue(idsConductores.map((id) => ({ id }))),
+    turnosPublicadosEnRango: jest.fn().mockResolvedValue(
+      idsConductores.map((conductorId) => ({
+        conductorId,
+        fecha: JORNADA,
+        turno: 'DIA',
+      })),
+    ),
+    conductoresAusentes: jest.fn().mockResolvedValue(new Set(ausentes)),
+    activacionesDe: jest
+      .fn()
+      .mockResolvedValue(activados.map((conductorId) => ({ conductorId }))),
+    vehiculosActivos: jest
+      .fn()
+      .mockResolvedValue(
+        Array.from({ length: calculada.vehiculos }, (_, i) => ({ id: i + 1 })),
+      ),
+    vehiculosEnTaller: jest.fn().mockResolvedValue(new Set(enTaller)),
+  };
 
   /** Lo que el servicio pidió guardar, con tipo, para poder afirmar sobre ello. */
   const declaraciones: DatosCapacidad[] = [];
@@ -91,6 +139,7 @@ const armar = (
     { contarDemandaDeTransporte } as unknown as OperativosService,
     { registrar, compararCambios } as unknown as AuditoriaService,
     { log, warn } as unknown as LoggerService,
+    planificacion as unknown as PlanificacionTransporteRepository,
   );
 
   return {
@@ -169,6 +218,7 @@ describe('CapacidadFlotaService · declaración', () => {
     const { servicio, registrar } = armar({
       declarada: capacidad(10, 10),
       demanda: 5,
+      calculada: { conductores: 20, vehiculos: 20 },
     });
 
     await servicio.declarar(
@@ -220,7 +270,9 @@ describe('CapacidadFlotaService · declaración', () => {
   });
 
   it('recorta la observación y descarta la que queda vacía', async () => {
-    const { servicio, declaraciones } = armar();
+    const { servicio, declaraciones } = armar({
+      calculada: { conductores: 1, vehiculos: 1 },
+    });
 
     await servicio.declarar(
       JORNADA,
@@ -265,7 +317,10 @@ describe('CapacidadFlotaService · declaración', () => {
   });
 
   it('declarar cero hábiles es válido: no es lo mismo que no declarar', async () => {
-    const { servicio } = armar({ demanda: 0 });
+    const { servicio } = armar({
+      demanda: 0,
+      calculada: { conductores: 0, vehiculos: 0 },
+    });
 
     const estado = await servicio.declarar(
       JORNADA,
@@ -275,5 +330,79 @@ describe('CapacidadFlotaService · declaración', () => {
 
     expect(estado.declarada).not.toBeNull();
     expect(estado.veredicto?.hayAdvertencia).toBe(false);
+  });
+});
+
+describe('CapacidadFlotaService · capacidad calculada (2026-10-06)', () => {
+  it('conductores = con turno − ausentes + libres activados; vehículos = flota − taller', async () => {
+    const { servicio } = armar({
+      calculada: { conductores: 5, vehiculos: 4 },
+      ausentes: [2],
+      // 3 ya tiene turno: aunque esté activado, no se cuenta dos veces.
+      activados: [3],
+      enTaller: [1],
+    });
+
+    const resultado = await servicio.calcular(JORNADA);
+
+    expect(resultado.detalle).toEqual({
+      conductoresConTurno: 5,
+      conductoresAusentes: 1,
+      libresActivados: 0,
+      flota: 4,
+      enTaller: 1,
+    });
+    expect(resultado.calculada).toEqual({
+      conductoresHabiles: 4,
+      vehiculosHabiles: 3,
+    });
+  });
+
+  it('CORREGIR sin observación se rechaza y no se guarda nada', async () => {
+    const { servicio, declarar } = armar({
+      calculada: { conductores: 15, vehiculos: 15 },
+    });
+
+    await expect(
+      servicio.declarar(
+        JORNADA,
+        { vehiculosHabiles: 12, conductoresHabiles: 15 },
+        DAF,
+      ),
+    ).rejects.toBeInstanceOf(ValidacionError);
+    expect(declarar).not.toHaveBeenCalled();
+  });
+
+  it('CORREGIR con observación se guarda', async () => {
+    const { servicio, declaraciones } = armar({
+      calculada: { conductores: 15, vehiculos: 15 },
+    });
+
+    await servicio.declarar(
+      JORNADA,
+      {
+        vehiculosHabiles: 12,
+        conductoresHabiles: 15,
+        observacion: 'Tres vehículos sin combustible',
+      },
+      DAF,
+    );
+
+    expect(declaraciones[0].vehiculosHabiles).toBe(12);
+    expect(declaraciones[0].observacion).toBe('Tres vehículos sin combustible');
+  });
+
+  it('CONFIRMAR (coincide con lo calculado) no exige observación', async () => {
+    const { servicio, declaraciones } = armar({
+      calculada: { conductores: 15, vehiculos: 15 },
+    });
+
+    await servicio.declarar(
+      JORNADA,
+      { vehiculosHabiles: 15, conductoresHabiles: 15 },
+      DAF,
+    );
+
+    expect(declaraciones).toHaveLength(1);
   });
 });

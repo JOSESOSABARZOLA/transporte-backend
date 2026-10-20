@@ -81,8 +81,11 @@ import {
   Post,
   Put,
   Query,
+  Res,
+  StreamableFile,
   UseGuards,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { AreaPersonal, RolDepartamental } from '@prisma/client';
 
 import { RequierePermiso } from '../../../common/auth/decorators/requiere-permiso.decorator';
@@ -92,24 +95,41 @@ import { PermisosGuard } from '../../../common/auth/guards/permisos.guard';
 import type { UsuarioAutenticado } from '../../../common/auth/interfaces/usuario-autenticado.interface';
 import { ValidacionError } from '../../../common/errors/errores-dominio';
 import { interpretarEnumerado } from '../../../common/utilidades/enumerado';
+import { fechaIsoEnZona } from '../../../common/utilidades/marca-tiempo';
+import { CorreoInstitucionalAuthService } from '../../identidad/application/correo-institucional-auth.service';
 import { CoberturaTurnosService } from '../application/cobertura-turnos.service';
-import type { MatrizCobertura } from '../application/cobertura-turnos.service';
+import type {
+  MatrizCobertura,
+  ResultadoLote,
+  ResultadoPropuestaRotacion,
+  ResultadoPublicar,
+} from '../application/cobertura-turnos.service';
 import { DisponibilidadService } from '../application/disponibilidad.service';
 import { FuncionariosService } from '../application/funcionarios.service';
 import { aFechaUtc } from '../application/reglas-personal';
 import {
   DatosInstruccionDto,
   EditarCeldaCoberturaDto,
+  EditarLoteCoberturaDto,
+  MesCoberturaDto,
+  PropuestaRotacionDto,
 } from './dto/cobertura-turno.dto';
 import {
   ActualizarFuncionarioDto,
   BajaFuncionarioDto,
   CrearDisponibilidadDto,
   CrearFuncionarioDto,
+  DesdeFechaDto,
+  ORIGENES_DE_ALTA,
+  RangoFechasDto,
+  aAusenciaDelMaestroResponse,
   aDisponibilidadResponse,
   aFuncionarioResponse,
+  aOperativoDeLaPersonaResponse,
+  type AusenciaDelMaestroResponseDto,
   type DisponibilidadResponseDto,
   type FuncionarioResponseDto,
+  type OperativoDeLaPersonaResponseDto,
 } from './dto/personal.dto';
 
 /** Respuesta de la baja lógica: qué quedó y por qué no se elimina. */
@@ -153,6 +173,7 @@ export class AdministracionPersonalController {
     private readonly funcionarios: FuncionariosService,
     private readonly disponibilidad: DisponibilidadService,
     private readonly cobertura: CoberturaTurnosService,
+    private readonly correoAuth: CorreoInstitucionalAuthService,
   ) {}
 
   // ─────────────────────── Cobertura por turnos (Instrucción) ───────────────────────
@@ -188,6 +209,58 @@ export class AdministracionPersonalController {
   }
 
   /** Fija la zona y denominación de una persona de Instrucción (para agruparla en la matriz). */
+  /** Edición en lote: aplica las celdas válidas en una transacción y devuelve las omitidas. */
+  @Put('cobertura/lote')
+  async editarCoberturaLote(
+    @UsuarioActual() usuario: UsuarioAutenticado,
+    @Body() dto: EditarLoteCoberturaDto,
+  ): Promise<ResultadoLote> {
+    return this.cobertura.editarLote(usuario, dto.celdas);
+  }
+
+  /** «Continuar rotación»: propone (no escribe) el turno de las celdas vacías del mes. */
+  @Post('cobertura/propuesta-rotacion')
+  @HttpCode(HttpStatus.OK)
+  async proponerRotacion(
+    @UsuarioActual() usuario: UsuarioAutenticado,
+    @Body() dto: PropuestaRotacionDto,
+  ): Promise<ResultadoPropuestaRotacion> {
+    return this.cobertura.proponerRotacion(
+      usuario,
+      dto.mes,
+      dto.funcionarioIds,
+    );
+  }
+
+  /** Publica el mes (estado INFORMATIVO). La confirmación por celdas vacías la pide el front. */
+  @Post('cobertura/publicar')
+  @HttpCode(HttpStatus.OK)
+  async publicarCobertura(
+    @UsuarioActual() usuario: UsuarioAutenticado,
+    @Body() dto: MesCoberturaDto,
+  ): Promise<ResultadoPublicar> {
+    return this.cobertura.publicarMes(usuario, dto.mes);
+  }
+
+  /** La matriz del mes en Excel (.xlsx), con el formato de Instrucción. */
+  @Get('cobertura/exportar')
+  async exportarCobertura(
+    @UsuarioActual() usuario: UsuarioAutenticado,
+    @Query('mes') mes: string,
+    @Res({ passthrough: true }) respuesta: Response,
+  ): Promise<StreamableFile> {
+    const contenido = await this.cobertura.exportar(usuario, mes);
+    respuesta.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    respuesta.setHeader(
+      'Content-Disposition',
+      `attachment; filename="cobertura-instruccion-${mes}.xlsx"`,
+    );
+    return new StreamableFile(contenido);
+  }
+
   @Put(':id/instruccion')
   @HttpCode(HttpStatus.NO_CONTENT)
   async fijarInstruccion(
@@ -281,6 +354,29 @@ export class AdministracionPersonalController {
    * identificador y respondería 400 en lugar de esto.
    * ═══════════════════════════════════════════════════════════════════════════════
    */
+  /**
+   * Ausencias EN CURSO y PRÓXIMAS de todo el maestro al alcance (rediseño de P-07, B5): una
+   * consulta para la columna «Estado» de la lista, en vez de una petición por fila. Sin el
+   * motivo. `desde` es opcional: sin él, hoy en Quito.
+   *
+   * VA ANTES DE `@Get(':id')`: Nest resuelve por orden y `:id` se tragaría «ausencias».
+   */
+  @Get('ausencias')
+  async ausenciasDelMaestro(
+    @Query() consulta: DesdeFechaDto,
+    @UsuarioActual() usuario: UsuarioAutenticado,
+  ): Promise<AusenciaDelMaestroResponseDto[]> {
+    const hoy = fechaIsoEnZona();
+    const desde = exigirFecha(consulta.desde ?? hoy, 'desde');
+    const ausencias = await this.disponibilidad.delMaestro(
+      desde,
+      usuario.roles,
+    );
+    return ausencias.map((ausencia) =>
+      aAusenciaDelMaestroResponse(ausencia, hoy),
+    );
+  }
+
   @Get('direcciones')
   async direccionesQueGestiona(
     @UsuarioActual() usuario: UsuarioAutenticado,
@@ -361,8 +457,29 @@ export class AdministracionPersonalController {
     @Body() dto: CrearFuncionarioDto,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<FuncionarioResponseDto> {
+    /*
+      ALTA DESDE AUTH: EL CORREO INSTITUCIONAL LO PONE AUTH (rediseño de P-07, 2026-10-08).
+      El que llegue del navegador se descarta y se pregunta a Auth por la cédula, con el token
+      de la sesión (solo viaja a Auth). Sin la persona en Auth → 422; Auth caído → 503. El alta
+      MANUAL —la de «¿No aparece?»— sigue aceptando el correo del cliente: no hay Auth a quien
+      preguntar, que es justo por lo que existe.
+    */
+    // `origen` decide de dónde sale el correo, pero NO es una columna de `t_funcionario`: si
+    // llegara a `funcionario.create()` Prisma rechazaría toda el alta. Se separa aquí.
+    const { origen, ...ficha } = dto;
+    const datos =
+      origen === ORIGENES_DE_ALTA.AUTH
+        ? {
+            ...ficha,
+            correoInstitucional: await this.correoAuth.correoPorCedula(
+              ficha.cedula.trim(),
+              usuario.tokenAuth,
+            ),
+          }
+        : ficha;
+
     return aFuncionarioResponse(
-      await this.funcionarios.crear(dto, usuario.usuarioId, usuario.roles),
+      await this.funcionarios.crear(datos, usuario.usuarioId, usuario.roles),
     );
   }
 
@@ -435,7 +552,28 @@ export class AdministracionPersonalController {
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<DisponibilidadResponseDto[]> {
     const periodos = await this.disponibilidad.listarDe(id, usuario.roles);
-    return periodos.map(aDisponibilidadResponse);
+    // Con una flecha y no `map(aDisponibilidadResponse)`: el índice del arreglo entraría como `hoy`.
+    const hoy = fechaIsoEnZona();
+    return periodos.map((periodo) => aDisponibilidadResponse(periodo, hoy));
+  }
+
+  /**
+   * Operativos activos de la persona entre dos fechas (rediseño de P-07, B6). El modal de
+   * ausencias lo usa para avisar: la ausencia no la retira de ellos y no se notifica a nadie.
+   */
+  @Get(':id/operativos')
+  async operativosDeLaPersona(
+    @Param('id', ParseIntPipe) id: number,
+    @Query() consulta: RangoFechasDto,
+    @UsuarioActual() usuario: UsuarioAutenticado,
+  ): Promise<OperativoDeLaPersonaResponseDto[]> {
+    const operativos = await this.disponibilidad.operativosDe(
+      id,
+      exigirFecha(consulta.desde, 'desde'),
+      exigirFecha(consulta.hasta, 'hasta'),
+      usuario.roles,
+    );
+    return operativos.map(aOperativoDeLaPersonaResponse);
   }
 
   @Post(':id/disponibilidad')

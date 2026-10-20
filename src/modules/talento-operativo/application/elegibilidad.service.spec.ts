@@ -75,16 +75,20 @@ const armar = (
     patrullas?: Map<number, Date>;
     salidas?: Map<number, number>;
     turnos?: Map<number, EstadoTurno>;
-    conductor?: { id: number; nombreCompleto: string } | null;
-    ultimaPatrullaConductor?: Date | null;
-    conduccionesDelDia?: AsignacionDelDia[];
-    /** RN-25 del conductor: sus conducciones del período, para contar las pesadas. */
-    salidasPesadasConductor?: { fecha: Date; esNocturno: boolean }[];
+    /** Conductores conocidos (id → nombre) para el evaluador por lote. */
+    nombresConductores?: Map<number, string>;
+    /** RN-44 del conductor: patrullas que condujo, por tramos. */
+    patrullasConductores?: {
+      conductorId: number;
+      fecha: Date;
+      operativoId: number;
+    }[];
     /** Semáforo de carga por lote (advisory): horas del día por conductor. */
     horasConductor?: Map<number, number>;
     /** Semáforo de carga por lote (advisory): salidas del período de los conductores. */
     salidasConductores?: {
       conductorId: number;
+      operativoId: number;
       fecha: Date;
       esNocturno: boolean;
     }[];
@@ -125,27 +129,14 @@ const armar = (
     ultimasPatrullas,
     salidasPesadasEnPeriodo,
     turnosEnFecha,
-    buscarConductor: jest
+    nombresDeConductores: jest
       .fn()
       .mockResolvedValue(
-        opciones.conductor === undefined
-          ? { id: 1, nombreCompleto: 'VIVANCO JORGE' }
-          : opciones.conductor,
+        opciones.nombresConductores ?? new Map([[1, 'VIVANCO JORGE']]),
       ),
-    ausenciaDeConductor: jest.fn().mockResolvedValue(null),
-    ultimaPatrullaDeConductor: jest
+    patrullasDeConductores: jest
       .fn()
-      .mockResolvedValue(opciones.ultimaPatrullaConductor ?? null),
-    // VAL-21 y VAL-22, incorporadas en M-17: sin conducciones previas, el veredicto no
-    // cambia respecto de lo que estas pruebas ya verificaban.
-    conduccionesDelDia: jest
-      .fn()
-      .mockResolvedValue(opciones.conduccionesDelDia ?? []),
-    // RN-25 aplicada al conductor, incorporada el 2026-08-31. Cada elemento es una
-    // conducción del período: la regla cuenta las nocturnas y las de fin de semana.
-    salidasPesadasDeConductor: jest
-      .fn()
-      .mockResolvedValue(opciones.salidasPesadasConductor ?? []),
+      .mockResolvedValue(opciones.patrullasConductores ?? []),
     horasConducidasDelDiaDeVarios: jest
       .fn()
       .mockResolvedValue(opciones.horasConductor ?? new Map()),
@@ -294,6 +285,7 @@ describe('ElegibilidadService · veredicto', () => {
 
   it('el turno DESCANSO de la cobertura excluye a la persona ese día', async () => {
     const { servicio } = armar({
+      personas: [funcionario(1, { area: 'INSTRUCCION' })],
       turnos: new Map([[1, EstadoTurno.DESCANSO]]),
     });
 
@@ -313,6 +305,7 @@ describe('ElegibilidadService · veredicto', () => {
 
   it('la ausencia manda sobre el descanso: su mensaje trae la fecha de retorno', async () => {
     const { servicio } = armar({
+      personas: [funcionario(1, { area: 'INSTRUCCION' })],
       ausencias: new Map([
         [1, { estado: 'VACACIONES', hasta: dia('2026-08-20') }],
       ]),
@@ -325,14 +318,20 @@ describe('ElegibilidadService · veredicto', () => {
   });
 
   it('turno DIURNO: un operativo dentro de la ventana (08:00–16:30) es elegible', async () => {
-    const { servicio } = armar({ turnos: new Map([[1, EstadoTurno.DIURNO]]) });
+    const { servicio } = armar({
+      personas: [funcionario(1, { area: 'INSTRUCCION' })],
+      turnos: new Map([[1, EstadoTurno.DIURNO]]),
+    });
 
     // CONTEXTO es 08:00–16:00, dentro de la ventana diurna.
     expect((await servicio.verificar(1, CONTEXTO)).elegible).toBe(true);
   });
 
   it('turno DIURNO: un operativo fuera de la ventana se rechaza', async () => {
-    const { servicio } = armar({ turnos: new Map([[1, EstadoTurno.DIURNO]]) });
+    const { servicio } = armar({
+      personas: [funcionario(1, { area: 'INSTRUCCION' })],
+      turnos: new Map([[1, EstadoTurno.DIURNO]]),
+    });
 
     const veredicto = await servicio.verificar(1, {
       ...CONTEXTO,
@@ -347,7 +346,12 @@ describe('ElegibilidadService · veredicto', () => {
 
   it('turno NOCTURNO: un operativo que cruza la medianoche dentro de 17:30–02:00 es elegible', async () => {
     const { servicio } = armar({
-      personas: [funcionario(1, { tipoContrato: TipoContrato.OCASIONAL })],
+      personas: [
+        funcionario(1, {
+          tipoContrato: TipoContrato.OCASIONAL,
+          area: 'INSTRUCCION',
+        }),
+      ],
       turnos: new Map([[1, EstadoTurno.NOCTURNO]]),
     });
 
@@ -362,6 +366,7 @@ describe('ElegibilidadService · veredicto', () => {
 
   it('turno NOCTURNO: un operativo diurno queda fuera de la ventana', async () => {
     const { servicio } = armar({
+      personas: [funcionario(1, { area: 'INSTRUCCION' })],
       turnos: new Map([[1, EstadoTurno.NOCTURNO]]),
     });
 
@@ -624,34 +629,62 @@ describe('ElegibilidadService · índice de carga y fatiga (calcularCargas)', ()
   });
 });
 
-describe('ElegibilidadService · conductor (POL-02)', () => {
-  it('un conductor sin antecedentes es elegible', async () => {
+describe('ElegibilidadService · evaluador de conducción por tramos (POL-02)', () => {
+  const PATRULLA = { esPatrulla: true, esNocturno: false, operativoIds: [100] };
+
+  it('un conductor sin antecedentes puede tomar la patrulla', async () => {
     const { servicio } = armar();
 
-    expect(
-      await servicio.verificarConductor(1, { ...CONTEXTO, esPatrulla: true }),
-    ).toEqual({ elegible: true });
+    const evaluar = await servicio.evaluadorDeConduccion([1], MIERCOLES);
+
+    expect(evaluar(1, PATRULLA)).toEqual([]);
   });
 
   it('RN-44 · quien condujo en patrulla el día anterior no repite', async () => {
     const { servicio } = armar({
-      ultimaPatrullaConductor: dia('2026-08-04'),
+      patrullasConductores: [
+        { conductorId: 1, fecha: dia('2026-08-04'), operativoId: 7 },
+      ],
     });
 
-    const veredicto = await servicio.verificarConductor(1, {
-      ...CONTEXTO,
-      esPatrulla: true,
-    });
+    const evaluar = await servicio.evaluadorDeConduccion([1], MIERCOLES);
 
-    expect(veredicto.codigo).toBe(CODIGOS_ERROR.CONDUCTOR_PATRULLA_CONSECUTIVA);
+    expect(evaluar(1, PATRULLA).map((v) => v.codigo)).toEqual([
+      CODIGOS_ERROR.CONDUCTOR_PATRULLA_CONSECUTIVA,
+    ]);
   });
 
-  it('un conductor inexistente produce 404', async () => {
-    const { servicio } = armar({ conductor: null });
+  it('RN-25 · cuenta solo las salidas pesadas del período', async () => {
+    const { servicio } = armar({
+      salidasConductores: [1, 2, 3].map((operativoId) => ({
+        conductorId: 1,
+        operativoId,
+        fecha: MIERCOLES,
+        esNocturno: true,
+      })),
+    });
 
-    await expect(
-      servicio.verificarConductor(99, CONTEXTO),
-    ).rejects.toBeInstanceOf(RecursoNoEncontradoError);
+    const evaluar = await servicio.evaluadorDeConduccion([1], MIERCOLES);
+
+    expect(
+      evaluar(1, {
+        esPatrulla: false,
+        esNocturno: true,
+        operativoIds: [100],
+      }).map((v) => v.codigo),
+    ).toEqual([CODIGOS_ERROR.TOPE_SALIDAS_PESADAS]);
+    // Un bloque diurno de miércoles no es pesado: el tope no aplica.
+    expect(
+      evaluar(1, { esPatrulla: false, esNocturno: false, operativoIds: [100] }),
+    ).toEqual([]);
+  });
+
+  it('un conductor que no está en la lista no recibe restricciones', async () => {
+    const { servicio } = armar();
+
+    const evaluar = await servicio.evaluadorDeConduccion([1], MIERCOLES);
+
+    expect(evaluar(99, PATRULLA)).toEqual([]);
   });
 });
 
@@ -679,10 +712,10 @@ describe('ElegibilidadService · carga del conductor (advisory)', () => {
   it('cuenta las salidas pesadas del período (nocturnas o de fin de semana)', async () => {
     const { servicio } = armar({
       salidasConductores: [
-        { conductorId: 1, fecha: MIERCOLES, esNocturno: true },
-        { conductorId: 1, fecha: MIERCOLES, esNocturno: true },
+        { conductorId: 1, operativoId: 1, fecha: MIERCOLES, esNocturno: true },
+        { conductorId: 1, operativoId: 2, fecha: MIERCOLES, esNocturno: true },
         // Una diurna en día laborable NO es pesada: no suma.
-        { conductorId: 1, fecha: MIERCOLES, esNocturno: false },
+        { conductorId: 1, operativoId: 9, fecha: MIERCOLES, esNocturno: false },
       ],
     });
 

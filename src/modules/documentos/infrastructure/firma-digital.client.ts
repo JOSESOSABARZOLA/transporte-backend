@@ -28,7 +28,7 @@
  * `auth-usuarios.client.ts`. No se agrega ninguna dependencia.
  *
  * LOS SECRETOS (URL, ruta del `.p12`, su clave y un token opcional) VIVEN EN EL ENTORNO,
- * nunca aquí. Ver `.env.prod.example` y `DESPLIEGUE.md`.
+ * nunca aquí. Ver `.env.preproduccion.example` y `DESPLIEGUE.md`.
  * ═══════════════════════════════════════════════════════════════════════════════
  */
 

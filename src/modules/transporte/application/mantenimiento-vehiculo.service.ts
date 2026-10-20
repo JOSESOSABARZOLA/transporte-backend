@@ -28,10 +28,24 @@
  * puede decir «cirugía programada»). Ninguna de las tres cosas vale para una camioneta, y
  * el motivo de un taller —«cambio de frenos»— **sí se muestra**: es lo que le permite a la
  * DAF calcular cuándo vuelve.
+ *
+ * FASE 5 (2026-10-06). La cita con HORA genera una TAREA «Llevar a taller» (tramo sin operativo,
+ * con el vehículo y la zonal del taller como destino) que se asigna a un conductor como un bloque
+ * más, en la línea de tiempo o con el optimizador. La cita tiene estado PROGRAMADO → EN_TALLER →
+ * LISTO; LISTO devuelve el vehículo a circulación. Al retirar la cita, su tarea se va con ella
+ * (`fk_tramo_mantenimiento` en cascada).
+ *
+ * AVISO ANTES DE PROGRAMAR (2026-10-20, D4): `impacto` lista los traslados ya asignados a esa placa
+ * en el rango. La parada NO los retira —mismo criterio que la ausencia de un conductor—: la pantalla
+ * avisa y se reasignan en «Planificar el día».
  */
 
 import { Injectable } from '@nestjs/common';
-import { AccionAuditoria, type Disponibilidad } from '@prisma/client';
+import {
+  AccionAuditoria,
+  type Disponibilidad,
+  type EstadoMantenimiento,
+} from '@prisma/client';
 
 import { AuditoriaService } from '../../../common/auditoria/auditoria.service';
 import { CODIGOS_ERROR } from '../../../common/errors/codigos-error';
@@ -42,6 +56,22 @@ import {
 } from '../../../common/errors/errores-dominio';
 import { LoggerService } from '../../../common/logger/logger.service';
 import { FlotaRepository } from '../infrastructure/flota.repository';
+import { ParametrosTransporteService } from './parametros-transporte.service';
+import { aHora, aMinutos } from './politicas/linea-de-tiempo';
+import { puedeTransitar } from './politicas/estado-mantenimiento';
+import {
+  componerSemana,
+  type SemanaDeVehiculo,
+} from './politicas/semana-mantenimiento';
+
+/** Un traslado ya asignado a la placa dentro del rango de una parada (D4). */
+export interface TramoAfectadoPorParada {
+  operativoId: number;
+  identificador: string;
+  fecha: string;
+  horaInicio: string;
+  horaFin: string;
+}
 
 export interface DatosMantenimiento {
   desde: Date;
@@ -49,6 +79,8 @@ export interface DatosMantenimiento {
   taller?: string | null;
   hora?: string | null;
   motivo?: string | null;
+  /** Zonal del taller: destino de la TAREA «Llevar a taller». */
+  zonalTallerId?: number | null;
 }
 
 @Injectable()
@@ -57,7 +89,45 @@ export class MantenimientoVehiculoService {
     private readonly flota: FlotaRepository,
     private readonly auditoria: AuditoriaService,
     private readonly logger: LoggerService,
+    private readonly parametros: ParametrosTransporteService,
   ) {}
+
+  /**
+   * Vista semanal de vehículos parados (2026-10-06): los vehículos activos × 7 días desde
+   * `desde`, con el estado de su cita de taller. Ver `politicas/semana-mantenimiento.ts`.
+   */
+  async semana(desde: Date): Promise<SemanaDeVehiculo[]> {
+    const hasta = new Date(desde.getTime() + 6 * 24 * 60 * 60 * 1000);
+    const [vehiculos, citas] = await Promise.all([
+      this.flota.listarVehiculos(true),
+      this.flota.mantenimientosEnRango(desde, hasta),
+    ]);
+    return componerSemana(desde, vehiculos, citas);
+  }
+
+  /**
+   * D4: los traslados de operativos activos que la placa ya tiene entre `desde` y `hasta`. Una
+   * consulta. La pantalla los muestra antes de guardar; la parada no los retira.
+   */
+  async impacto(
+    vehiculoId: number,
+    desde: Date,
+    hasta: Date,
+  ): Promise<TramoAfectadoPorParada[]> {
+    await this.exigirVehiculo(vehiculoId);
+    if (hasta < desde) {
+      throw new ValidacionError(
+        'La fecha de fin del mantenimiento no puede ser anterior a la de inicio.',
+        { desde: comoFecha(desde), hasta: comoFecha(hasta) },
+      );
+    }
+    const tramos = await this.flota.tramosDeVehiculoEnRango(
+      vehiculoId,
+      desde,
+      hasta,
+    );
+    return tramos.map((t) => ({ ...t, fecha: comoFecha(t.fecha) }));
+  }
 
   /** Las paradas registradas de un vehículo, de la más reciente hacia atrás. */
   async listarDe(vehiculoId: number): Promise<Disponibilidad[]> {
@@ -107,6 +177,11 @@ export class MantenimientoVehiculoService {
       );
     }
 
+    // La TAREA solo nace si hay hora de cita: sin hora no hay franja que ocupar en la jornada.
+    const duracion = datos.hora
+      ? (await this.parametros.leerOptimizacion()).duracionTareaTallerMin
+      : 0;
+
     const registrado = await this.flota.ejecutarEnTransaccion(
       async (cliente) => {
         const fila = await this.flota.crearMantenimiento(
@@ -117,10 +192,30 @@ export class MantenimientoVehiculoService {
             taller: datos.taller ?? null,
             hora: datos.hora ?? null,
             motivo: datos.motivo ?? null,
+            zonalTallerId: datos.zonalTallerId ?? null,
             registradoPor: usuarioId,
           },
           cliente,
         );
+
+        if (datos.hora) {
+          const inicio = aMinutos(datos.hora);
+          const fin = inicio + duracion;
+          await this.flota.crearTareaTaller(
+            {
+              mantenimientoId: fila.id,
+              vehiculoId,
+              fecha: datos.desde,
+              horaInicio: datos.hora,
+              horaFin: aHora(fin),
+              cruzaMedianoche: fin >= 1440,
+              zonalDestinoId: datos.zonalTallerId ?? null,
+              descripcion: `Llevar a taller${datos.taller ? `: ${datos.taller}` : ''} (${vehiculo.placa})`,
+              creadoPor: usuarioId,
+            },
+            cliente,
+          );
+        }
 
         await this.auditoria.registrar(
           {
@@ -143,6 +238,59 @@ export class MantenimientoVehiculoService {
     });
 
     return registrado;
+  }
+
+  /**
+   * Cambia el estado de la cita: PROGRAMADO → EN_TALLER → LISTO (ver `estado-mantenimiento.ts`).
+   * LISTO devuelve el vehículo a circulación: deja de contar como «en taller» ese día.
+   */
+  async cambiarEstado(
+    id: number,
+    estado: EstadoMantenimiento,
+    usuarioId: number,
+  ): Promise<Disponibilidad> {
+    const mantenimiento = await this.flota.buscarMantenimiento(id);
+
+    if (!mantenimiento) {
+      throw new RecursoNoEncontradoError(
+        'El mantenimiento indicado no existe.',
+        { mantenimientoId: id },
+      );
+    }
+
+    const actual = mantenimiento.estadoMantenimiento ?? 'PROGRAMADO';
+    if (actual === estado) return mantenimiento;
+    if (!puedeTransitar(actual, estado)) {
+      throw new ValidacionError(
+        `Una cita ${NOMBRE_ESTADO[actual]} no puede pasar a ${NOMBRE_ESTADO[estado]}.`,
+        { mantenimientoId: id, desde: actual, hacia: estado },
+      );
+    }
+
+    return this.flota.ejecutarEnTransaccion(async (cliente) => {
+      const fila = await this.flota.actualizarEstadoMantenimiento(
+        id,
+        estado,
+        cliente,
+      );
+      await this.auditoria.registrar(
+        {
+          entidad: 't_disponibilidad',
+          entidadId: id,
+          accion: AccionAuditoria.ACTUALIZAR,
+          cambios: [
+            {
+              campo: 'disp_estado_mantenimiento',
+              valorAnterior: actual,
+              valorNuevo: estado,
+            },
+          ],
+          usuario: usuarioId,
+        },
+        cliente,
+      );
+      return fila;
+    });
   }
 
   /**
@@ -194,6 +342,12 @@ export class MantenimientoVehiculoService {
     return vehiculo;
   }
 }
+
+const NOMBRE_ESTADO: Record<EstadoMantenimiento, string> = {
+  PROGRAMADO: 'programada',
+  EN_TALLER: 'en taller',
+  LISTO: 'lista',
+};
 
 /** `@db.Date` se interpreta en UTC, igual que en el resto del módulo. */
 function comoFecha(fecha: Date): string {

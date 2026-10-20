@@ -48,7 +48,7 @@ const DATOS: DatosOrdenMemorando = {
     },
   ],
   firmante: { nombre: '', cargo: '', dependencia: '' },
-  nut: '',
+  accion: 'Elaborado por',
   elaboradoPor: '',
   siglasUnidad: '',
   apartados: APARTADOS_POR_DEFECTO,
@@ -86,7 +86,6 @@ describe('exportarOrdenMemorando', () => {
         cargo: 'Director Metropolitano de Inspección',
         dependencia: 'Dirección Metropolitana de Inspección',
       },
-      nut: 'NUT-0001',
       elaboradoPor: 'LOPEZ ANA',
       siglasUnidad: 'DMI',
     });
@@ -279,7 +278,6 @@ describe('exportarOrdenMemorando · vista previa de la plantilla (D17)', () => {
     const buffer = await exportarOrdenMemorando({
       ...DATOS,
       para: { nombre: '', cargo: '', dependencia: '' },
-      nut: '',
       elaboradoPor: '',
       operativos: [],
       modoVistaPrevia: true,
@@ -343,5 +341,124 @@ describe('exportarOrdenMemorando · sin valores cableados (punto 7, 2026-10-05)'
     ]) {
       expect(texto).not.toContain(ejemplo);
     }
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   TABLA DE CONTROL, SIN NUT (2026-10-08)
+
+   La línea «NUT: …» se retiró del documento y la fila de la tabla sale de la plantilla del Director:
+   «<accion>: <elaboradoPor>» | siglas | fecha de emisión. Se afirma sobre la definición que recibe
+   el motor (el texto del PDF va comprimido).
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+describe('exportarOrdenMemorando · tabla de control (2026-10-08)', () => {
+  const definicionComoTexto = async (
+    datos: DatosOrdenMemorando,
+  ): Promise<string> => {
+    const espia = jest.spyOn(motor, 'generarDocumento');
+    await exportarOrdenMemorando(datos);
+    const definicion = espia.mock.calls[0][0];
+    espia.mockRestore();
+    return JSON.stringify(definicion);
+  };
+
+  it('el documento ya no contiene «NUT»', async () => {
+    const texto = await definicionComoTexto({
+      ...DATOS,
+      elaboradoPor: 'Jose Sosa',
+      siglasUnidad: 'DMI',
+    });
+
+    expect(texto).not.toContain('NUT');
+  });
+
+  it('la fila sale con «acción: nombre», las siglas y la fecha de emisión', async () => {
+    const texto = await definicionComoTexto({
+      ...DATOS,
+      accion: 'Elaborado por',
+      elaboradoPor: 'Jose Sosa',
+      siglasUnidad: 'DMI',
+      fechaEmision: '09/10/2026',
+    });
+
+    // Mismas tres columnas de siempre.
+    expect(texto).toContain('"text":"Acción"');
+    expect(texto).toContain('"text":"Siglas Unidad"');
+    expect(texto).toContain('"text":"Fecha"');
+    expect(texto).toContain('"text":"Elaborado por: "');
+    expect(texto).toContain('"text":"Jose Sosa"');
+    expect(texto).toContain('"text":"DMI"');
+    expect(texto).toContain('"text":"09/10/2026"');
+  });
+
+  it('la acción la decide la plantilla', async () => {
+    const texto = await definicionComoTexto({
+      ...DATOS,
+      accion: 'Revisado por',
+      elaboradoPor: 'Ana Simbaña',
+      siglasUnidad: 'DMIT',
+    });
+
+    expect(texto).toContain('"text":"Revisado por: "');
+    expect(texto).not.toContain('Elaborado por: ');
+  });
+
+  it('sin quién elabora ni siglas, se resaltan como pendientes en vez de quedar en blanco', async () => {
+    const texto = await definicionComoTexto({
+      ...DATOS,
+      elaboradoPor: '',
+      siglasUnidad: '',
+    });
+
+    expect(texto).toContain('[Elaborado por]');
+    expect(texto).toContain('[Siglas de la unidad]');
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   CARGO DEL DESTINATARIO DESDE LA FICHA (2026-10-08)
+
+   Sin cargo en la ficha de Personal, el documento real lo imprime EN BLANCO —sin «[Cargo]» ni
+   resaltado—. Solo la vista previa genérica de la plantilla conserva el marcador gris.
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+describe('exportarOrdenMemorando · cargo del destinatario (2026-10-08)', () => {
+  const definicionComoTexto = async (
+    datos: DatosOrdenMemorando,
+  ): Promise<string> => {
+    const espia = jest.spyOn(motor, 'generarDocumento');
+    await exportarOrdenMemorando(datos);
+    const definicion = espia.mock.calls[0][0];
+    espia.mockRestore();
+    return JSON.stringify(definicion);
+  };
+
+  it('sin cargo en la ficha, el documento real lo deja en blanco y sin marcador', async () => {
+    const texto = await definicionComoTexto({
+      ...DATOS,
+      para: { ...DATOS.para, cargo: '' },
+    });
+
+    expect(texto).not.toContain('[Cargo');
+  });
+
+  it('con cargo, lo imprime tal cual', async () => {
+    const texto = await definicionComoTexto({
+      ...DATOS,
+      para: { ...DATOS.para, cargo: 'Inspector General' },
+    });
+
+    expect(texto).toContain('Inspector General');
+  });
+
+  it('la vista previa de la plantilla conserva el marcador gris «[Cargo]»', async () => {
+    const texto = await definicionComoTexto({
+      ...DATOS,
+      para: { ...DATOS.para, cargo: '' },
+      modoVistaPrevia: true,
+    });
+
+    expect(texto).toContain('[Cargo]');
   });
 });

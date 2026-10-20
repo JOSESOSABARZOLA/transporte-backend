@@ -21,6 +21,13 @@ import {
 import type { Request } from 'express';
 
 import { VentanaCerradaError } from '../../errors/errores-dominio';
+import { horaEnZona } from '../../utilidades/marca-tiempo';
+import {
+  horarioDeVentana,
+  mensajeParaFuncionario,
+  minutosDelDia,
+} from '../application/horario-ventana';
+import { resolverMensajeVentana } from '../application/mensaje-ventana';
 import { VentanaCargaEvaluador } from '../application/ventana-carga.evaluador';
 import { VentanaCargaRepository } from '../infrastructure/ventana-carga.repository';
 import type { UsuarioAutenticado } from '../interfaces/usuario-autenticado.interface';
@@ -57,6 +64,34 @@ export class VentanaCargaGuard implements CanActivate {
 
     const ventana = await this.repositorio.buscarPorRol(usuario.rol);
     const veredicto = this.evaluador.evaluar(ventana);
+
+    if (!veredicto.puedeEscribir && ventana) {
+      /*
+        EL MENSAJE SE COMPONE DE LAS HORAS REALES (2026-10-06). Antes era `vcar_mensaje_cierre`, un
+        texto libre que no se movía al mover las horas y contradecía a la pantalla («15H00 a 16H30»
+        con la ventana en 18H25). El texto del administrador viaja aparte, como nota (RN-56).
+      */
+      const todas = await this.repositorio.listar();
+      // Desde el 2026-10-07 manda el mensaje del administrador con sus marcadores resueltos
+      // ({cierre}/{apertura}), salvo que diga una hora que no es: ahí, el calculado.
+      const mensaje = mensajeParaFuncionario(
+        ventana,
+        todas,
+        minutosDelDia(horaEnZona(new Date(), ventana.zonaHoraria)),
+        veredicto.finDeSemana,
+      );
+      throw new VentanaCerradaError(mensaje, {
+        rol: usuario.rol,
+        horaCierre: veredicto.horaCierre,
+        horaApertura: veredicto.horaApertura,
+        horarioTexto: horarioDeVentana(ventana, todas).texto,
+        notaAdministrador: resolverMensajeVentana(
+          ventana.mensajeCierre,
+          ventana.horaApertura,
+          ventana.horaCierre,
+        ),
+      });
+    }
 
     if (!veredicto.puedeEscribir) {
       throw new VentanaCerradaError(

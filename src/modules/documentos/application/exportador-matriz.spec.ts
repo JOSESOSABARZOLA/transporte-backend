@@ -61,7 +61,21 @@ const operativo = (
     instituciones: [{ institucion: { sigla: 'AMC' } }],
     conductor: null,
     vehiculo: null,
-    observaciones: [{ texto: 'Sin novedad' }],
+    observaciones: [
+      {
+        id: 1,
+        texto: 'Sin novedad',
+        creadoPor: 7,
+        creadoPorRol: 'DMIP_OPERATIVOS',
+        creadoEn: new Date('2026-08-27T13:40:00.000Z'),
+      },
+    ],
+    creadoPor: 7,
+    creadoPorRol: 'DMIP_OPERATIVOS',
+    creadoEn: new Date('2026-08-27T13:00:00.000Z'),
+    compartirCon: null,
+    compartirSolicitadoPor: null,
+    compartirSolicitadoEn: null,
     estadoTransporte: 'PROPIOS_MEDIOS',
   }) as unknown as MatrizCompuesta['secciones'][0]['operativos'][0];
 
@@ -296,7 +310,15 @@ describe('El PDF de la matriz nombra a todo el personal', () => {
         ...operativo(identificador, []),
         grupoRegistro: LOTE,
         personal: [{ funcionarioId, esResponsable: false, funcionario: ficha }],
-        observaciones: [{ texto: observacion }],
+        observaciones: [
+          {
+            id: 1,
+            texto: observacion,
+            creadoPor: 7,
+            creadoPorRol: 'DMIP_OPERATIVOS',
+            creadoEn: new Date('2026-08-27T13:40:00.000Z'),
+          },
+        ],
       }) as unknown as ReturnType<typeof operativo>;
 
     const texto = await textoDelPdf(
@@ -312,5 +334,94 @@ describe('El PDF de la matriz nombra a todo el personal', () => {
     // Las observaciones DIFIEREN → cada una baja por su código: aparecen las dos.
     expect(normalizado).toContain('Nota General del bloque');
     expect(normalizado).toContain('Nota Tecnica distinta');
+  });
+});
+
+/*
+  LAS OBSERVACIONES DEL PDF, UNA POR RENGLÓN (2026-10-19, plan «notas-jornada-matriz», J6). Todas,
+  la más reciente primero, con el ROL de quien escribió y la hora de Quito; la COMPARTIDA con su
+  identificador. Sin notas, «—». Las de igual TEXTO siguen fusionándose en un lote.
+*/
+describe('El PDF de la matriz imprime cada observación en su renglón', () => {
+  const nota = (id: number, texto: string, iso: string) => ({
+    id,
+    texto,
+    creadoPor: 7,
+    creadoPorRol: 'DMIP_OPERATIVOS',
+    creadoEn: new Date(iso),
+  });
+
+  it('cada nota con su rol y su hora, la compartida con su identificador, la más reciente primero', async () => {
+    const conNotas = {
+      ...operativo('OCPMO-002-20-OCT-2026', []),
+      observaciones: [
+        nota(1, 'Primera nota', '2026-10-20T13:30:00.000Z'),
+        nota(2, 'Pruebas tecnicas 3', '2026-10-20T13:40:00.000Z'),
+      ],
+      compartirCon: { id: 56, identificador: 'OCPMO-001-20-OCT-2026' },
+      compartirSolicitadoEn: new Date('2026-10-20T13:41:00.000Z'),
+    } as unknown as ReturnType<typeof operativo>;
+
+    // El identificador largo envuelve por su guion («…-20- OCT…»): se une antes de comparar.
+    const normalizado = (await textoDelPdf(matrizCon([conNotas])))
+      .replace(/\s+/g, ' ')
+      .replace(/- /g, '-');
+
+    expect(normalizado).toContain(
+      'Comparte con OCPMO-001-20-OCT-2026 (20/10 08H41)',
+    );
+    expect(normalizado).toContain(
+      'Pruebas tecnicas 3 (DMIP · Unidad de Operativos, 20/10 08H40)',
+    );
+    expect(normalizado).toContain(
+      'Primera nota (DMIP · Unidad de Operativos, 20/10 08H30)',
+    );
+    // Todas, sin límite, y en orden: la compartida (08H41) antes que las de 08H40 y 08H30.
+    const compartida = normalizado.indexOf('Comparte con');
+    const segunda = normalizado.indexOf('Pruebas tecnicas 3');
+    const primera = normalizado.indexOf('Primera nota');
+    expect(compartida).toBeLessThan(segunda);
+    expect(segunda).toBeLessThan(primera);
+  });
+
+  it('sin notas, la celda dice «—»', async () => {
+    const sinNotas = {
+      ...operativo('OCF-001', []),
+      observaciones: [],
+    } as unknown as ReturnType<typeof operativo>;
+
+    const texto = await textoDelPdf(matrizCon([sinNotas]));
+
+    // La raya «—» va en WinAnsi (0x97): al decodificar en latin1 se lee como U+0097.
+    expect(texto).toMatch(/Propios {1,2}medios\s+[\u0097—]\s+Sin asignar/);
+    expect(texto).not.toContain('Sin novedad');
+  });
+
+  it('dos códigos de un lote con la misma nota a otra hora se fusionan: el texto sale una vez', async () => {
+    const MARTINEZ = funcionario('MARTINEZ', 'BRYAN', null);
+    const AGUIRRE = funcionario('AGUIRRE', 'ALEX', null);
+    const codigo = (
+      identificador: string,
+      funcionarioId: number,
+      ficha: ReturnType<typeof funcionario>,
+      iso: string,
+    ) =>
+      ({
+        ...operativo(identificador, []),
+        grupoRegistro: 'lote-igual',
+        personal: [{ funcionarioId, esResponsable: false, funcionario: ficha }],
+        observaciones: [nota(funcionarioId, 'Nota repetida del lote', iso)],
+      }) as unknown as ReturnType<typeof operativo>;
+
+    const normalizado = (
+      await textoDelPdf(
+        matrizCon([
+          codigo('IG-001', 1, MARTINEZ, '2026-10-20T13:40:00.000Z'),
+          codigo('IT-002', 2, AGUIRRE, '2026-10-20T14:10:00.000Z'),
+        ]),
+      )
+    ).replace(/\s+/g, ' ');
+
+    expect(normalizado.split('Nota repetida del lote').length - 1).toBe(1);
   });
 });

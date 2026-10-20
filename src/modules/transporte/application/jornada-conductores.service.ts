@@ -22,22 +22,22 @@
  * ═══════════════════════════════════════════════════════════════════════════════
  *
  * NO ASIGNA NADA, Y ESO ES DELIBERADO. Este servicio COMPONE UNA VISTA: dice qué tiene
- * cada conductor y dónde le queda hueco. La asignación sigue siendo un acto explícito por
- * `PATCH /transporte/operativos/:id`, con todas sus reglas.
+ * cada conductor (sus TRAMOS, desde el 2026-10-14). La asignación es un acto explícito en
+ * «Planificar el día», con todas sus reglas.
  *
  * El análisis lo recomienda expresamente: la evidencia muestra un problema de optimización
  * con restricciones blandas que la planificadora resuelve NEGOCIANDO —activar libres, pedir
  * priorización, acordar vehículo compartido—. **El sistema propone y avisa; no decide.**
  *
- * LOS HUECOS SE CALCULAN, NO SE ADIVINAN. Son los tramos libres entre lo que ya conduce,
- * dentro de la jornada declarada. No se propone qué meter en ellos: eso exigiría el tiempo
- * de traslado entre puntos, que es la pregunta Q-03 y **no tiene respuesta todavía**.
+ * LOS HUECOS APROVECHABLES, con su traslado, los calcula `GET /transporte/huecos/:fecha`
+ * (`politicas/huecos-libres.ts`, 2026-10-14).
  */
 
 import { Injectable } from '@nestjs/common';
 import type { SectorCiudad, TipoContrato } from '@prisma/client';
 
 import { FlotaRepository } from '../infrastructure/flota.repository';
+import { nombreDeUnidad } from './politicas/nombre-unidad';
 
 /** Un operativo dentro de la jornada de un conductor. */
 export interface TramoDeJornada {
@@ -48,6 +48,9 @@ export interface TramoDeJornada {
   esNocturno: boolean;
   placa: string | null;
   punto: string;
+  /** Unidad que cargó el operativo, en palabras (2026-10-07). */
+  departamento: string | null;
+  departamentoCodigo: string | null;
 }
 
 /** La jornada de un conductor ese día. */
@@ -100,6 +103,8 @@ export class JornadaConductoresService {
         esNocturno: conduccion.esNocturno,
         placa: conduccion.placa,
         punto: conduccion.punto,
+        departamento: nombreDeUnidad(conduccion.creadoPorRol),
+        departamentoCodigo: conduccion.creadoPorRol ?? null,
       });
 
       porConductor.set(conduccion.conductorId, tramos);
@@ -125,10 +130,9 @@ export class JornadaConductoresService {
 /**
  * Horas al volante acumuladas ese día.
  *
- * Se suman las que ya calculó el operativo (`oper_duracion_horas`) en lugar de recalcular
- * desde el horario: ese cálculo contempla el cruce de medianoche y vive en `RangoHorario`,
- * que es «el archivo de mayor riesgo del sistema» (FASE3 §OV-02). Una segunda aritmética
- * aquí sería exactamente lo que ese objeto de valor existe para impedir.
+ * Se suman las de sus TRAMOS (2026-10-14), que el repositorio mide con `duracionEnHoras` de
+ * `rango-horario.ts`: el cruce de medianoche se resuelve allí, «el archivo de mayor riesgo del
+ * sistema» (FASE3 §OV-02), y no con una segunda aritmética aquí.
  */
 function sumarHoras(
   conducciones: { conductorId: number; horas: number }[],

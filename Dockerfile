@@ -38,18 +38,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY package*.json ./
 
-RUN npm ci --omit=dev
+# El esquema con sus migraciones: lo necesitan `prisma generate` y el despliegue
+# (`prisma migrate deploy`).
+COPY prisma ./prisma
+
+# IMAGEN DE 331 MB A 197 MB (2026-10-16). Instalar, generar el cliente de Prisma y limpiar
+# las caches van en UNA sola capa: lo que se borra en otra capa sigue ocupando espacio.
+#   · El cliente se genera AQUI, sobre el `node_modules` de produccion. Antes se copiaban
+#     `.prisma` y `@prisma/client` desde la etapa de construccion, y esa copia escribia una
+#     segunda vez, en otra capa, lo que `npm ci` ya habia instalado (~77 MB).
+#   · `/root/.npm` (cache de npm, ~152 MB) y `/root/.cache` (descarga de motores de Prisma,
+#     ~36 MB) no los lee nadie en ejecucion.
+# El CLI `prisma` esta en `dependencies` a proposito: `migrate deploy` corre dentro de este
+# contenedor (DESPLIEGUE.md).
+RUN npm ci --omit=dev \
+    && npx prisma generate \
+    && npm cache clean --force \
+    && rm -rf /root/.cache /root/.npm /tmp/*
 
 COPY --from=builder /app/dist ./dist
-
-# Cliente de Prisma generado en la etapa de construccion, y el esquema con sus
-# migraciones, que el despliegue necesita para `prisma migrate deploy`.
-# Se copian las DOS carpetas: .prisma trae el motor de consultas y @prisma/client el
-# cliente generado. `npm ci --omit=dev` reinstala @prisma/client sin generar, y sin esta
-# copia el cliente queda vacio.
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=builder /app/node_modules/@prisma/client ./node_modules/@prisma/client
-COPY --from=builder /app/prisma ./prisma
 
 # Membrete institucional para la matriz consolidada y las ordenes de servicio.
 #

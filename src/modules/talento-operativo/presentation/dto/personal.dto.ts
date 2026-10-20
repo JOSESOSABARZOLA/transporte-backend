@@ -55,9 +55,21 @@ import type {
 } from '../../application/politicas/indice-fatiga.policy';
 import {
   comoFechaIso,
+  estadoDeAusencia,
   LONGITUD_CEDULA,
   PATRON_CEDULA,
+  type EstadoDeAusencia,
 } from '../../application/reglas-personal';
+import { fechaIsoEnZona } from '../../../../common/utilidades/marca-tiempo';
+import type {
+  AusenciaDelMaestro,
+  OperativoDeLaPersona,
+} from '../../infrastructure/disponibilidad.repository';
+
+/** De dónde sale la persona en un alta. Ver `CrearFuncionarioDto.origen`. */
+export const ORIGENES_DE_ALTA = { AUTH: 'AUTH', MANUAL: 'MANUAL' } as const;
+export type OrigenDeAlta =
+  (typeof ORIGENES_DE_ALTA)[keyof typeof ORIGENES_DE_ALTA];
 
 const PATRON_FECHA = /^\d{4}-\d{2}-\d{2}$/;
 const MENSAJE_FECHA = 'La fecha se escribe como AAAA-MM-DD.';
@@ -134,6 +146,23 @@ export class CrearFuncionarioDto {
   @IsInt({ message: 'La zonal seleccionada no es válida.' })
   @IsOptional()
   zonalId?: number | null;
+
+  /**
+   * DE DÓNDE SALE LA PERSONA (rediseño de P-07, 2026-10-08).
+   *
+   *   · `AUTH`   — elegida del directorio de Auth central. El correo institucional lo toma el
+   *                SERVIDOR de Auth por la cédula; el que llegue en `correoInstitucional` se
+   *                ignora (ver `CorreoInstitucionalAuthService`).
+   *   · `MANUAL` — «¿No aparece? Registro manual». Sin Auth: se acepta el correo del cliente.
+   *
+   * Opcional y `MANUAL` por omisión, para que un cliente anterior al rediseño siga funcionando
+   * exactamente como antes.
+   */
+  @IsEnum(ORIGENES_DE_ALTA, {
+    message: 'El origen del alta admite estos valores: AUTH, MANUAL.',
+  })
+  @IsOptional()
+  origen?: OrigenDeAlta;
 
   /*
     ═══════════════════════════════════════════════════════════════════════════════
@@ -255,7 +284,7 @@ export class BajaFuncionarioDto {
 export class CrearDisponibilidadDto {
   @IsEnum(EstadoDisponibilidad, {
     message:
-      'La situación admite estos valores: DISPONIBLE, VACACIONES, REPOSO_MEDICO, CALAMIDAD, PERMISO.',
+      'La situación admite estos valores: DISPONIBLE, VACACIONES, REPOSO_MEDICO, CALAMIDAD, PERMISO, LICENCIA, CAPACITACION, COMISION_SERVICIOS.',
   })
   @IsNotEmpty({ message: 'Indique la situación de la persona.' })
   estado: EstadoDisponibilidad;
@@ -347,6 +376,73 @@ export interface DisponibilidadResponseDto {
   hasta: string;
   motivo: string | null;
   registradoPor: number;
+  /**
+   * EN_CURSO · PROXIMA · PASADA respecto de hoy en Quito (2026-10-08). Una PASADA ya no se
+   * puede quitar (409 `AUSENCIA_PASADA`). El frontend la espeja para el distintivo.
+   */
+  momento: EstadoDeAusencia;
+}
+
+/** Una ausencia en la lista del maestro (B5). Sin motivo: puede ser un dato de salud. */
+export interface AusenciaDelMaestroResponseDto {
+  id: number;
+  funcionarioId: number;
+  estado: EstadoDisponibilidad;
+  desde: string;
+  hasta: string;
+  momento: EstadoDeAusencia;
+}
+
+/** Un operativo activo de la persona en el rango consultado (B6). */
+export interface OperativoDeLaPersonaResponseDto {
+  operativoId: number;
+  identificador: string;
+  /** Fecha de la jornada, `AAAA-MM-DD`. */
+  fecha: string;
+}
+
+/** Fechas de la consulta de operativos de una persona (B6). */
+export class RangoFechasDto {
+  @Matches(PATRON_FECHA, { message: MENSAJE_FECHA })
+  @IsNotEmpty({ message: 'Indique desde qué día consultar.' })
+  desde: string;
+
+  @Matches(PATRON_FECHA, { message: MENSAJE_FECHA })
+  @IsNotEmpty({ message: 'Indique hasta qué día consultar.' })
+  hasta: string;
+}
+
+/** Desde qué día listar las ausencias del maestro (B5). Sin él, hoy en Quito. */
+export class DesdeFechaDto {
+  @Matches(PATRON_FECHA, { message: MENSAJE_FECHA })
+  @IsOptional()
+  desde?: string;
+}
+
+export function aAusenciaDelMaestroResponse(
+  ausencia: AusenciaDelMaestro,
+  hoy: string = fechaIsoEnZona(),
+): AusenciaDelMaestroResponseDto {
+  const desde = comoFechaIso(ausencia.desde);
+  const hasta = comoFechaIso(ausencia.hasta);
+  return {
+    id: ausencia.id,
+    funcionarioId: ausencia.funcionarioId,
+    estado: ausencia.estado,
+    desde,
+    hasta,
+    momento: estadoDeAusencia(desde, hasta, hoy),
+  };
+}
+
+export function aOperativoDeLaPersonaResponse(
+  operativo: OperativoDeLaPersona,
+): OperativoDeLaPersonaResponseDto {
+  return {
+    operativoId: operativo.operativoId,
+    identificador: operativo.identificador,
+    fecha: comoFechaIso(operativo.fecha),
+  };
 }
 
 export function aFuncionarioResponse(
@@ -396,13 +492,17 @@ export function aPersonaElegibleResponse(
 
 export function aDisponibilidadResponse(
   periodo: Disponibilidad,
+  hoy: string = fechaIsoEnZona(),
 ): DisponibilidadResponseDto {
+  const desde = comoFechaIso(periodo.desde);
+  const hasta = comoFechaIso(periodo.hasta);
   return {
     id: periodo.id,
     estado: periodo.estado,
-    desde: comoFechaIso(periodo.desde),
-    hasta: comoFechaIso(periodo.hasta),
+    desde,
+    hasta,
     motivo: periodo.motivo,
     registradoPor: periodo.registradoPor,
+    momento: estadoDeAusencia(desde, hasta, hoy),
   };
 }

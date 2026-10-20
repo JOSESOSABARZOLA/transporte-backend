@@ -26,6 +26,7 @@ import {
   type AreaPersonal,
   type FormularioPrefijo,
   type PoliticaVehiculo,
+  type TipoTransporte,
   type Prisma,
   type RolDepartamental,
 } from '@prisma/client';
@@ -49,7 +50,7 @@ export interface AsignacionQueEstorba {
   persona: string;
 }
 
-/** Las columnas escalares de un formulario nuevo (las áreas/rol/prefijo van aparte). */
+/** Las columnas escalares de un formulario nuevo (el rol y el prefijo van aparte; nace sin áreas). */
 export interface DatosNuevoFormulario {
   numero: number;
   codigo: string;
@@ -59,6 +60,7 @@ export interface DatosNuevoFormulario {
   colorNombre: string;
   rolDueno: RolDepartamental;
   politicaVehiculo: PoliticaVehiculo;
+  tipoTransporteDefecto: TipoTransporte;
   condicionanteNoct: boolean;
   esPatrulla: boolean;
   capturaLibrePunto: boolean;
@@ -265,27 +267,12 @@ export class FormulariosRepository {
     });
   }
 
-  /**
-   * Fija el prefijo PREDETERMINADO del formulario (sin área, ordinario). Si ya existe lo
-   * actualiza; si no, lo crea. En v1 el formulario lleva un único prefijo.
-   */
-  async fijarPrefijoPredeterminado(
+  /** El prefijo general de un formulario recién creado: sin área, ordinario y predeterminado. */
+  async crearPrefijoGeneral(
     formularioId: number,
     prefijo: string,
     cliente: Prisma.TransactionClient,
   ): Promise<void> {
-    const existente = await cliente.formularioPrefijo.findFirst({
-      where: { formularioId, esAdicional: false, areaAplica: null },
-    });
-
-    if (existente) {
-      await cliente.formularioPrefijo.update({
-        where: { id: existente.id },
-        data: { prefijo, esPredeterminado: true },
-      });
-      return;
-    }
-
     await cliente.formularioPrefijo.create({
       data: {
         formularioId,
@@ -293,6 +280,29 @@ export class FormulariosRepository {
         esPredeterminado: true,
         esAdicional: false,
       },
+    });
+  }
+
+  /**
+   * Cambia el texto de UNA fila de prefijo, por su id. Antes se buscaba «la» fila sin área con
+   * `findFirst`, y en un formulario con varias (el 7) podía tocar la que no era; la elige
+   * `prefijoGeneral` en la política (2026-10-13).
+   */
+  async actualizarPrefijo(
+    id: number,
+    prefijo: string,
+    cliente: Prisma.TransactionClient,
+  ): Promise<void> {
+    await cliente.formularioPrefijo.update({
+      where: { id },
+      data: { prefijo },
+    });
+  }
+
+  /** Todos los prefijos de todos los formularios, activos o no: la unicidad es entre formularios. */
+  async prefijosEnUso(): Promise<{ formularioId: number; prefijo: string }[]> {
+    return this.prisma.formularioPrefijo.findMany({
+      select: { formularioId: true, prefijo: true },
     });
   }
 

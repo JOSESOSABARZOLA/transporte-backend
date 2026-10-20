@@ -148,3 +148,30 @@ describe('motivoDeRechazo', () => {
     });
   });
 });
+
+describe('motivoDeRechazo · parámetros de turnos de la DAF (2026-10-07)', () => {
+  const texto = (clave: string) =>
+    parametro({ clave, tipo: TipoParametro.TEXTO, valor: 'SIN_CONFIGURAR' });
+
+  it.each(['DAF_MIN_CONDUCTORES_DIA', 'DAF_MIN_CONDUCTORES_NOCHE'])(
+    '%s admite SIN_CONFIGURAR o siete enteros ≥ 0',
+    (clave) => {
+      expect(motivoDeRechazo(texto(clave), 'SIN_CONFIGURAR')).toBeUndefined();
+      expect(motivoDeRechazo(texto(clave), '6,6,6,6,6,4,4')).toBeUndefined();
+      expect(
+        motivoDeRechazo(texto(clave), '0, 0, 0, 0, 0, 0, 0'),
+      ).toBeUndefined();
+      expect(motivoDeRechazo(texto(clave), '6,6,6,6,6,4')).toMatch(/siete/);
+      expect(motivoDeRechazo(texto(clave), '6,6,6,6,6,4,-1')).toMatch(/siete/);
+      expect(motivoDeRechazo(texto(clave), 'seis')).toMatch(/siete/);
+    },
+  );
+
+  it('DAF_PERMITE_NOCHE_A_DIA admite SI, NO o SIN_CONFIGURAR', () => {
+    const p = texto('DAF_PERMITE_NOCHE_A_DIA');
+    expect(motivoDeRechazo(p, 'SI')).toBeUndefined();
+    expect(motivoDeRechazo(p, 'no')).toBeUndefined();
+    expect(motivoDeRechazo(p, 'SIN_CONFIGURAR')).toBeUndefined();
+    expect(motivoDeRechazo(p, 'TAL VEZ')).toMatch(/SI, NO/);
+  });
+});

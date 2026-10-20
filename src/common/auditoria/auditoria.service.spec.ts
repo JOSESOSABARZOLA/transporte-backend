@@ -61,6 +61,47 @@ describe('AuditoriaService', () => {
     );
   });
 
+  it('registrarVarios · varias trazas en UNA inserción, una fila por campo (2026-10-14)', async () => {
+    const { servicio, repositorio } = crearServicio();
+    const transaccion = { marca: 'cliente-de-transaccion' };
+
+    await ejecutarConContexto(contexto, () =>
+      servicio.registrarVarios(
+        [
+          {
+            entidad: 't_tramo_transporte',
+            entidadId: 10,
+            accion: AccionAuditoria.ACTUALIZAR,
+            cambios: [
+              { campo: 'cond_id', valorNuevo: '7' },
+              { campo: 'vehi_id', valorNuevo: '80' },
+            ],
+          },
+          {
+            entidad: 't_tramo_transporte',
+            entidadId: 0,
+            accion: AccionAuditoria.ACTUALIZAR,
+          },
+        ],
+        transaccion as never,
+      ),
+    );
+
+    expect(repositorio.insertar).not.toHaveBeenCalled();
+    expect(repositorio.insertarVarias).toHaveBeenCalledTimes(1);
+    const [filas, cliente] = repositorio.insertarVarias.mock.calls[0] as [
+      { entidadId: number; campo?: string; correlacion?: string }[],
+      unknown,
+    ];
+    expect(cliente).toBe(transaccion);
+    expect(filas.map((f) => [f.entidadId, f.campo])).toEqual([
+      [10, 'cond_id'],
+      [10, 'vehi_id'],
+      [0, undefined],
+    ]);
+    expect(filas.every((f) => f.correlacion === 'corr-1')).toBe(true);
+  });
+
   it('propaga el cliente de la transacción, que es lo que garantiza DA-09', async () => {
     const { servicio, repositorio } = crearServicio();
     const transaccion = { marca: 'cliente-de-transaccion' };

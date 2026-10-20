@@ -16,6 +16,7 @@ import {
   esCedulaValida,
   esCorreoValido,
   esTelefonoValido,
+  estadoDeAusencia,
   excluyeDelOperativo,
   seSolapan,
 } from './reglas-personal';
@@ -54,18 +55,60 @@ describe('esCedulaValida', () => {
   });
 });
 
+/**
+ * CELULAR ECUATORIANO DESDE EL 2026-10-08 (rediseño de P-07): diez dígitos que empiezan por
+ * 09. Se toleran espacios y guiones de quien lo dicta por partes.
+ */
 describe('esTelefonoValido', () => {
-  it('admite el formato con espacios que usa el negocio', () => {
-    expect(esTelefonoValido('98 514 4231')).toBe(true);
+  it('admite el celular de diez dígitos que empieza por 09, con o sin separadores', () => {
     expect(esTelefonoValido('0985144231')).toBe(true);
-    expect(esTelefonoValido('+593 98 514 4231')).toBe(true);
-    expect(esTelefonoValido('02-2445566')).toBe(true);
+    expect(esTelefonoValido('098 514 4231')).toBe(true);
+    expect(esTelefonoValido('098-514-4231')).toBe(true);
   });
 
-  it('rechaza lo que no puede ser un teléfono', () => {
-    expect(esTelefonoValido('123456')).toBe(false);
-    expect(esTelefonoValido('98514423198514423')).toBe(false);
+  it('rechaza el fijo, el prefijo internacional y los largos equivocados', () => {
+    expect(esTelefonoValido('02-2445566')).toBe(false);
+    expect(esTelefonoValido('+593 98 514 4231')).toBe(false);
+    expect(esTelefonoValido('98 514 4231')).toBe(false);
+    expect(esTelefonoValido('098514423')).toBe(false);
+    expect(esTelefonoValido('09851442311')).toBe(false);
+    expect(esTelefonoValido('0885144231')).toBe(false);
     expect(esTelefonoValido('llamar a la oficina')).toBe(false);
+  });
+});
+
+/** En qué momento está una ausencia respecto de hoy (rediseño de P-07, B7). */
+describe('estadoDeAusencia', () => {
+  it('en curso cuando hoy cae dentro, extremos incluidos', () => {
+    expect(estadoDeAusencia('2026-10-01', '2026-10-10', '2026-10-05')).toBe(
+      'EN_CURSO',
+    );
+    expect(estadoDeAusencia('2026-10-01', '2026-10-10', '2026-10-01')).toBe(
+      'EN_CURSO',
+    );
+    expect(estadoDeAusencia('2026-10-01', '2026-10-10', '2026-10-10')).toBe(
+      'EN_CURSO',
+    );
+  });
+
+  it('próxima si empieza después de hoy, pasada si terminó antes', () => {
+    expect(estadoDeAusencia('2026-10-11', '2026-10-12', '2026-10-10')).toBe(
+      'PROXIMA',
+    );
+    expect(estadoDeAusencia('2026-10-01', '2026-10-09', '2026-10-10')).toBe(
+      'PASADA',
+    );
+  });
+});
+
+/** Las tres situaciones nuevas excluyen como las demás (RN-30, 2026-10-08). */
+describe('situaciones de ausencia', () => {
+  it('LICENCIA, CAPACITACION y COMISION_SERVICIOS excluyen del operativo', () => {
+    expect(excluyeDelOperativo(EstadoDisponibilidad.LICENCIA)).toBe(true);
+    expect(excluyeDelOperativo(EstadoDisponibilidad.CAPACITACION)).toBe(true);
+    expect(excluyeDelOperativo(EstadoDisponibilidad.COMISION_SERVICIOS)).toBe(
+      true,
+    );
   });
 });
 

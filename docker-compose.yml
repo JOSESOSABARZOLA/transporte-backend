@@ -102,8 +102,8 @@ services:
       DIRECT_DATABASE_URL: "postgresql://postgres:${DB_PASSWORD}@transportedb:5432/transportedb?schema=public"
       # ORIGENES DEL FRONTEND. SALE DE .env, Y NO SE FIJA AQUI.
       #
-      # Estaba escrito a mano con `172.20.136.73`, que NO es el servidor de despliegue
-      # -es el .127-. Y como este bloque `environment:` gana sobre `env_file: .env`,
+      # Estaba escrito a mano con la IP de un equipo de desarrollo, que NO es el servidor
+      # de despliegue. Y como este bloque `environment:` gana sobre `env_file: .env`,
       # corregirlo en el .env no habria servido de nada: el compose lo pisaba.
       #
       # El fallo que produce es de los que no dejan rastro: con el origen fuera de la
@@ -129,6 +129,8 @@ services:
       # Base de la API de Auth, de la que cuelga /users. Alimenta el directorio de P-07.
       # Vacia = sin directorio; el maestro de personal sigue administrandose igual.
       AUTH_API_URL: ${AUTH_API_URL}
+      # Base de la API de Inspección (/operativos?fecha=), 2026-10-07. Vacía = sin integración.
+      INSPECCION_API_URL: ${INSPECCION_API_URL:-}
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
       AUTH_SUBSYSTEM_ID: ${AUTH_SUBSYSTEM_ID}
       SESSION_JWT_SECRET: ${SESSION_JWT_SECRET}
@@ -177,11 +179,11 @@ services:
       # reconstruir. Se pasan aqui para que la direccion del portal de Auth deje de estar
       # escrita en el fuente y sea un dato del despliegue.
       #
-      # VACIAS POR OMISION, y src/config/env.ts resuelve su respaldo. Ese respaldo hoy
-      # acierta porque produccion y Auth central viven en la misma maquina; el dia que
-      # Auth se mueva, esto es lo que evita tener que tocar codigo fuente.
+      # EL PORTAL ES OBLIGATORIO (2026-10-16): el fuente ya no trae una direccion por
+      # omision (no se versionan IP) y el build del frontend falla sin ella. Se define en el
+      # .env local, que no se versiona. El cierre de sesion hereda del portal si va vacio.
       args:
-        VITE_AUTH_PORTAL_URL: "${VITE_AUTH_PORTAL_URL:-}"
+        VITE_AUTH_PORTAL_URL: "${VITE_AUTH_PORTAL_URL:?defina VITE_AUTH_PORTAL_URL en el archivo .env}"
         VITE_AUTH_LOGOUT_URL: "${VITE_AUTH_LOGOUT_URL:-}"
         VITE_AUTH_MODULE_CODE: "${VITE_AUTH_MODULE_CODE:-}"
     container_name: transporte-front

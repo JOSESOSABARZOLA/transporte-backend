@@ -23,7 +23,12 @@ import type {
   Zonal,
 } from '@prisma/client';
 
-import type { CatalogosDeFormulario } from '../../application/catalogos.service';
+import type {
+  CatalogosAdminDeFormulario,
+  CatalogosDeFormulario,
+  DatosDeAdministracion,
+  ZonalAdmin,
+} from '../../application/catalogos.service';
 import type {
   PuntoConZonal,
   TipoControlDelimitado,
@@ -101,6 +106,8 @@ export interface CatalogosFormularioResponseDto {
    * elegida (Unidad de Operativos, formularios 1-4). Distinto de `capturaLibrePunto`.
    */
   puntoManual: boolean;
+  /** Tipo de transporte que toma el operativo si el registro no lo indica (el PMO: INICIO_Y_FIN). */
+  tipoTransportePorDefecto: string;
 }
 
 export function aZonalResponse(zonal: Zonal): ZonalResponseDto {
@@ -123,10 +130,11 @@ export function aPuntoResponse(punto: PuntoEncuentro): PuntoResponseDto {
   };
 }
 
+/** El nombre de la zonal es el que le dio SU formulario (2026-10-13), no el de la zona de la ciudad. */
 export function aPuntoConZonalResponse(punto: PuntoConZonal): PuntoResponseDto {
   return {
     ...aPuntoResponse(punto),
-    zonalNombre: punto.zonal.nombre,
+    zonalNombre: punto.zonalFormulario.nombre,
   };
 }
 
@@ -174,5 +182,96 @@ export function aCatalogosResponse(
     variosPorPersona: catalogos.variosPorPersona,
     cantidadPorPersona: catalogos.cantidadPorPersona,
     puntoManual: catalogos.puntoManual,
+    tipoTransportePorDefecto: catalogos.tipoTransportePorDefecto,
+  };
+}
+
+// ─────────── Administración (rediseño de P-08, 2026-10-12) ───────────
+
+/**
+ * Lo que la lista de ADMINISTRACIÓN añade a cada valor: sus usos y si se puede borrar —con la
+ * misma política que el borrado, así el botón nunca ofrece lo que el servidor rechaza—.
+ */
+export interface DatosDeAdministracionDto {
+  usos: number;
+  puedeEliminar: boolean;
+  motivoNoEliminar: string | null;
+}
+
+export type PuntoAdminResponseDto = PuntoResponseDto & DatosDeAdministracionDto;
+export type TipoControlAdminResponseDto = TipoControlResponseDto &
+  DatosDeAdministracionDto;
+export type InstitucionAdminResponseDto = InstitucionResponseDto &
+  DatosDeAdministracionDto;
+
+export interface CatalogosAdminResponseDto extends Omit<
+  CatalogosFormularioResponseDto,
+  'puntos' | 'tiposControl' | 'instituciones'
+> {
+  puntos: PuntoAdminResponseDto[];
+  tiposControl: TipoControlAdminResponseDto[];
+  instituciones: InstitucionAdminResponseDto[];
+}
+
+/**
+ * Una zonal DEL FORMULARIO para administrar (2026-10-13). `id` es el de su ZONA DE LA CIUDAD —el
+ * que llevan sus puntos (`zonalId`) y el que usan las rutas `…/:codigo/zonales/:id`—; nombre y
+ * estado son los del formulario. Los conteos son SOLO de ese formulario.
+ */
+export interface ZonalAdminResponseDto extends ZonalResponseDto {
+  zonalFormularioId: number;
+  orden: number;
+  usos: number;
+  puntos: number;
+  puntosActivos: number;
+  puedeEliminar: boolean;
+  motivoNoEliminar: string | null;
+}
+
+const datosDeAdministracion = (
+  valor: DatosDeAdministracion,
+): DatosDeAdministracionDto => ({
+  usos: valor.usos,
+  puedeEliminar: valor.puedeEliminar,
+  motivoNoEliminar: valor.motivoNoEliminar,
+});
+
+export function aCatalogosAdminResponse(
+  catalogos: CatalogosAdminDeFormulario,
+): CatalogosAdminResponseDto {
+  return {
+    zonales: catalogos.zonales.map(aZonalResponse),
+    puntos: catalogos.puntos.map((punto) => ({
+      ...aPuntoConZonalResponse(punto),
+      ...datosDeAdministracion(punto),
+    })),
+    tiposControl: catalogos.tiposControl.map((tipo) => ({
+      ...aTipoControlResponse(tipo),
+      ...datosDeAdministracion(tipo),
+    })),
+    instituciones: catalogos.instituciones.map((institucion) => ({
+      ...aInstitucionResponse(institucion),
+      ...datosDeAdministracion(institucion),
+    })),
+    capturaLibrePunto: catalogos.capturaLibrePunto,
+    capturaLibreTipo: catalogos.capturaLibreTipo,
+    tipoControlMultiple: catalogos.tipoControlMultiple,
+    variosPorPersona: catalogos.variosPorPersona,
+    cantidadPorPersona: catalogos.cantidadPorPersona,
+    puntoManual: catalogos.puntoManual,
+    tipoTransportePorDefecto: catalogos.tipoTransportePorDefecto,
+  };
+}
+
+export function aZonalAdminResponse(zonal: ZonalAdmin): ZonalAdminResponseDto {
+  return {
+    ...aZonalResponse(zonal),
+    zonalFormularioId: zonal.zonalFormularioId,
+    orden: zonal.orden,
+    usos: zonal.usos,
+    puntos: zonal.puntos,
+    puntosActivos: zonal.puntosActivos,
+    puedeEliminar: zonal.puedeEliminar,
+    motivoNoEliminar: zonal.motivoNoEliminar,
   };
 }

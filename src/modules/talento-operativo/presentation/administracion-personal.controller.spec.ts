@@ -48,6 +48,9 @@ import type { UsuarioAutenticado } from '../../../common/auth/interfaces/usuario
 import type { DisponibilidadService } from '../application/disponibilidad.service';
 import { direccionesDeLosRoles } from '../domain/areas-del-rol';
 import type { FuncionariosService } from '../application/funcionarios.service';
+import type { CoberturaTurnosService } from '../application/cobertura-turnos.service';
+import type { CorreoInstitucionalAuthService } from '../../identidad/application/correo-institucional-auth.service';
+import type { CrearFuncionarioDto } from './dto/personal.dto';
 
 /** Quien pregunta, con los roles que le dio Auth. */
 const usuario = (...roles: RolDepartamental[]): UsuarioAutenticado =>
@@ -349,4 +352,108 @@ describe('P-07 · qué direcciones dice el servidor que se gestionan', () => {
       controlador.direccionesQueGestiona(usuario(RolDepartamental.DIRECTOR)),
     ).resolves.toEqual([]);
   });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════
+ * B2 · EN UN ALTA DESDE AUTH, EL CORREO INSTITUCIONAL LO PONE AUTH (2026-10-08).
+ *
+ * El que manda el navegador se descarta: el servidor pregunta a Auth por la cédula. El alta
+ * MANUAL —«¿No aparece? Registro manual»— sigue guardando el del cliente.
+ * ═══════════════════════════════════════════════════════════════════════════════
+ */
+describe('P-07 · alta: el correo institucional de origen AUTH lo toma el servidor', () => {
+  const FICHA = {
+    cedula: '1712345678',
+    apellidos: 'ABAD MOLINA',
+    nombres: 'VERONICA',
+    area: 'GENERAL',
+    tipoContrato: 'OCASIONAL',
+    correoInstitucional: 'manipulado@ejemplo.com',
+  };
+
+  const armarAlta = () => {
+    const crear = jest
+      .fn()
+      .mockImplementation((datos: Record<string, unknown>) =>
+        Promise.resolve({ id: 99, activo: true, ...datos }),
+      );
+    const correoPorCedula = jest
+      .fn()
+      .mockResolvedValue('veronica.abad@quito.gob.ec');
+    const controlador = new AdministracionPersonalController(
+      { crear } as unknown as FuncionariosService,
+      {} as unknown as DisponibilidadService,
+      {} as unknown as CoberturaTurnosService,
+      { correoPorCedula } as unknown as CorreoInstitucionalAuthService,
+    );
+    return { controlador, crear, correoPorCedula };
+  };
+
+  const conToken = {
+    ...usuario(RolDepartamental.ADMINISTRADOR_DMIP),
+    tokenAuth: 'token-de-sesion',
+  } as UsuarioAutenticado;
+
+  it('AUTH · ignora el correo del cliente y guarda el de Auth', async () => {
+    const { controlador, crear, correoPorCedula } = armarAlta();
+
+    await controlador.crear(
+      { ...FICHA, origen: 'AUTH' } as unknown as CrearFuncionarioDto,
+      conToken,
+    );
+
+    expect(correoPorCedula).toHaveBeenCalledWith(
+      '1712345678',
+      'token-de-sesion',
+    );
+    expect(crear).toHaveBeenCalledWith(
+      expect.objectContaining({
+        correoInstitucional: 'veronica.abad@quito.gob.ec',
+      }),
+      1,
+      conToken.roles,
+    );
+  });
+
+  it('MANUAL · no pregunta a Auth y conserva el correo del cliente', async () => {
+    const { controlador, crear, correoPorCedula } = armarAlta();
+
+    await controlador.crear(
+      { ...FICHA, origen: 'MANUAL' } as unknown as CrearFuncionarioDto,
+      conToken,
+    );
+
+    expect(correoPorCedula).not.toHaveBeenCalled();
+    expect(crear).toHaveBeenCalledWith(
+      expect.objectContaining({
+        correoInstitucional: 'manipulado@ejemplo.com',
+      }),
+      1,
+      conToken.roles,
+    );
+  });
+
+  /*
+    DEFECTO DEL 2026-10-08: `origen` llegaba a `funcionario.create()`, que no tiene esa columna,
+    y Prisma rechazaba TODA el alta («Unknown argument»), en AUTH y en MANUAL. Las dos pruebas de
+    arriba no lo veían porque solo miran lo que SÍ viaja.
+  */
+  it.each(['AUTH', 'MANUAL'])(
+    '%s · `origen` no llega a la ficha que se guarda',
+    async (origen) => {
+      const { controlador, crear } = armarAlta();
+
+      await controlador.crear(
+        { ...FICHA, origen } as unknown as CrearFuncionarioDto,
+        conToken,
+      );
+
+      expect(crear).toHaveBeenCalledWith(
+        expect.not.objectContaining({ origen }),
+        1,
+        conToken.roles,
+      );
+    },
+  );
 });

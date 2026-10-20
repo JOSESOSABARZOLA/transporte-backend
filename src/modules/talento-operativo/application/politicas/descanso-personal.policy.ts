@@ -28,7 +28,7 @@
  * resolver, y cuando se resuelva aparecerá el siguiente si lo hubiera.
  */
 
-import { EstadoTurno, TipoContrato } from '@prisma/client';
+import { AreaPersonal, EstadoTurno, TipoContrato } from '@prisma/client';
 
 import {
   CODIGOS_ERROR,
@@ -97,6 +97,11 @@ export interface AntecedentesPersona {
   /** `APELLIDOS NOMBRES`, para redactar el mensaje. */
   nombre: string;
   tipoContrato: TipoContrato;
+  /**
+   * Área de la persona (2026-10-05). Las reglas de la COBERTURA POR TURNOS solo valen para
+   * INSTRUCCIÓN, la única área que tiene esa matriz; para el resto no se evalúan.
+   */
+  area: AreaPersonal;
   ausencia?: AusenciaVigente;
   /** Fecha de la última jornada en patrulla, del historial. RN-24. */
   ultimaPatrulla?: Date | null;
@@ -179,6 +184,8 @@ function reglaDisponibilidad(
 function reglaCoberturaDescanso(
   persona: AntecedentesPersona,
 ): VeredictoElegibilidad | undefined {
+  // Solo Instrucción tiene cobertura por turnos (2026-10-05).
+  if (persona.area !== AreaPersonal.INSTRUCCION) return undefined;
   if (persona.turnoCobertura !== EstadoTurno.DESCANSO) return undefined;
 
   return {
@@ -204,6 +211,8 @@ function reglaTurnoCobertura(
   contexto: ContextoAsignacion,
   umbrales: UmbralesDescanso,
 ): VeredictoElegibilidad | undefined {
+  // Solo Instrucción tiene cobertura por turnos (2026-10-05).
+  if (persona.area !== AreaPersonal.INSTRUCCION) return undefined;
   const esDiurno = persona.turnoCobertura === EstadoTurno.DIURNO;
   const esNocturno = persona.turnoCobertura === EstadoTurno.NOCTURNO;
   if (!esDiurno && !esNocturno) return undefined;
@@ -233,6 +242,12 @@ function reglaTurnoCobertura(
  * laborable SÍ se permitía (horas extra, ver M12_POLITICAS_DESCANSO.md §8). El negocio pidió
  * endurecerlo: ahora se rechaza TODO lo que no caiga en la ventana. La ventana es un PARÁMETRO
  * (regla 2 de CLAUDE.md); si faltara, la regla cae al criterio antiguo (solo noche y fin de semana).
+ *
+ * EXCEPCIÓN DE INSTRUCCIÓN: 2026-10-05, decisión del negocio según el Excel de cobertura de
+ * Instrucción. En esa área la matriz de turnos define quién puede salir: si la persona tiene turno
+ * DIURNO o NOCTURNO ese día, MANDA LA MATRIZ y esta regla NO se aplica, también con nombramiento
+ * (el horario igual debe caer en la ventana del turno, que lo exige `reglaTurnoCobertura`). Sin
+ * turno ese día —celda vacía— la regla se aplica como siempre. El resto de áreas, sin cambios.
  */
 function reglaTipoContrato(
   persona: AntecedentesPersona,
@@ -240,6 +255,13 @@ function reglaTipoContrato(
   umbrales: UmbralesDescanso,
 ): VeredictoElegibilidad | undefined {
   if (persona.tipoContrato !== TipoContrato.NOMBRAMIENTO) return undefined;
+  if (
+    persona.area === AreaPersonal.INSTRUCCION &&
+    (persona.turnoCobertura === EstadoTurno.DIURNO ||
+      persona.turnoCobertura === EstadoTurno.NOCTURNO)
+  ) {
+    return undefined;
+  }
 
   // Con ventana configurada, «fuera de horario» es que el operativo NO cabe en 08:00–16:00 (lo que
   // abarca la noche y las horas extra). Sin ventana, se cae al criterio antiguo (solo la noche).
@@ -433,6 +455,9 @@ function enPalabras(estado: string): string {
     REPOSO_MEDICO: 'reposo médico',
     CALAMIDAD: 'calamidad doméstica',
     PERMISO: 'permiso',
+    LICENCIA: 'licencia',
+    CAPACITACION: 'capacitación',
+    COMISION_SERVICIOS: 'comisión de servicios',
   };
   return palabras[estado] ?? estado.toLowerCase().replace('_', ' ');
 }

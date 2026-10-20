@@ -3,22 +3,14 @@
  * Módulo: Cuadro de Colores
  * Feature: Ventanas de carga
  * Archivo: reglas-ventana.spec.ts
- * Responsabilidad: Verificar qué se rechaza, qué se advierte y qué se deja pasar.
+ * Responsabilidad: Verificar qué se rechaza y qué se deja pasar de la propia ventana.
  * Desarrollador: Jose Sosa
  * Fecha: 2026-08-05
  */
 
-import {
-  RolDepartamental,
-  TipoVentana,
-  type VentanaCarga,
-} from '@prisma/client';
+import { RolDepartamental, TipoVentana } from '@prisma/client';
 
-import {
-  advertenciasDe,
-  motivoDeRechazo,
-  type VentanaPropuesta,
-} from './reglas-ventana';
+import { motivoDeRechazo, type VentanaPropuesta } from './reglas-ventana';
 
 const propuesta = (
   parcial: Partial<VentanaPropuesta> = {},
@@ -33,21 +25,6 @@ const propuesta = (
   activo: true,
   ...parcial,
 });
-
-const guardada = (parcial: Partial<VentanaCarga>): VentanaCarga =>
-  ({
-    id: 1,
-    rol: RolDepartamental.DMIP_OPERATIVOS,
-    tipo: TipoVentana.DIARIO,
-    diaApertura: null,
-    horaApertura: null,
-    diaCierre: null,
-    horaCierre: '15:00',
-    zonaHoraria: 'America/Guayaquil',
-    mensajeCierre: 'x',
-    activo: true,
-    ...parcial,
-  }) as VentanaCarga;
 
 describe('motivoDeRechazo', () => {
   it('admite la ventana departamental sembrada', () => {
@@ -114,21 +91,52 @@ describe('motivoDeRechazo', () => {
       ).toContain('DIARIO');
     });
 
-    it('rechaza una ventana activa sin apertura ni cierre', () => {
+    // 2026-10-07: una ventana que restringe necesita su cierre; para no restringir, SIN_RESTRICCION.
+    it('rechaza una ventana sin hora de cierre', () => {
       expect(
         motivoDeRechazo(propuesta({ horaApertura: null, horaCierre: null })),
-      ).toContain('desactívela');
+      ).toBe('Indique la hora de cierre.');
     });
 
-    it('admite la ventana desactivada sin horas: es el caso de Dirección', () => {
+    it('también una LABORABLE sin cierre', () => {
+      expect(
+        motivoDeRechazo(
+          propuesta({ tipo: TipoVentana.LABORABLE, horaCierre: null }),
+        ),
+      ).toBe('Indique la hora de cierre.');
+    });
+
+    it('admite «sin restricción» sin horas ni mensaje: es el caso de Dirección', () => {
       expect(
         motivoDeRechazo(
           propuesta({
             rol: RolDepartamental.DIRECTOR,
+            tipo: TipoVentana.SIN_RESTRICCION,
             horaApertura: null,
             horaCierre: null,
+            mensajeCierre: '',
             activo: false,
           }),
+        ),
+      ).toBeUndefined();
+    });
+
+    it.each([
+      ['16:30', '16:30'],
+      ['17:00', '16:30'],
+    ])(
+      'rechaza apertura %s con cierre %s: el cierre va después',
+      (horaApertura, horaCierre) => {
+        expect(motivoDeRechazo(propuesta({ horaApertura, horaCierre }))).toBe(
+          'La hora de cierre debe ser posterior a la de apertura.',
+        );
+      },
+    );
+
+    it('admite apertura antes del cierre', () => {
+      expect(
+        motivoDeRechazo(
+          propuesta({ horaApertura: '07:00', horaCierre: '16:30' }),
         ),
       ).toBeUndefined();
     });
@@ -138,111 +146,5 @@ describe('motivoDeRechazo', () => {
         'mensaje',
       );
     });
-  });
-});
-
-describe('advertenciasDe', () => {
-  const departamentales = [
-    guardada({ rol: RolDepartamental.DMIP_OPERATIVOS, horaCierre: '15:00' }),
-    guardada({
-      id: 2,
-      rol: RolDepartamental.DMIP_INSPECCIONES,
-      horaCierre: '15:00',
-    }),
-  ];
-
-  it('no advierte nada cuando todo encaja', () => {
-    const advertencias = advertenciasDe(
-      propuesta({
-        rol: RolDepartamental.DAF,
-        horaApertura: '15:00',
-        horaCierre: '16:30',
-      }),
-      {
-        otras: departamentales,
-        limiteCuadro: '16:30',
-      },
-    );
-    expect(advertencias).toEqual([]);
-  });
-
-  it('RN-56 · avisa si Transportes abre antes de que cierre la departamental', () => {
-    const advertencias = advertenciasDe(
-      propuesta({
-        rol: RolDepartamental.DAF,
-        horaApertura: '14:00',
-        horaCierre: '16:30',
-      }),
-      { otras: departamentales, limiteCuadro: '16:30' },
-    );
-
-    expect(advertencias).toHaveLength(1);
-    expect(advertencias[0]).toContain('RN-56');
-    expect(advertencias[0]).toContain('14H00');
-    expect(advertencias[0]).toContain('15H00');
-  });
-
-  it('RN-57 · avisa si Transportes cierra después de la hora límite del cuadro', () => {
-    const advertencias = advertenciasDe(
-      propuesta({
-        rol: RolDepartamental.DAF,
-        horaApertura: '15:00',
-        horaCierre: '18:00',
-      }),
-      { otras: departamentales, limiteCuadro: '16:30' },
-    );
-
-    expect(advertencias[0]).toContain('RN-57');
-    expect(advertencias[0]).toContain('16H30');
-  });
-
-  /**
-   * AQUÍ SE COMPARABA LA VENTANA CON `HORA_CIERRE_DEPARTAMENTAL`, Y ESE PARÁMETRO SE
-   * RETIRÓ EL 2026-08-25.
-   *
-   * El dato estaba dos veces —en la fila de la ventana y en el parámetro de política— y
-   * solo una de las dos gobernaba: `VentanaCargaGuard` lee `t_ventana_carga` y ninguna
-   * otra cosa. Quien movía la hora tenía que acordarse de moverla también en los
-   * parámetros, y el sistema solo podía pedírselo por favor.
-   *
-   * Esta prueba fija que ya no se lo pide, y **caería si alguien reintrodujera** una
-   * segunda fuente para la hora de cierre: mover el cierre de un departamento no
-   * contradice nada, porque no hay nada con qué contradecirlo.
-   */
-  it('la hora de cierre departamental no se contrasta con ningún parámetro', () => {
-    const advertencias = advertenciasDe(propuesta({ horaCierre: '14:00' }), {
-      otras: [],
-      limiteCuadro: '16:30',
-    });
-
-    expect(advertencias).toEqual([]);
-  });
-
-  it('desactivar una ventana se advierte siempre: deja el rol sin horario', () => {
-    const advertencias = advertenciasDe(propuesta({ activo: false }), {
-      otras: departamentales,
-    });
-
-    expect(advertencias).toHaveLength(1);
-    expect(advertencias[0]).toContain('cualquier hora');
-  });
-
-  it('sin los parámetros configurados, advierte lo que puede y no falla', () => {
-    expect(
-      advertenciasDe(
-        propuesta({ rol: RolDepartamental.DAF, horaApertura: '15:00' }),
-        { otras: departamentales },
-      ),
-    ).toEqual([]);
-  });
-
-  it('ignora las ventanas departamentales desactivadas al comparar', () => {
-    const advertencias = advertenciasDe(
-      propuesta({ rol: RolDepartamental.DAF, horaApertura: '14:00' }),
-      {
-        otras: [guardada({ horaCierre: '15:00', activo: false })],
-      },
-    );
-    expect(advertencias).toEqual([]);
   });
 });

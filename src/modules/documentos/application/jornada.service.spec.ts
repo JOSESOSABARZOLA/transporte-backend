@@ -696,3 +696,98 @@ describe('JornadaService · propios medios (NO_APLICA)', () => {
     expect(fila?.placa).toBe('No se activa');
   });
 });
+
+/*
+  NOTAS EN LA JORNADA (2026-10-19, plan «notas-jornada-matriz»). Cada fila trae `notas` con el
+  autor y la tarjeta COMPARTIDA. Y RN-48 (J3): si el anfitrión es de un formulario que este rol NO
+  ve, la COMPARTIDA no lo nombra ni enlaza.
+*/
+describe('JornadaService · notas de la celda Observaciones', () => {
+  const PMO = formulario(2, 'PMO', [
+    { rol: RolDepartamental.DMIP_OPERATIVOS, acceso: 'ESCRITURA' },
+  ]);
+  const AJENO = formulario(5, 'PATRULLA ECU DIURNA (UIG - UIT)', [
+    { rol: RolDepartamental.DMIP_INSPECCIONES, acceso: 'ESCRITURA' },
+  ]);
+
+  const conNotas = (
+    id: number,
+    formularioId: number,
+    compartirCon: { id: number; identificador: string } | null,
+  ): OperativoDeJornada =>
+    ({
+      ...operativo(id, formularioId),
+      creadoPor: 14,
+      creadoPorRol: RolDepartamental.DMIP_OPERATIVOS,
+      creadoEn: new Date('2026-08-26T13:00:00.000Z'),
+      compartirCon,
+      compartirSolicitadoPor: 14,
+      compartirSolicitadoEn: new Date('2026-08-26T13:41:00.000Z'),
+      observaciones: [
+        {
+          id: id * 10,
+          texto: 'Pruebas tecnicas 3',
+          creadoPor: 14,
+          creadoPorRol: RolDepartamental.DMIP_OPERATIVOS,
+          creadoEn: new Date('2026-08-26T13:40:00.000Z'),
+        },
+      ],
+      autores: { 14: 'De La Guerra Portugal Lider Franklin' },
+    }) as unknown as OperativoDeJornada;
+
+  const filasDe = async (operativos: OperativoDeJornada[]) => {
+    const { servicio } = armar({ formularios: [PMO, AJENO], operativos });
+    const respuesta = aJornadaResponse(
+      await servicio.componer(JORNADA, [RolDepartamental.DMIP_OPERATIVOS]),
+    );
+    return respuesta.secciones.flatMap((seccion) => seccion.filas);
+  };
+
+  it('la fila trae la NOTA con su autor y la COMPARTIDA hacia un operativo visible, la más reciente primero', async () => {
+    const filas = await filasDe([
+      conNotas(1, 2, null),
+      conNotas(2, 2, { id: 1, identificador: 'OP-001' }),
+    ]);
+    const segunda = filas.find((fila) => fila.id === 2);
+
+    expect(segunda?.notas).toEqual([
+      {
+        id: 'compartida-2',
+        tipo: 'COMPARTIDA',
+        texto: 'Comparte con OP-001',
+        autor: 'De La Guerra Portugal Lider Franklin',
+        fecha: '2026-08-26T13:41:00.000Z',
+        operativoRelacionadoId: 1,
+      },
+      {
+        id: 'nota-20',
+        tipo: 'NOTA',
+        texto: 'Pruebas tecnicas 3',
+        autor: 'De La Guerra Portugal Lider Franklin',
+        fecha: '2026-08-26T13:40:00.000Z',
+        operativoRelacionadoId: null,
+      },
+    ]);
+    // `observaciones` sigue igual: los textos de la bitácora, sin la compartida.
+    expect(segunda?.observaciones).toEqual(['Pruebas tecnicas 3']);
+  });
+
+  it('RN-48: si el anfitrión es de un formulario que el rol no ve, la COMPARTIDA no lo nombra', async () => {
+    const filas = await filasDe([
+      conNotas(3, 2, { id: 9, identificador: 'IGECU-001' }),
+      conNotas(9, 5, null),
+    ]);
+    const visible = filas.find((fila) => fila.id === 3);
+
+    // El formulario 5 no aparece para DMIP_OPERATIVOS.
+    expect(filas.some((fila) => fila.id === 9)).toBe(false);
+    const compartida = visible?.notas.find(
+      (nota) => nota.tipo === 'COMPARTIDA',
+    );
+    expect(compartida?.texto).toBe(
+      'Comparte unidad con un operativo de otro formulario',
+    );
+    expect(compartida?.operativoRelacionadoId).toBeNull();
+    expect(JSON.stringify(visible?.notas)).not.toContain('IGECU-001');
+  });
+});

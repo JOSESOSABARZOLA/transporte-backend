@@ -26,7 +26,6 @@ import {
   ValidacionError,
 } from '../../../common/errors/errores-dominio';
 import type { VentanasRepository } from '../infrastructure/ventanas.repository';
-import type { ParametroPoliticaService } from './parametro-politica.service';
 import { VentanaCargaService } from './ventana-carga.service';
 
 const CLIENTE = { marca: 'transaccion' };
@@ -119,11 +118,6 @@ const armar = (filas: VentanaCarga[] = SEMBRADAS) => {
           })),
     );
 
-  const obtenerTexto = jest.fn().mockImplementation((clave: string) => {
-    if (clave === 'HORA_LIMITE_CUADRO') return Promise.resolve('16:30');
-    return Promise.reject(new Error('no configurado'));
-  });
-
   const servicio = new VentanaCargaService(
     {
       listar,
@@ -132,7 +126,6 @@ const armar = (filas: VentanaCarga[] = SEMBRADAS) => {
       ejecutarEnTransaccion,
     } as unknown as VentanasRepository,
     new VentanaCargaEvaluador(),
-    { obtenerTexto } as unknown as ParametroPoliticaService,
     { registrar, compararCambios } as unknown as AuditoriaService,
   );
 
@@ -333,42 +326,91 @@ describe('VentanaCargaService · administración', () => {
     expect(resultado.ventana.horaCierre).toBe('15:00');
   });
 
-  it('devuelve la advertencia de RN-56 sin impedir el cambio', async () => {
-    const { servicio, actualizar } = armar();
-
-    const resultado = await servicio.actualizar(
-      RolDepartamental.DAF,
-      { horaApertura: '14:00' },
-      6,
+  /*
+    PARAMETRIZACIÓN INDEPENDIENTE (2026-10-08). La pantalla solo parametriza; la coherencia entre
+    ventanas la aplica el sistema en ejecución. Al guardar no se lee ninguna otra ventana —`listar`
+    no se llama— ni `HORA_LIMITE_CUADRO`, y la respuesta ya no trae advertencias.
+  */
+  it('guarda DMIP con cierre 12:55 aunque la DAF abra a las 11:44, sin mirar otras ventanas', async () => {
+    const dafTemprana = SEMBRADAS.map((fila) =>
+      fila.rol === RolDepartamental.DAF
+        ? { ...fila, horaApertura: '11:44', horaCierre: '11:50' }
+        : fila,
     );
-
-    expect(actualizar).toHaveBeenCalled();
-    expect(resultado.ventana.horaApertura).toBe('14:00');
-    expect(resultado.advertencias[0]).toContain('RN-56');
-  });
-
-  /**
-   * `HORA_CIERRE_DEPARTAMENTAL` se retiró el 2026-08-25: la hora de cierre vive solo en
-   * `t_ventana_carga`. Antes, mover el cierre de un departamento devolvía un aviso
-   * pidiendo que se cambiara también el parámetro; ahora se guarda y ya está.
-   */
-  it('mover el cierre de un departamento no arrastra ningún parámetro', async () => {
-    const { servicio, actualizar } = armar();
+    const { servicio, actualizar, listar } = armar(dafTemprana);
 
     const resultado = await servicio.actualizar(
       RolDepartamental.DMIP_OPERATIVOS,
-      { horaCierre: '14:00' },
+      { horaCierre: '12:55' },
       6,
     );
 
     expect(actualizar).toHaveBeenCalled();
-    expect(resultado.advertencias).toEqual([]);
+    expect(resultado.ventana.horaCierre).toBe('12:55');
+    expect(resultado).toEqual({ ventana: resultado.ventana });
+    expect(listar).not.toHaveBeenCalled();
   });
 
-  it('un parámetro sin configurar no impide guardar la ventana', async () => {
+  it.each([
+    ['abre antes de que cierre el registro', '11:44', '11:50'],
+    ['abre después del cierre del registro', '15:30', '16:30'],
+    ['cierra después de la hora límite del cuadro', '15:00', '20:00'],
+  ])(
+    'guarda la DAF con cualquier horario válido (%s)',
+    async (_caso, horaApertura, horaCierre) => {
+      const { servicio, actualizar, listar } = armar();
+
+      const resultado = await servicio.actualizar(
+        RolDepartamental.DAF,
+        { horaApertura, horaCierre },
+        6,
+      );
+
+      expect(actualizar).toHaveBeenCalled();
+      expect(resultado.ventana.horaApertura).toBe(horaApertura);
+      expect(resultado.ventana.horaCierre).toBe(horaCierre);
+      expect(listar).not.toHaveBeenCalled();
+    },
+  );
+
+  it('mover el cierre de un departamento más allá de la apertura de la DAF también se guarda', async () => {
+    const { servicio, actualizar } = armar();
+
+    await servicio.actualizar(
+      RolDepartamental.DMIP_OPERATIVOS,
+      { horaCierre: '16:00' },
+      6,
+    );
+
+    expect(actualizar).toHaveBeenCalled();
+  });
+
+  it('estado · el horario sale de las horas reales y el texto libre va como nota', async () => {
+    const conTextoViejo = SEMBRADAS.map((fila) =>
+      fila.rol === RolDepartamental.DAF
+        ? { ...fila, mensajeCierre: 'Texto viejo: va de 09H00 a 10H00.' }
+        : fila,
+    );
+    const { servicio } = armar(conTextoViejo);
+
+    const estado = await servicio.obtenerEstado(
+      RolDepartamental.DAF,
+      A_LAS('14:00'),
+    );
+    expect(estado.abierta).toBe(false);
+    expect(estado.horarioTexto).toBe(
+      'La ventana de asignación de transporte abre a las 15H00, cuando cierra el registro de operativos, y cierra a las 16H30.',
+    );
+    expect(estado.motivoApertura).toBe(
+      'cuando cierra el registro de operativos',
+    );
+    expect(estado.mensaje).toBe(estado.horarioTexto);
+    expect(estado.mensaje).not.toContain('09H00');
+    expect(estado.notaAdministrador).toBe('Texto viejo: va de 09H00 a 10H00.');
+  });
+
+  it('cambiar solo el mensaje se guarda tal cual', async () => {
     const { servicio } = armar();
-    // `obtenerTexto` rechaza para cualquier clave distinta de las dos conocidas; el
-    // servicio debe seguir adelante con una advertencia menos, no fallar.
     const resultado = await servicio.actualizar(
       RolDepartamental.DMIT_INSTRUCTOR,
       {
@@ -383,8 +425,8 @@ describe('VentanaCargaService · administración', () => {
     );
   });
 
-  it('desactivar la ventana lo advierte de forma explícita', async () => {
-    const { servicio } = armar();
+  it('desactivar la ventana se guarda sin advertencias', async () => {
+    const { servicio, actualizar } = armar();
 
     const resultado = await servicio.actualizar(
       RolDepartamental.DMIP_INSPECCIONES,
@@ -392,6 +434,98 @@ describe('VentanaCargaService · administración', () => {
       6,
     );
 
-    expect(resultado.advertencias[0]).toContain('cualquier hora');
+    expect(actualizar).toHaveBeenCalled();
+    expect(resultado).not.toHaveProperty('advertencias');
+  });
+});
+
+/** 2026-10-07: el tipo manda y `activo` se deriva; el estado resuelve los marcadores. */
+describe('VentanaCargaService · tipos y marcadores (2026-10-07)', () => {
+  it('«sin restricción» escribe el tipo y deja la ventana inactiva', async () => {
+    const { servicio, actualizar } = armar();
+
+    await servicio.actualizar(
+      RolDepartamental.DMIP_OPERATIVOS,
+      { tipo: TipoVentana.SIN_RESTRICCION },
+      6,
+    );
+
+    expect(actualizar).toHaveBeenCalledWith(
+      RolDepartamental.DMIP_OPERATIVOS,
+      expect.objectContaining({
+        tipo: TipoVentana.SIN_RESTRICCION,
+        activo: false,
+      }),
+      CLIENTE,
+    );
+  });
+
+  it('volver a DIARIO la deja activa', async () => {
+    const { servicio, actualizar } = armar([
+      ventana({
+        tipo: TipoVentana.SIN_RESTRICCION,
+        activo: false,
+        horaCierre: '15:00',
+      }),
+    ]);
+
+    await servicio.actualizar(
+      RolDepartamental.DMIP_OPERATIVOS,
+      { tipo: TipoVentana.DIARIO },
+      6,
+    );
+
+    expect(actualizar).toHaveBeenCalledWith(
+      RolDepartamental.DMIP_OPERATIVOS,
+      expect.objectContaining({ tipo: TipoVentana.DIARIO, activo: true }),
+      CLIENTE,
+    );
+  });
+
+  it('rechaza un cierre que no es posterior a la apertura, sin tocar la base', async () => {
+    const { servicio, actualizar } = armar();
+
+    await expect(
+      servicio.actualizar(
+        RolDepartamental.DMIP_OPERATIVOS,
+        { horaApertura: '16:00' },
+        6,
+      ),
+    ).rejects.toThrow('La hora de cierre debe ser posterior a la de apertura.');
+    expect(actualizar).not.toHaveBeenCalled();
+  });
+
+  it('con la ventana cerrada, el estado muestra el mensaje con {cierre} resuelto', async () => {
+    const { servicio } = armar([
+      ventana({
+        horaCierre: '15:00',
+        mensajeCierre: 'Cerró a las {cierre}. Vuelve mañana.',
+      }),
+    ]);
+
+    const estado = await servicio.obtenerEstado(
+      RolDepartamental.DMIP_OPERATIVOS,
+      A_LAS('16:00'),
+    );
+
+    expect(estado.abierta).toBe(false);
+    expect(estado.mensaje).toBe('Cerró a las 15H00. Vuelve mañana.');
+  });
+
+  it('si el mensaje dice una hora que no es, el funcionario lee la hora real', async () => {
+    const { servicio } = armar([
+      ventana({
+        horaCierre: '15:00',
+        mensajeCierre: 'Cerró a las 18H25. Vuelve mañana.',
+      }),
+    ]);
+
+    const estado = await servicio.obtenerEstado(
+      RolDepartamental.DMIP_OPERATIVOS,
+      A_LAS('16:00'),
+    );
+
+    expect(estado.mensaje).toContain('15H00');
+    expect(estado.mensaje).not.toContain('18H25');
   });
 });

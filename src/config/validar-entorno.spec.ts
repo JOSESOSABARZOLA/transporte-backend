@@ -8,7 +8,7 @@
  * Fecha: 2026-09-17
  */
 
-import type { AppConfig } from './app.config';
+import { aSaltosProxy, type AppConfig } from './app.config';
 import { validarEntorno } from './validar-entorno';
 
 /** Un entorno completo y válido; cada prueba estropea lo justo que quiere comprobar. */
@@ -32,6 +32,7 @@ const configBase = (parcial: Partial<AppConfig> = {}): AppConfig => ({
     cookie: { nombre: 'cuadro_colores_sesion', segura: false, sameSite: 'lax' },
   },
   limitePeticiones: { ventanaMs: 60000, maximo: 300, maximoIngreso: 10 },
+  saltosProxy: null,
   ...parcial,
 });
 
@@ -113,7 +114,7 @@ describe('validarEntorno · producción endurece', () => {
   });
 
   it('en producción, la cookie sin Secure es un error', () => {
-    process.env.CORS_ORIGINS = 'http://172.20.136.127:5180';
+    process.env.CORS_ORIGINS = 'https://gestion.example';
     const base = configBase({ produccion: true });
 
     const { errores } = validarEntorno({
@@ -128,7 +129,7 @@ describe('validarEntorno · producción endurece', () => {
   });
 
   it('en producción bien configurada, no hay errores', () => {
-    process.env.CORS_ORIGINS = 'http://172.20.136.127:5180';
+    process.env.CORS_ORIGINS = 'https://gestion.example';
     const base = configBase({ produccion: true });
 
     const { errores } = validarEntorno({
@@ -139,6 +140,35 @@ describe('validarEntorno · producción endurece', () => {
       },
     });
 
+    expect(errores).toEqual([]);
+  });
+});
+
+describe('TRUST_PROXY · saltos de proxy de confianza', () => {
+  it('vacía o ausente no toca nada (el servidor sin Gateway)', () => {
+    expect(aSaltosProxy(undefined)).toBeNull();
+    expect(aSaltosProxy('')).toBeNull();
+    expect(aSaltosProxy('   ')).toBeNull();
+  });
+
+  it('un entero es el número de saltos', () => {
+    expect(aSaltosProxy('2')).toBe(2);
+    expect(aSaltosProxy(' 1 ')).toBe(1);
+    expect(aSaltosProxy('0')).toBe(0);
+  });
+
+  it('«true», una lista de IP o un negativo no son saltos: detienen el arranque', () => {
+    for (const malo of ['true', '1.2.3.4', '-1', '2.5', 'dos']) {
+      const saltosProxy = aSaltosProxy(malo);
+      expect(Number.isNaN(saltosProxy)).toBe(true);
+
+      const { errores } = validarEntorno(configBase({ saltosProxy }));
+      expect(errores.some((e) => e.includes('TRUST_PROXY'))).toBe(true);
+    }
+  });
+
+  it('un valor válido no produce errores', () => {
+    const { errores } = validarEntorno(configBase({ saltosProxy: 2 }));
     expect(errores).toEqual([]);
   });
 });

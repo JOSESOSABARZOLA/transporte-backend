@@ -30,9 +30,17 @@
 import { Injectable } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 
+import { autoresPorIds } from '../../../common/notas/autores';
+import {
+  firmantesDeNotas,
+  type MapaDeAutores,
+} from '../../../common/notas/notas-operativo';
 import { PrismaService } from '../../../prisma/prisma.service';
 
-/** Operativo con lo que la jornada muestra en pantalla. */
+/**
+ * Operativo con lo que la jornada muestra en pantalla. `autores` (2026-10-19): el nombre de quien
+ * firma cada nota, resuelto en UNA consulta por listado (`autoresPorIds`).
+ */
 export type OperativoDeJornada = Prisma.OperativoGetPayload<{
   include: {
     formulario: true;
@@ -46,8 +54,9 @@ export type OperativoDeJornada = Prisma.OperativoGetPayload<{
     conductor: true;
     vehiculo: true;
     origen: { select: { identificador: true } };
+    compartirCon: { select: { id: true; identificador: true } };
   };
-}>;
+}> & { autores?: MapaDeAutores };
 
 /**
  * Formulario con sus roles y sus áreas. **Ninguna de las dos es decorativa aquí.**
@@ -89,6 +98,8 @@ const RELACIONES = {
   vehiculo: true,
   /** Solo el identificador: el operativo del que nace ya tiene su fila en la sección. */
   origen: { select: { identificador: true } },
+  /** La tarjeta COMPARTIDA de las notas (2026-10-19, plan «notas-jornada-matriz»). */
+  compartirCon: { select: { id: true, identificador: true } },
 } satisfies Prisma.OperativoInclude;
 
 @Injectable()
@@ -117,7 +128,7 @@ export class JornadaRepository {
    * `@Roles` del controlador.
    */
   async listarOperativos(fecha: Date): Promise<OperativoDeJornada[]> {
-    return this.prisma.operativo.findMany({
+    const operativos = await this.prisma.operativo.findMany({
       where: { activo: true, cuadro: { fecha } },
       include: RELACIONES,
       /** Lo planificado primero y los adicionales detrás, como en el documento firmado. */
@@ -127,5 +138,12 @@ export class JornadaRepository {
         { secuencial: 'asc' },
       ],
     });
+
+    // Quién firma cada nota (2026-10-19): UNA consulta para el día entero, nunca por fila.
+    const autores = await autoresPorIds(
+      this.prisma,
+      firmantesDeNotas(operativos),
+    );
+    return operativos.map((operativo) => ({ ...operativo, autores }));
   }
 }

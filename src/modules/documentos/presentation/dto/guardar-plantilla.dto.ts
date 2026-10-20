@@ -8,7 +8,7 @@
  * Fecha: 2026-09-15
  */
 
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
@@ -45,6 +45,19 @@ export class DatosGeneralesDto {
   @IsOptional() @IsString() @MaxLength(200) firmante?: string;
   @IsOptional() @IsString() @MaxLength(200) firmanteCargo?: string;
   @IsOptional() @IsString() @MaxLength(200) firmanteDependencia?: string;
+  /**
+   * TABLA DE CONTROL del final de cada orden (2026-10-08): «<accion>: <elaboradoPor>» y las siglas
+   * de la unidad. La fecha se completa sola (la de emisión). Las siglas se guardan en mayúsculas.
+   */
+  @IsOptional() @IsString() @MaxLength(60) accion?: string;
+  @IsOptional() @IsString() @MaxLength(200) elaboradoPor?: string;
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim().toUpperCase() : value,
+  )
+  @IsString()
+  @MaxLength(20)
+  siglasUnidad?: string;
 }
 
 export class GuardarPlantillaDto {

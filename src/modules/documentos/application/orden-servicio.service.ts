@@ -131,6 +131,25 @@ export interface DatosGenerales {
   firmante: string;
   firmanteCargo: string;
   firmanteDependencia: string;
+  /**
+   * TABLA DE CONTROL del final del documento (2026-10-08): «<accion>: <elaboradoPor>», las siglas de
+   * la unidad y la fecha de emisión (esta se calcula). Antes «elaborado por» era de la config del
+   * DÍA y las siglas un parámetro global; ahora cada Director las fija en su plantilla.
+   */
+  accion: string;
+  elaboradoPor: string;
+  /** En mayúsculas, máx. 20 (lo normaliza `aDatosGenerales`). */
+  siglasUnidad: string;
+}
+
+/** La acción de la tabla de control cuando la plantilla no dice otra. */
+const ACCION_POR_DEFECTO = 'Elaborado por';
+
+/** Las siglas de la unidad se imprimen en mayúsculas y no pasan de 20 caracteres. */
+const MAX_SIGLAS_UNIDAD = 20;
+
+function aSiglas(valor: string): string {
+  return valor.trim().toUpperCase().slice(0, MAX_SIGLAS_UNIDAD);
 }
 
 /**
@@ -146,6 +165,9 @@ const DATOS_GENERALES_VACIOS: DatosGenerales = {
   firmante: '',
   firmanteCargo: '',
   firmanteDependencia: '',
+  accion: ACCION_POR_DEFECTO,
+  elaboradoPor: '',
+  siglasUnidad: '',
 };
 
 /**
@@ -170,46 +192,45 @@ function aDatosGenerales(valor: unknown): DatosGenerales {
     firmante: texto('firmante'),
     firmanteCargo: texto('firmanteCargo'),
     firmanteDependencia: texto('firmanteDependencia'),
+    accion: texto('accion').trim() || ACCION_POR_DEFECTO,
+    elaboradoPor: texto('elaboradoPor'),
+    siglasUnidad: aSiglas(texto('siglasUnidad')),
   };
 }
 
 /**
- * Config del memorando POR CUADRO (D13, 2026-10-02): el NUT y quién elabora son del DÍA, no de cada
- * orden. El número de memorando se movió a los datos generales de la plantilla. Vacío = sin
- * configurar (faltante si la plantilla lo usa).
+ * ¿Los datos generales guardados son ANTERIORES a la tabla de control (2026-10-08)? Se reconoce por
+ * la ausencia de la clave `accion`: la migración 20261008120000 la puso en todas las plantillas, así
+ * que solo una versión vieja —con la que se emitió una orden antes del cambio— no la tiene.
+ */
+function esTablaControlLegada(valor: unknown): boolean {
+  return (
+    valor === null ||
+    typeof valor !== 'object' ||
+    !Object.prototype.hasOwnProperty.call(valor, 'accion')
+  );
+}
+
+/**
+ * Config del memorando POR CUADRO (D13, 2026-10-02). SOLO RESPALDO desde el 2026-10-08: el NUT ya no
+ * se imprime y «elaborado por» pasó a la plantilla del Director. Se sigue leyendo para las órdenes
+ * resueltas con una versión de plantilla ANTERIOR (`tablaControlLegada`), que lo tomaban de aquí.
+ * Ya no se edita: el endpoint de la config del día se retiró.
  */
 interface ConfigCuadro {
-  nut: string;
   elaboradoPor: string;
 }
 
-/** La config del cuadro vacía: lo que ve una jornada aún sin configurar (todo faltante). */
+/** La config del cuadro vacía: una jornada sin configurar. */
 const CONFIG_CUADRO_VACIA: ConfigCuadro = {
-  nut: '',
   elaboradoPor: '',
 };
 
 /** Normaliza la fila almacenada a `ConfigCuadro`: NULL o espacios en blanco pasan a cadena vacía. */
 function aConfigCuadro(fila: ConfigCuadroFila | null): ConfigCuadro {
   return {
-    nut: fila?.nut?.trim() ?? '',
     elaboradoPor: fila?.elaboradoPor?.trim() ?? '',
   };
-}
-
-/** Un texto para guardar: vacío o solo espacios se persiste como NULL («sin configurar»). */
-function aTextoONull(valor: string | null | undefined): string | null {
-  const limpio = typeof valor === 'string' ? valor.trim() : '';
-  return limpio === '' ? null : limpio;
-}
-
-/**
- * La config del memorando de una jornada tal como viaja por la API (GET/PUT): los tres campos con su
- * valor o `null` si aún no se configuran. Es la forma que ve el editor del cuadro de la Dirección.
- */
-export interface ConfigCuadroOrden {
-  nut: string | null;
-  elaboradoPor: string | null;
 }
 
 /**
@@ -219,7 +240,49 @@ export interface ConfigCuadroOrden {
 function marcador(token: string, valor: string | null): string {
   if (valor !== null && valor.trim() !== '') return valor;
   if (token === 'numeroOrden') return '[N.º se asigna al quedar vigente]';
+  // El cargo sin dato en la ficha se imprime EN BLANCO (2026-10-08): no es faltante ni se marca.
+  if (token === 'cargo') return '';
   return `[${ETIQUETA_TOKEN[token] ?? token}]`;
+}
+
+/**
+ * Los tokens del trámite de Inspección a partir de las asignaciones del día (2026-10-07). Con varios
+ * operativos —p. ej. las copias del 8— se listan los DISTINTOS, unidos por «; ».
+ */
+export function tokensDeTramites(
+  asignaciones: readonly {
+    tramiteInspeccion?: {
+      codigoTramite: string;
+      nroSitra: string | null;
+      predio: string | null;
+      zonal: string | null;
+      materia: string | null;
+    } | null;
+  }[],
+): Pick<
+  FuenteTokens,
+  | 'tramiteCodigo'
+  | 'tramiteSitra'
+  | 'tramitePredio'
+  | 'tramiteZonal'
+  | 'tramiteMateria'
+> {
+  const vistos = new Set<string>();
+  const tramites = asignaciones.flatMap((asignacion) => {
+    const tramite = asignacion.tramiteInspeccion;
+    if (!tramite || vistos.has(tramite.codigoTramite)) return [];
+    vistos.add(tramite.codigoTramite);
+    return [tramite];
+  });
+  const unir = (valores: (string | null)[]): string =>
+    valores.filter((valor): valor is string => !!valor?.trim()).join('; ');
+  return {
+    tramiteCodigo: unir(tramites.map((tramite) => tramite.codigoTramite)),
+    tramiteSitra: unir(tramites.map((tramite) => tramite.nroSitra)),
+    tramitePredio: unir(tramites.map((tramite) => tramite.predio)),
+    tramiteZonal: unir(tramites.map((tramite) => tramite.zonal)),
+    tramiteMateria: unir(tramites.map((tramite) => tramite.materia)),
+  };
 }
 
 /** La copia del firmante (Director) que se congela en la orden al emitir. */
@@ -240,14 +303,15 @@ interface FirmanteCopia {
 export interface EditablesMemorando {
   numeroMemorando?: string;
   numeroOrden?: string;
-  nut?: string;
-  paraCargo?: string;
   paraDependencia?: string;
   direccionResponsable?: string;
   firmanteNombre?: string;
   firmanteCargo?: string;
   firmanteDependencia?: string;
-  elaboradoPor?: string;
+  /**
+   * SOLO LECTURA desde el 2026-10-08: el editor ya no la envía (las siglas viven en la plantilla).
+   * Se conserva para el respaldo de las órdenes guardadas antes del cambio.
+   */
   siglasUnidad?: string;
 }
 
@@ -280,6 +344,8 @@ function apartadosValidos(valor: unknown): valor is Apartado[] {
 export interface PlantillaResuelta {
   apartados: Apartado[];
   datosGenerales: DatosGenerales;
+  /** Versión anterior a la tabla de control (2026-10-08): usa el respaldo. Ver `esTablaControlLegada`. */
+  tablaControlLegada: boolean;
 }
 
 /** La plantilla de un Director en su versión vigente (2026-10-05). */
@@ -312,6 +378,7 @@ function aPlantillaResuelta(
   return {
     apartados: apartadosValidos(apartados) ? apartados : APARTADOS_POR_DEFECTO,
     datosGenerales: aDatosGenerales(datosGenerales),
+    tablaControlLegada: esTablaControlLegada(datosGenerales),
   };
 }
 
@@ -409,22 +476,26 @@ export class OrdenServicioService {
     editables: EditablesMemorando;
     firmante: FirmanteOrden | null;
     config: ConfigOrden;
-    /** Config del DÍA: NUT y quién elabora (D13). */
+    /** Config del DÍA: solo el respaldo de «elaborado por» para versiones anteriores (2026-10-08). */
     configCuadro: ConfigCuadro;
-    /** Datos generales del Director (plantilla): dirección responsable, memorando, fecha, designado. */
-    datosGenerales: DatosGenerales;
+    /** La plantilla (y versión) de la orden: sus datos generales alimentan los tokens «plantilla». */
+    plantilla: PlantillaResuelta;
     fecha: Date;
     numeroAnio: number | null;
     numeroSecuencial: number | null;
   }): FuenteTokens {
-    const { editables, firmante, config, configCuadro, datosGenerales, fecha } =
+    const { editables, firmante, config, configCuadro, plantilla, fecha } =
       entrada;
+    const { datosGenerales, tablaControlLegada } = plantilla;
     const [anio, mes, dia] = fecha.toISOString().slice(0, 10).split('-');
     const texto = (valor?: string): string =>
       valor !== undefined && valor.trim() !== '' ? valor.trim() : '';
     return {
       nombre: entrada.nombre,
-      cargo: texto(editables.paraCargo) || (entrada.cargoFicha?.trim() ?? ''),
+      // El cargo sale SOLO de la ficha de Personal (`func_cargo`), tal como se registró allí
+      // (2026-10-08). Si la ficha no lo tiene, va EN BLANCO: no es faltante ni se teclea por orden.
+      // Un `paraCargo` guardado en órdenes anteriores se conserva en su JSON pero ya no se lee.
+      cargo: entrada.cargoFicha?.trim() ?? '',
       // La dependencia del destinatario SE DERIVA de su dirección (organigrama): no se teclea
       // ni es un editable. La columna `func_direccion` siempre tiene valor, así que nunca falta.
       dependencia: nombreDeDireccion(entrada.direccionFicha),
@@ -437,13 +508,19 @@ export class OrdenServicioService {
       // Dirección responsable, número y fecha del memorando de designación y funcionario designado
       // salen de los DATOS GENERALES de la plantilla (2026-10-02), no de la persona ni de la config.
       direccionResponsable: datosGenerales.direccionResponsable.trim(),
-      siglasUnidad: config.siglasUnidad || texto(editables.siglasUnidad),
+      // TABLA DE CONTROL (2026-10-08): de la plantilla. Una versión ANTERIOR no la tiene y usa el
+      // respaldo de entonces —siglas del parámetro o de la orden, «elaborado por» del día—, para que
+      // la orden ya emitida siga diciendo lo mismo.
+      siglasUnidad: tablaControlLegada
+        ? aSiglas(config.siglasUnidad || texto(editables.siglasUnidad))
+        : datosGenerales.siglasUnidad,
       numeroMemorando: datosGenerales.numeroMemorando.trim(),
       fechaMemorando: fechaMemorandoNatural(datosGenerales.fechaMemorando),
       designado: datosGenerales.designado.trim(),
-      // NUT y «elaborado por» son del CUADRO (del día).
-      nut: configCuadro.nut,
-      elaboradoPor: configCuadro.elaboradoPor,
+      elaboradoPor: tablaControlLegada
+        ? configCuadro.elaboradoPor
+        : datosGenerales.elaboradoPor.trim(),
+      tablaControlLegada,
       // El firmante sale de la COPIA CONGELADA de la orden si la tiene (campo a campo), y si no de
       // los datos generales de la plantilla (2026-10-02). Así una orden ya emitida conserva su
       // firma aunque luego se edite la plantilla, y un borrador toma lo que la plantilla tenga.
@@ -465,7 +542,7 @@ export class OrdenServicioService {
    *
    * A DIFERENCIA DE LA TARJETA CORTA, aquí sí se enumeran los operativos de la persona
    * (sigue siendo solo de ESA persona, RN-51). Lo que el sistema no conoce —número de
-   * memorando, firmante, NUT…— sale resaltado como `[Etiqueta]` para completarse después (D14).
+   * memorando, firmante, quién elabora…— sale resaltado como `[Etiqueta]` para completarse después (D14).
    * MEMORANDO U OFICIO y MOTIVO quedan en blanco (decisión del negocio, 2026-09-15).
    */
   async componerMemorando(
@@ -538,7 +615,7 @@ export class OrdenServicioService {
           firmante: firmanteDeOrden(orden.firmante),
           config,
           configCuadro: aConfigCuadro(configCuadroFila),
-          datosGenerales: plantilla.datosGenerales,
+          plantilla,
           fecha: orden.operativo.cuadro.fecha,
           numeroAnio: orden.numeroAnio,
           numeroSecuencial: orden.numeroSecuencial,
@@ -551,47 +628,15 @@ export class OrdenServicioService {
   }
 
   /**
-   * Completa EL CARGO del destinatario de una orden (E21, origen 'persona'). Es el único dato de la
-   * ficha que falta en la práctica: el nombre y la dependencia se derivan siempre del servidor
-   * (RN-51 / organigrama), así que nunca quedan vacíos. Se guarda como editable `paraCargo` de ESTA
-   * orden —no toca el módulo de Personal (P-07)— y, con el resto de datos completos, promueve el
-   * borrador a Vigente con su número AMC-OS, por la MISMA vía que el editor (`guardarEditables`).
-   * Solo el Director dueño de la orden (2026-10-05).
-   */
-  async completarDatosPersona(
-    codigo: string,
-    cargo: string,
-    usuarioId: number,
-  ): Promise<void> {
-    const orden = await this.repositorio.buscarPorCodigo(codigo);
-
-    if (!orden) {
-      throw new RecursoNoEncontradoError(
-        `No existe una orden de servicio con el código ${codigo}.`,
-        { codigo },
-      );
-    }
-
-    await this.exigirDuenoDeOrden(orden.directorId, usuarioId, codigo);
-
-    // Se MEZCLA sobre los editables ya guardados (no se reemplazan): completar el cargo no debe
-    // borrar lo que la Dirección hubiera completado antes en el editor por-orden.
-    const editables: EditablesMemorando = {
-      ...((orden.editables as EditablesMemorando | null) ?? {}),
-      paraCargo: cargo,
-    };
-
-    await this.guardarEditables(codigo, editables, usuarioId);
-  }
-
-  /**
    * El PDF de la plantilla que se está editando (2026-09-22; genérica desde 2026-10-05).
    *
    * Es la vista previa REAL del editor de plantilla: renderiza el memorando con los apartados y los
    * DATOS GENERALES que la Dirección tiene en pantalla —aún sin guardar— para que vea cómo saldrá.
-   * Es siempre GENÉRICA (D17): los datos DE LA ORDEN (destinatario, NUT, elaborado por, número,
-   * fechas, operativos) van vacíos y se pintan como MARCADOR GRIS de ejemplo (`modoVistaPrevia`). Si
-   * el editor no envía datos generales, se usan los de la plantilla del Director en sesión. NO se firma.
+   * Es siempre GENÉRICA (D17): los datos DE LA ORDEN (destinatario, número, fechas, operativos) van
+   * vacíos y se pintan como MARCADOR GRIS de ejemplo (`modoVistaPrevia`). La tabla de control
+   * (acción, elaborado por, siglas) es de la plantilla y sale con lo que el editor tiene en pantalla
+   * (2026-10-08). Si el editor no envía datos generales, se usan los de la plantilla del Director en
+   * sesión. NO se firma.
    */
   async previsualizarPlantilla(
     apartados: Apartado[],
@@ -607,9 +652,6 @@ export class OrdenServicioService {
       nombre: '',
       cargo: '',
       dependencia: '',
-      nut: '',
-      elaboradoPor: '',
-      siglasUnidad: '',
       numeroOrden: null,
       // La fecha de emisión y «Ciudad, fecha» son DE LA ORDEN (la jornada de cada una): en la vista
       // previa van vacías y salen como marcador gris, nunca con la fecha de hoy (2026-10-05).
@@ -623,9 +665,11 @@ export class OrdenServicioService {
       firmante: datosGenerales.firmante.trim(),
       firmanteCargo: datosGenerales.firmanteCargo.trim(),
       firmanteDependencia: datosGenerales.firmanteDependencia.trim(),
+      elaboradoPor: datosGenerales.elaboradoPor.trim(),
+      siglasUnidad: datosGenerales.siglasUnidad,
     };
     return exportarOrdenMemorando({
-      ...this.componerDatos(apartados, fuente, []),
+      ...this.componerDatos(apartados, fuente, datosGenerales.accion, []),
       modoVistaPrevia: true,
     });
   }
@@ -668,19 +712,23 @@ export class OrdenServicioService {
       ]);
     const plantilla = plantillaDe(plantillas, orden);
 
-    const fuente = this.fuenteDeOrden({
-      nombre: `${orden.funcionario.apellidos} ${orden.funcionario.nombres}`,
-      cargoFicha: orden.funcionario.cargo,
-      direccionFicha: orden.funcionario.direccion,
-      editables: efectivos,
-      firmante: firmanteDeOrden(orden.firmante),
-      config,
-      configCuadro: aConfigCuadro(configCuadroFila),
-      datosGenerales: plantilla.datosGenerales,
-      fecha,
-      numeroAnio: orden.numeroAnio,
-      numeroSecuencial: orden.numeroSecuencial,
-    });
+    const fuente: FuenteTokens = {
+      ...this.fuenteDeOrden({
+        nombre: `${orden.funcionario.apellidos} ${orden.funcionario.nombres}`,
+        cargoFicha: orden.funcionario.cargo,
+        direccionFicha: orden.funcionario.direccion,
+        editables: efectivos,
+        firmante: firmanteDeOrden(orden.firmante),
+        config,
+        configCuadro: aConfigCuadro(configCuadroFila),
+        plantilla,
+        fecha,
+        numeroAnio: orden.numeroAnio,
+        numeroSecuencial: orden.numeroSecuencial,
+      }),
+      // Trámite(s) de Inspección de la persona ese día (2026-10-07), de la copia guardada.
+      ...tokensDeTramites(asignaciones),
+    };
 
     const operativos: OperativoDeOrden[] = asignaciones.map((asignacion) => ({
       identificador: asignacion.operativo.identificador,
@@ -703,6 +751,7 @@ export class OrdenServicioService {
     return this.componerDatos(
       plantilla.apartados,
       fuente,
+      plantilla.datosGenerales.accion,
       operativos,
       orden.funcionario.telefono ?? '',
     );
@@ -717,6 +766,8 @@ export class OrdenServicioService {
   private componerDatos(
     apartados: Apartado[],
     fuente: FuenteTokens,
+    /** Primera columna de la tabla de control: «<accion>: <elaborado por>» (2026-10-08). */
+    accion: string,
     operativos: OperativoDeOrden[],
     telefonoFuncionario = '',
   ): DatosOrdenMemorando {
@@ -752,7 +803,7 @@ export class OrdenServicioService {
       direccionResponsable: valores.direccionResponsable ?? '',
       // RN-34: el teléfono del DESTINATARIO (su propio dato en su orden). Vacío si la ficha no lo tiene.
       telefonoFuncionario,
-      nut: valores.nut ?? '',
+      accion: accion.trim() || ACCION_POR_DEFECTO,
       elaboradoPor: valores.elaboradoPor ?? '',
       siglasUnidad: valores.siglasUnidad ?? '',
       para: {
@@ -813,7 +864,7 @@ export class OrdenServicioService {
         configCuadro:
           configsCuadro.get(orden.operativo.cuadro.fecha.toISOString()) ??
           CONFIG_CUADRO_VACIA,
-        datosGenerales: plantilla.datosGenerales,
+        plantilla,
         fecha: orden.operativo.cuadro.fecha,
         numeroAnio: orden.numeroAnio,
         numeroSecuencial: orden.numeroSecuencial,
@@ -851,67 +902,8 @@ export class OrdenServicioService {
   }
 
   /**
-   * La config del memorando de una jornada (D13): NUT y quién elabora. Son del DÍA y las comparten
-   * todas sus órdenes. `null` en un campo = aún sin configurar. La lee el editor de la Dirección para
-   * precargar el formulario del cuadro.
-   */
-  async obtenerConfigCuadro(fecha: Date): Promise<ConfigCuadroOrden> {
-    const fila = await this.repositorio.obtenerConfigCuadro(fecha);
-    return {
-      nut: fila?.nut ?? null,
-      elaboradoPor: fila?.elaboradoPor ?? null,
-    };
-  }
-
-  /**
-   * Guarda la config del memorando de una jornada y PROMUEVE sus borradores (G, 2026-10-02).
-   *
-   * NUT y «elaborado por» son del DÍA: configurarlos puede completar de una vez los faltantes de
-   * TODAS las órdenes de la jornada. Por eso, en la MISMA transacción del guardado, los borradores
-   * vigentes de ese cuadro que ya no tengan faltantes —cada uno resuelto con SU plantilla y versión—
-   * pasan a VIGENTE con su número AMC-OS (secuencial atómico). Un valor en blanco se guarda como NULL.
-   */
-  async guardarConfigCuadro(
-    fecha: Date,
-    datos: ConfigCuadroOrden,
-  ): Promise<ConfigCuadroOrden> {
-    const limpio: ConfigCuadroFila = {
-      nut: aTextoONull(datos.nut),
-      elaboradoPor: aTextoONull(datos.elaboradoPor),
-    };
-
-    const config = await this.configOrden();
-    const configCuadro = aConfigCuadro(limpio);
-
-    await this.repositorio.ejecutarEnTransaccion(async (cliente) => {
-      await this.repositorio.upsertConfigCuadro(fecha, limpio, cliente);
-
-      const borradores = await this.repositorio.borradoresSinNumeroDeCuadro(
-        fecha,
-        cliente,
-      );
-      const plantillas = await this.plantillasDeOrdenes(borradores, cliente);
-      for (const borrador of borradores) {
-        await this.promoverSiCompleto(
-          borrador,
-          fecha,
-          plantillaDe(plantillas, borrador),
-          config,
-          configCuadro,
-          cliente,
-        );
-      }
-    });
-
-    return {
-      nut: limpio.nut,
-      elaboradoPor: limpio.elaboradoPor,
-    };
-  }
-
-  /**
    * Si al borrador ya no le falta ningún dato obligatorio, lo numera (lo deja VIGENTE) y lo audita.
-   * Mismos faltantes que el resto (D12), con SU plantilla y la config del cuadro recién guardada.
+   * Mismos faltantes que el resto (D12), con SU plantilla (y el respaldo del día si es anterior).
    */
   private async promoverSiCompleto(
     borrador: BorradorDeCuadro,
@@ -929,7 +921,7 @@ export class OrdenServicioService {
       firmante: firmanteDeOrden(borrador.firmante),
       config,
       configCuadro,
-      datosGenerales: plantilla.datosGenerales,
+      plantilla,
       fecha: fechaCuadro,
       numeroAnio: borrador.numeroAnio,
       numeroSecuencial: borrador.numeroSecuencial,
@@ -1039,6 +1031,9 @@ export class OrdenServicioService {
     const dependencia = usuario?.funcionario
       ? nombreDeDireccion(usuario.funcionario.direccion)
       : '';
+    // Tabla de control (2026-10-08): las siglas nacen del parámetro institucional; quién elabora,
+    // vacío (lo fija el Director en su plantilla).
+    const { siglasUnidad } = await this.configOrden();
     return {
       ...DATOS_GENERALES_VACIOS,
       direccionResponsable: DIRECCION_RESPONSABLE_INICIAL,
@@ -1046,6 +1041,7 @@ export class OrdenServicioService {
       firmanteCargo: cargo,
       firmanteDependencia: dependencia,
       designado: firmante && cargo ? `${firmante} (${cargo})` : firmante,
+      siglasUnidad: aSiglas(siglasUnidad),
     };
   }
 
@@ -1169,7 +1165,7 @@ export class OrdenServicioService {
           cliente,
         );
 
-        // Config del cuadro (NUT/elaboradoPor) por fecha: una lectura por jornada distinta.
+        // Config del cuadro por fecha (respaldo de «elaborado por»): una lectura por jornada distinta.
         const configsCuadro = new Map<string, ConfigCuadro>();
         for (const borrador of borradores) {
           const clave = borrador.operativo.cuadro.fecha.toISOString();
@@ -1189,6 +1185,7 @@ export class OrdenServicioService {
         const plantillaNueva: PlantillaResuelta = {
           apartados,
           datosGenerales: limpios,
+          tablaControlLegada: false,
         };
         for (const borrador of borradores) {
           await this.repositorio.actualizarVersionPlantilla(
@@ -1246,6 +1243,7 @@ export class OrdenServicioService {
       version,
       apartados,
       datosGenerales: limpios,
+      tablaControlLegada: false,
     };
   }
 
@@ -1520,7 +1518,7 @@ export class OrdenServicioService {
         firmante: firmanteDeOrden(firmante),
         config,
         configCuadro,
-        datosGenerales: plantilla.datosGenerales,
+        plantilla,
         fecha: operativo.cuadro.fecha,
         numeroAnio: null,
         numeroSecuencial: null,

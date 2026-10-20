@@ -170,3 +170,47 @@ describe('VentanaCargaEvaluador', () => {
     });
   });
 });
+
+/** 2026-10-07: los tipos LABORABLE y SIN_RESTRICCION. */
+describe('VentanaCargaEvaluador · tipos de ventana', () => {
+  const evaluador = new VentanaCargaEvaluador();
+  /** 2026-10-03 es sábado; 2026-10-05, lunes. A las 10H00 de Guayaquil (15H00 UTC). */
+  const SABADO = new Date(Date.UTC(2026, 9, 3, 15, 0));
+  const DOMINGO = new Date(Date.UTC(2026, 9, 4, 15, 0));
+  const LUNES = new Date(Date.UTC(2026, 9, 5, 15, 0));
+
+  it('LABORABLE cierra el sábado y el domingo aunque sea dentro del horario', () => {
+    const laborable = ventana({
+      tipo: TipoVentana.LABORABLE,
+      horaCierre: '16:30',
+    });
+    expect(evaluador.evaluar(laborable, SABADO)).toMatchObject({
+      puedeEscribir: false,
+      finDeSemana: true,
+    });
+    expect(evaluador.evaluar(laborable, DOMINGO).puedeEscribir).toBe(false);
+  });
+
+  it('LABORABLE abre de lunes a viernes como una diaria', () => {
+    const laborable = ventana({
+      tipo: TipoVentana.LABORABLE,
+      horaCierre: '16:30',
+    });
+    expect(evaluador.evaluar(laborable, LUNES).puedeEscribir).toBe(true);
+  });
+
+  it('DIARIO no distingue el fin de semana', () => {
+    expect(
+      evaluador.evaluar(ventana({ horaCierre: '16:30' }), SABADO).puedeEscribir,
+    ).toBe(true);
+  });
+
+  it('SIN_RESTRICCION deja escribir a cualquier hora', () => {
+    expect(
+      evaluador.evaluar(
+        ventana({ tipo: TipoVentana.SIN_RESTRICCION, horaCierre: '08:00' }),
+        A_LAS(20),
+      ).puedeEscribir,
+    ).toBe(true);
+  });
+});

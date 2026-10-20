@@ -33,8 +33,8 @@ import {
   type AsignacionDelDia,
 } from '../infrastructure/elegibilidad.repository';
 import {
-  verificarDescansoConductor,
-  type AntecedentesConductor,
+  verificarRestriccionesDeConduccion,
+  type AntecedentesConduccion,
 } from './politicas/descanso-conductor.policy';
 import {
   verificarDescanso,
@@ -67,6 +67,22 @@ export interface ContextoOperativo {
   /** Al editar, el operativo que se está modificando: no se solapa consigo mismo. */
   operativoId?: number;
 }
+
+/** El bloque de tramos que se pretende asignar a un conductor (lo describe quien pregunta). */
+export interface BloqueDeConduccion {
+  /** Algún operativo del bloque es de un formulario de patrulla. RN-44. */
+  esPatrulla: boolean;
+  /** Algún operativo del bloque es nocturno (`oper_es_nocturno`). RN-25. */
+  esNocturno: boolean;
+  /** Los operativos del bloque: sus propios tramos no cuentan como antecedente. */
+  operativoIds: readonly number[];
+}
+
+/** Lo que devuelve `evaluadorDeConduccion`: los veredictos que impiden; vacío = puede. */
+export type EvaluadorConduccion = (
+  conductorId: number,
+  bloque: BloqueDeConduccion,
+) => VeredictoElegibilidad[];
 
 /**
  * Índice de carga y semáforo de fatiga de una persona (FRMS / ISO 45001). Es ADVISORY: no
@@ -239,75 +255,72 @@ export class ElegibilidadService {
   }
 
   /**
-   * POL-02. Veredicto para un conductor. Lo aplicará M-17 al asignar transporte.
+   * POL-02 sobre la asignación POR TRAMOS (2026-10-14). Reúne POR LOTE los antecedentes de los
+   * conductores para una fecha y devuelve un EVALUADOR: una función que, para un conductor y un
+   * bloque de tramos, dice qué restricciones de descanso lo impiden (RN-44 y RN-25).
+   *
+   * POR QUÉ UNA FUNCIÓN Y NO UN VEREDICTO. La DAF evalúa a todos los conductores contra muchos
+   * bloques (el diálogo de candidatos, el optimizador): pedir un veredicto por par sería un N+1
+   * de cientos de viajes a la base. Aquí se consulta una vez y se decide en memoria. Los
+   * antecedentes quedan DENTRO de la función: quien la recibe solo obtiene veredictos, nunca los
+   * datos con los que se decidió (la frontera del submódulo sigue intacta).
+   *
+   * Un conductor que no está en la lista no tiene antecedentes: no se le impone restricción (su
+   * existencia la valida quien asigna).
    */
-  async verificarConductor(
-    conductorId: number,
-    contexto: ContextoOperativo,
-  ): Promise<VeredictoElegibilidad> {
-    const conductor = await this.repositorio.buscarConductor(conductorId);
-
-    if (!conductor) {
-      throw new RecursoNoEncontradoError(
-        `No existe un conductor con identificador ${conductorId}.`,
-        { conductorId },
-      );
-    }
-
-    const rango = RangoHorario.de(contexto.horaInicio, contexto.horaFin);
-
-    // RN-26 y RN-33: solo hace falta saber si el operativo es pesado, y la noche la
-    // decide la franja configurada, nunca el llamador. Mismo criterio que el personal.
-    const contextoPesado = await this.componerContexto(contexto, rango);
-    const periodo = await this.periodoDeComputo(contexto.fecha);
-
-    const [ausencia, ultimaPatrulla, conducciones, salidas, umbrales] =
+  async evaluadorDeConduccion(
+    conductorIds: number[],
+    fecha: Date,
+  ): Promise<EvaluadorConduccion> {
+    const [diasDescansoPatrulla, topeSalidasPesadas, periodo] =
       await Promise.all([
-        this.repositorio.ausenciaDeConductor(conductorId, contexto.fecha),
-        this.repositorio.ultimaPatrullaDeConductor(conductorId, contexto.fecha),
-        this.repositorio.conduccionesDelDia(
-          conductorId,
-          contexto.fecha,
-          contexto.operativoId,
-        ),
-        this.repositorio.salidasPesadasDeConductor(
-          conductorId,
-          periodo.desde,
-          periodo.hasta,
-          contexto.operativoId,
-        ),
-        this.umbrales(),
+        this.parametros.obtenerEntero('DIAS_DESCANSO_PATRULLA'),
+        this.parametros.obtenerEntero('TOPE_SALIDAS_PESADAS'),
+        this.periodoDeComputo(fecha),
       ]);
+    const desdePatrulla = new Date(
+      fecha.getTime() - diasDescansoPatrulla * MS_POR_DIA,
+    );
+    const [nombres, patrullas, salidas] = await Promise.all([
+      this.repositorio.nombresDeConductores(conductorIds),
+      this.repositorio.patrullasDeConductores(
+        conductorIds,
+        desdePatrulla,
+        fecha,
+      ),
+      this.repositorio.salidasDeConductoresEnPeriodo(
+        conductorIds,
+        periodo.desde,
+        periodo.hasta,
+      ),
+    ]);
 
-    const antecedentes: AntecedentesConductor = {
-      nombre: conductor.nombreCompleto,
-      ausencia: ausencia ?? undefined,
-      ultimaPatrulla,
-      // VAL-21 y VAL-22, incorporadas en M-17.
-      conduccionesDelDia: conducciones.map((conduccion) => ({
-        identificador: conduccion.identificador,
-        rango: RangoHorario.de(conduccion.horaInicio, conduccion.horaFin),
-        horas: conduccion.horas,
-      })),
-      // Las dos del 2026-08-31. `tipoContrato` viaja tal cual: si es nulo, la regla del
-      // contrato no se aplica, y eso es parte de la regla.
-      tipoContrato: conductor.tipoContrato,
-      salidasPesadas: salidas.filter(
-        (salida) => salida.esNocturno || esFinDeSemana(salida.fecha),
-      ).length,
+    const antecedentes = new Map<number, AntecedentesConduccion>();
+    for (const [id, nombre] of nombres) {
+      antecedentes.set(id, {
+        nombre,
+        patrullas: patrullas.filter((p) => p.conductorId === id),
+        salidasPesadas: salidas.filter(
+          (s) =>
+            s.conductorId === id && (s.esNocturno || esFinDeSemana(s.fecha)),
+        ),
+      });
+    }
+    const finDeSemana = esFinDeSemana(fecha);
+
+    return (conductorId, bloque) => {
+      const conductor = antecedentes.get(conductorId);
+      if (!conductor) return [];
+      return verificarRestriccionesDeConduccion(conductor, {
+        fecha,
+        esPatrulla: bloque.esPatrulla,
+        // RN-25: pesado = nocturno (lo decidió la franja al registrar el operativo) o fin de semana.
+        esPesada: bloque.esNocturno || finDeSemana,
+        operativoIds: bloque.operativoIds,
+        diasDescansoPatrulla,
+        topeSalidasPesadas,
+      });
     };
-
-    return verificarDescansoConductor(antecedentes, {
-      fecha: contexto.fecha,
-      esPatrulla: contexto.esPatrulla,
-      diasDescansoPatrulla: umbrales.diasDescansoPatrulla,
-      rango,
-      jornadaMaximaHoras: umbrales.jornadaMaximaHoras,
-      esNocturno: contextoPesado.esNocturno,
-      esFinDeSemana: contextoPesado.esFinDeSemana,
-      topeSalidasPesadas: umbrales.topeSalidasPesadas,
-      ventanaNombramiento: umbrales.ventanaNombramiento,
-    });
   }
 
   /**
@@ -514,6 +527,7 @@ export class ElegibilidadService {
         {
           nombre: `${persona.apellidos} ${persona.nombres}`,
           tipoContrato: persona.tipoContrato,
+          area: persona.area,
           ausencia: ausencias.get(persona.id),
           turnoCobertura: turnos.get(persona.id),
           ultimaPatrulla: patrullas.get(persona.id) ?? null,

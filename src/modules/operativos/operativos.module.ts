@@ -31,15 +31,20 @@ import { ConfiguracionModule } from '../configuracion/configuracion.module';
 import { CuadroDiarioModule } from '../cuadro-diario/cuadro-diario.module';
 import { TalentoOperativoModule } from '../talento-operativo/talento-operativo.module';
 import { CalculadorAlertasService } from './application/calculador-alertas.service';
+import { RegistroCompatibilidadCompartir } from './application/compartir-transporte.puerto';
 import { GeneradorIdentificadorService } from './application/generador-identificador.service';
+import { RegistroHerenciaTransporte } from './application/herencia-transporte.puerto';
 import { OperativosService } from './application/operativos.service';
 import { SolicitudApoyoService } from './application/solicitud-apoyo.service';
+import { TramitesInspeccionService } from './application/tramites-inspeccion.service';
 import { AsignacionPersonalRepository } from './infrastructure/asignacion-personal.repository';
+import { InspeccionTramitesClient } from './infrastructure/inspeccion-tramites.client';
 import { OperativosRepository } from './infrastructure/operativos.repository';
 import { SolicitudApoyoRepository } from './infrastructure/solicitud-apoyo.repository';
 import { AdicionalesController } from './presentation/adicionales.controller';
 import { OperativosController } from './presentation/operativos.controller';
 import { SolicitudesApoyoController } from './presentation/solicitudes-apoyo.controller';
+import { TramitesInspeccionController } from './presentation/tramites-inspeccion.controller';
 
 @Module({
   imports: [ConfiguracionModule, CuadroDiarioModule, TalentoOperativoModule],
@@ -52,17 +57,31 @@ import { SolicitudesApoyoController } from './presentation/solicitudes-apoyo.con
     OperativosController,
     AdicionalesController,
     SolicitudesApoyoController,
+    TramitesInspeccionController,
   ],
   providers: [
     OperativosService,
     GeneradorIdentificadorService,
     CalculadorAlertasService,
     SolicitudApoyoService,
+    TramitesInspeccionService,
+    RegistroHerenciaTransporte,
+    RegistroCompatibilidadCompartir,
+    InspeccionTramitesClient,
     OperativosRepository,
     AsignacionPersonalRepository,
     SolicitudApoyoRepository,
   ],
-  /** Lo consumirán M-15, M-17 y M-19 para asignar personal, transporte y apoyo. */
-  exports: [OperativosService],
+  /**
+   * Lo consumirán M-15, M-17 y M-19 para asignar personal, transporte y apoyo.
+   * `RegistroHerenciaTransporte`: `transporte` inscribe ahí la herencia del adicional (2026-10-14).
+   * `RegistroCompatibilidadCompartir`: y ahí la regla de compartir unidad (2026-10-19).
+   */
+  exports: [
+    OperativosService,
+    SolicitudApoyoService,
+    RegistroHerenciaTransporte,
+    RegistroCompatibilidadCompartir,
+  ],
 })
 export class OperativosModule {}

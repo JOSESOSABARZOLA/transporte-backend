@@ -20,6 +20,7 @@ import type {
   AreaPersonal,
   PoliticaVehiculo,
   RolDepartamental,
+  TipoTransporte,
 } from '@prisma/client';
 
 import type { AccesoFormulario } from '../../application/reglas-formulario';
@@ -74,6 +75,12 @@ export interface FormularioResponseDto {
   /** RN-20, por catálogo. Separadas el 2026-08-11: ver `catalogos-response.dto.ts`. */
   capturaLibrePunto: boolean;
   capturaLibreTipo: boolean;
+  /**
+   * Transporte que el formulario SUGIERE al registrar (2026-10-07). Lo lee P-01 de esta lista
+   * —no de los catálogos— al abrir el formulario y al cambiar de pestaña. Faltaba aquí, y el
+   * registro caía siempre en «Completo» aunque el formulario sugiriera Propios medios.
+   */
+  tipoTransportePorDefecto: TipoTransporte;
   orden: number;
   areas: AreaFormularioDto[];
   acceso: AccesoFormulario;
@@ -102,6 +109,7 @@ export function aFormularioResponse({
     esPatrulla: formulario.esPatrulla,
     capturaLibrePunto: formulario.capturaLibrePunto,
     capturaLibreTipo: formulario.capturaLibreTipo,
+    tipoTransportePorDefecto: formulario.tipoTransporteDefecto,
     orden: formulario.orden,
     areas: areasDe(formulario),
     acceso,

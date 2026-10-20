@@ -23,6 +23,7 @@ import {
 import type { LoggerService } from '../../../common/logger/logger.service';
 import type { FlotaRepository } from '../infrastructure/flota.repository';
 import { MantenimientoVehiculoService } from './mantenimiento-vehiculo.service';
+import type { ParametrosTransporteService } from './parametros-transporte.service';
 
 const VEHICULO = {
   id: 80,
@@ -32,6 +33,7 @@ const VEHICULO = {
 };
 
 const dia = (numero: number) => new Date(Date.UTC(2026, 8, numero));
+const diaIso = (texto: string) => new Date(`${texto}T00:00:00.000Z`);
 
 const parada = (desde: number, hasta: number, id = 1) => ({
   id,
@@ -63,14 +65,31 @@ const armar = (
     );
   const eliminarMantenimiento = jest.fn().mockResolvedValue(undefined);
   const registrar = jest.fn().mockResolvedValue(undefined);
+  const crearTareaTaller = jest.fn().mockResolvedValue({ id: 500 });
+  const actualizarEstadoMantenimiento = jest
+    .fn()
+    .mockImplementation((id: number, estado: string) =>
+      Promise.resolve({ id, estadoMantenimiento: estado }),
+    );
 
   const flota = {
     buscarVehiculo: jest.fn().mockResolvedValue(vehiculo),
     listarMantenimientos: jest.fn().mockResolvedValue([parada(1, 3)]),
     mantenimientosQueSolapan: jest.fn().mockResolvedValue(cruces),
     buscarMantenimiento: jest.fn().mockResolvedValue(existente),
+    tramosDeVehiculoEnRango: jest.fn().mockResolvedValue([
+      {
+        operativoId: 66,
+        identificador: 'OCPMO-001-21-OCT-2026',
+        fecha: diaIso('2026-10-21'),
+        horaInicio: '08:00',
+        horaFin: '16:30',
+      },
+    ]),
     crearMantenimiento,
     eliminarMantenimiento,
+    crearTareaTaller,
+    actualizarEstadoMantenimiento,
     // La transacción se ejecuta de inmediato: lo que se prueba es qué se escribe, no
     // cómo Prisma la abre.
     ejecutarEnTransaccion: jest
@@ -84,12 +103,21 @@ const armar = (
     flota as unknown as FlotaRepository,
     { registrar } as unknown as AuditoriaService,
     { log: jest.fn() } as unknown as LoggerService,
+    {
+      leerOptimizacion: jest.fn().mockResolvedValue({
+        compartirVentanaMin: 30,
+        guardaHoraTarde: '20:00',
+        duracionTareaTallerMin: 60,
+      }),
+    } as unknown as ParametrosTransporteService,
   );
 
   return {
     servicio,
     flota,
     crearMantenimiento,
+    crearTareaTaller,
+    actualizarEstadoMantenimiento,
     eliminarMantenimiento,
     registrar,
   };
@@ -237,5 +265,128 @@ describe('RN-DAF-05 · retirar una parada', () => {
 
     expect(fallo).toBeInstanceOf(RecursoNoEncontradoError);
     expect(eliminarMantenimiento).not.toHaveBeenCalled();
+  });
+});
+
+describe('Fase 5 · la cita con hora genera la TAREA «Llevar a taller»', () => {
+  it('con hora crea la tarea en la misma transacción, con la duración del parámetro', async () => {
+    const { servicio, crearTareaTaller } = armar();
+
+    await servicio.registrar(
+      80,
+      {
+        desde: dia(10),
+        hasta: dia(12),
+        taller: 'AMBACAR',
+        hora: '08:00',
+        zonalTallerId: 7,
+      },
+      4,
+    );
+
+    expect(crearTareaTaller).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mantenimientoId: 99,
+        vehiculoId: 80,
+        fecha: dia(10),
+        horaInicio: '08:00',
+        horaFin: '09:00',
+        cruzaMedianoche: false,
+        zonalDestinoId: 7,
+        descripcion: 'Llevar a taller: AMBACAR (PMA7056)',
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('una cita a las 23:30 cruza la medianoche', async () => {
+    const { servicio, crearTareaTaller } = armar();
+
+    await servicio.registrar(
+      80,
+      { desde: dia(10), hasta: dia(10), hora: '23:30' },
+      4,
+    );
+
+    expect(crearTareaTaller).toHaveBeenCalledWith(
+      expect.objectContaining({
+        horaInicio: '23:30',
+        horaFin: '00:30',
+        cruzaMedianoche: true,
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('sin hora no hay tarea', async () => {
+    const { servicio, crearTareaTaller } = armar();
+
+    await servicio.registrar(80, { desde: dia(10), hasta: dia(12) }, 4);
+
+    expect(crearTareaTaller).not.toHaveBeenCalled();
+  });
+});
+
+describe('Fase 5 · estado de la cita', () => {
+  it('PROGRAMADO → EN_TALLER se guarda y se audita', async () => {
+    const { servicio, actualizarEstadoMantenimiento, registrar } = armar();
+
+    await servicio.cambiarEstado(1, 'EN_TALLER', 4);
+
+    expect(actualizarEstadoMantenimiento).toHaveBeenCalledWith(
+      1,
+      'EN_TALLER',
+      expect.anything(),
+    );
+    expect(registrar).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entidad: 't_disponibilidad',
+        accion: AccionAuditoria.ACTUALIZAR,
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('LISTO es final: no vuelve a PROGRAMADO', async () => {
+    const { servicio, actualizarEstadoMantenimiento } = armar({
+      existente: { ...parada(1, 3), estadoMantenimiento: 'LISTO' },
+    });
+
+    const error = await capturar(servicio.cambiarEstado(1, 'PROGRAMADO', 4));
+
+    expect(error).toBeInstanceOf(ValidacionError);
+    expect(actualizarEstadoMantenimiento).not.toHaveBeenCalled();
+  });
+});
+
+describe('D4 · aviso de traslados asignados antes de programar (2026-10-20)', () => {
+  it('lista los traslados de la placa en el rango, con la fecha como texto', async () => {
+    const { servicio, flota } = armar();
+
+    expect(
+      await servicio.impacto(7, diaIso('2026-10-20'), diaIso('2026-10-23')),
+    ).toEqual([
+      {
+        operativoId: 66,
+        identificador: 'OCPMO-001-21-OCT-2026',
+        fecha: '2026-10-21',
+        horaInicio: '08:00',
+        horaFin: '16:30',
+      },
+    ]);
+    expect(flota.tramosDeVehiculoEnRango).toHaveBeenCalledWith(
+      7,
+      diaIso('2026-10-20'),
+      diaIso('2026-10-23'),
+    );
+  });
+
+  it('un rango al revés es un 400, no una consulta', async () => {
+    const { servicio, flota } = armar();
+
+    await expect(
+      servicio.impacto(7, diaIso('2026-10-23'), diaIso('2026-10-20')),
+    ).rejects.toBeInstanceOf(ValidacionError);
+    expect(flota.tramosDeVehiculoEnRango).not.toHaveBeenCalled();
   });
 });

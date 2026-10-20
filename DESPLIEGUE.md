@@ -1,11 +1,11 @@
 # Despliegue · Módulo Transportes / Cuadro de Colores
 
-Agencia Metropolitana de Control · Actualizado el **2026-10-01** (producción por `.tar`, como Instrucción)
+Agencia Metropolitana de Control · Actualizado el **2026-10-16** (tres ambientes: local, preproducción y producción; los servidores por `.tar`)
 
 > **Desde la entrega 1.1.0 las imágenes se empaquetan ETIQUETADAS POR VERSIÓN** (`:1.1.0`), no
 > `:latest`, porque `docker-compose.prod.yml` las fija por esa etiqueta. El paquete es una
-> carpeta `transporte_<fecha>` con **cuatro** archivos —el cuarto es `PASOS-PRODUCCION.md`, el
-> procedimiento resumido de ESA entrega—. Ver §7.1, §7.2 y §8.
+> carpeta `<ambiente>_<fecha>` que arma `scripts/empaquetar.sh`, con su guía y
+> `SHA256-ESPERADOS.txt`. Ver «Los tres ambientes», §7.1, §7.2 y §8.
 
 Este archivo es el procedimiento, no una explicación. Lo que hay detrás de cada decisión está
 comentado en `docker-compose.yml`, en `docker-compose.prod.yml`, en los dos `Dockerfile` y en
@@ -19,6 +19,61 @@ comentado en `docker-compose.yml`, en `docker-compose.prod.yml`, en los dos `Doc
 
 > **La sección 7 es la que se usa en el servidor.** Las secciones 1 a 6 construyen en la
 > máquina y sirven para desarrollo y para preparar el paquete.
+
+---
+
+## Los tres ambientes (2026-10-16)
+
+| | LOCAL · desarrollo | PREPRODUCCIÓN · el servidor actual | PRODUCCIÓN · el servidor nuevo |
+|---|---|---|---|
+| Acceso | `http://localhost:5180` | `http://<IP_PREPRODUCCION>:5180` (se entra por el `:5180`, sin Gateway) | `https://gestion-sigoc.quito.gob.ec` (pruebas del Gateway: `https://usit-gestion.quito.gob.ec`) |
+| Qué hay delante | nada | nada: el usuario llega directo al nginx del frontend | el **Gateway** de `*.quito.gob.ec` (TLS), por la red Docker `amc` |
+| Compose | `docker-compose.yml` (construye) | `docker-compose.prod.yml` | `docker-compose.prod.yml` **+** `docker-compose.gateway.yml` |
+| Portal de Auth (horneado en el frontend) | el del `.env` local (`VITE_AUTH_PORTAL_URL`) | el del Auth actual (`http://<IP_SERVIDOR_AUTH>:10006/login`) | el de Auth de ese ambiente (pruebas: `https://usit-automatizacion.quito.gob.ec/login`) |
+| `TRUST_PROXY` | vacío | **1** (nginx → app) | **2** (Gateway → nginx → app) |
+| HTTPS y cookie | no · `AUTH_COOKIE_SECURE=false` | no · `AUTH_COOKIE_SECURE=false`, sin `NODE_ENV=production` | sí · `NODE_ENV=production` y `AUTH_COOKIE_SECURE=true` |
+| Plantilla del `.env` | `.env.example` → `.env` | `.env.preproduccion.example` → `.env.prod` | `.env.produccion.example` → `.env.prod` |
+| Guía | §0–§6 | `COMANDOS-PREPRODUCCION.md` (plantilla) y §7–§8 | `INSTALACION-PRODUCCION.md` |
+
+**La imagen del backend es idéntica en los dos servidores. La del frontend es POR AMBIENTE**: la
+dirección del portal de Auth queda dentro del JavaScript al compilar, así que cada servidor lleva la
+suya. Por eso cada paquete se arma para un ambiente, y su `SHA256-ESPERADOS.txt` dice con qué portal.
+
+### El recorrido de una versión
+
+1. **Local**: desarrollo, `npm test` / `npm run lint` / `npm run build` en los dos repositorios,
+   `docker compose build` + `up -d`. Commit, push y PR a `main`.
+2. **Paquete de preproducción**, en la máquina de desarrollo, con `main` al día:
+   `./scripts/empaquetar.sh preproduccion http://<IP_SERVIDOR_AUTH>:10006/login`.
+3. **Preproducción**: se actualiza con `COMANDOS-PREPRODUCCION.md` (viaja en el paquete; se
+   reemplazan sus marcadores con `SHA256-ESPERADOS.txt`) y se valida con usuarios.
+4. **Paquete de producción**, del MISMO commit:
+   `./scripts/empaquetar.sh produccion <portal de Auth de producción>`. El backend sale idéntico
+   al validado; solo el frontend cambia de portal.
+5. **Producción**: se instala o actualiza con `INSTALACION-PRODUCCION.md`.
+
+En **cada** servidor, `npx prisma migrate deploy` va **antes** de levantar: el contenedor no migra
+al arrancar.
+
+### `scripts/empaquetar.sh`
+
+```bash
+cd transporte-backend
+./scripts/empaquetar.sh <preproduccion|produccion> <url-del-portal-de-auth> [--destino <carpeta>]
+#   VITE_AUTH_MODULE_CODE=<id> ./scripts/empaquetar.sh produccion <portal>   # id de modulo propio
+```
+
+- Exige `main` limpio e igual a `origin/main` en los dos repositorios (`--sin-verificar-git` solo
+  para ensayos: el paquete queda marcado como ENSAYO). Producción exige un portal `https://`.
+- Construye `transporte-backend:<versión>` y `transporte-frontend:<versión>` —la versión es el pin
+  de `docker-compose.prod.yml`— con `VITE_API_BASE_URL` vacía y el portal indicado, y comprueba que
+  el bundle lleve ese portal y no lleve `localhost:3003`.
+- Deja `../<ambiente>_<AAAAMMDD>/` con el `.tar`, los compose, la plantilla del `.env`, la guía y
+  `SHA256-ESPERADOS.txt` (sha del `.tar`, ID de las imágenes, commits, portal y bundle). No
+  sobrescribe un paquete existente.
+- **El entorno local no cambia**: el compose de desarrollo usa las etiquetas `:latest` y el script
+  solo etiqueta `:<versión>`.
+- Las IP solo aparecen en el paquete, que queda fuera de git; nunca en el repositorio.
 
 ---
 
@@ -192,7 +247,7 @@ se genera **dentro** de la imagen del backend; nunca se copia de la máquina de 
 | Variable | Por omisión | Cuándo se pasa |
 |---|---|---|
 | `VITE_API_BASE_URL` | vacía | **Nunca.** Vacía significa «al propio origen», y el nginx de la imagen hace de proxy |
-| `VITE_AUTH_PORTAL_URL` | vacía → respaldo del fuente | Cuando Auth central deje de estar en `172.20.136.127` |
+| `VITE_AUTH_PORTAL_URL` | **obligatoria**: vacía, el build falla (2026-10-16) | Siempre: la dirección del portal de Auth del ambiente. El código ya no trae una por omisión |
 | `VITE_AUTH_LOGOUT_URL` | vacía → hereda del portal | Cuando Auth publique una pantalla de despedida |
 | `VITE_AUTH_MODULE_CODE` | vacía → `TRANSPORTE` | Nunca, salvo que cambie el código del módulo |
 
@@ -423,7 +478,14 @@ docker exec transporte-app sh -c 'date'                  # debe decir -05
 
 ---
 
-## 7. Producción · el servidor 172.20.136.127
+## 7. Preproducción · el servidor actual (`<IP_PREPRODUCCION>`)
+
+> **Servidor nuevo detrás del Gateway de `*.quito.gob.ec` (2026-10-16).** La instalación en el
+> data center nuevo (pruebas `<IP_SERVIDOR_PRUEBAS>`, `https://usit-gestion.quito.gob.ec`; producción
+> `https://gestion-sigoc.quito.gob.ec`) tiene su propia guía: **`INSTALACION-PRODUCCION.md`**,
+> con el overlay `docker-compose.gateway.yml` (red `amc`, sin puertos publicados) y
+> `TRUST_PROXY=2`. Esta sección vale para el servidor actual, que desde el 2026-10-16 es
+> PREPRODUCCIÓN (ver «Los tres ambientes»).
 
 Las secciones 1 a 6 describen el despliegue **construyendo en la máquina**. En el servidor
 no se construye: se llevan las imágenes ya hechas, como hace el módulo de Instrucción.
@@ -432,10 +494,14 @@ no se construye: se llevan las imágenes ya hechas, como hace el módulo de Inst
 para `npm ci`. Es más superficie, más cosas que pueden fallar el día de la entrega, y una
 imagen que nadie probó. Con el `.tar` se despliega **exactamente el binario que se verificó**.
 
-> **`172.20.136.127` es también donde vive Auth central**: la API en el `10004` y el portal
-> en el `10006`. Por eso el respaldo del frontend acierta sin pasar ningún argumento.
+> **El servidor actual es también donde vive Auth central**: la API en el `10004` y el portal
+> en el `10006`. Desde el 2026-10-16 el frontend no trae un portal por omisión: la imagen se
+> construye siempre con `VITE_AUTH_PORTAL_URL` (sin ella, el build falla).
 
 ### 7.1. Empaquetar, en la máquina de desarrollo
+
+> **Desde el 2026-10-16 lo hace `scripts/empaquetar.sh preproduccion <portal>`** (ver «Los tres
+> ambientes»). Lo que sigue es lo que el script hace por dentro, por si hay que hacerlo a mano.
 
 ```bash
 npm test && npm run lint && npm run build      # en los dos repositorios
@@ -465,15 +531,15 @@ en la carpeta del paquete.
 ```
 transporte_<fecha>/
 ├── docker-compose.prod.yml         # versionado, se copia tal cual (fija las imagenes a :<ver>)
-├── .env.prod.example               # plantilla de los secretos (referencia, NO trae claves)
-├── PASOS-PRODUCCION.md             # el procedimiento de ESTA entrega: version, migraciones, reversion
+├── .env.preproduccion.example      # plantilla de los secretos (referencia, NO trae claves)
+├── COMANDOS-PREPRODUCCION.md       # el procedimiento de ESTA entrega (desde la plantilla versionada)
 └── transporte-<fecha>.tar          # las dos imagenes, etiquetadas por version
 ```
 
 El `.env.prod` **REAL** —con las cuatro claves— **no viaja en la carpeta**: se entrega aparte,
-por canal seguro. Nunca se versiona ni se adjunta. En la carpeta solo va `.env.prod.example`.
+por canal seguro. Nunca se versiona ni se adjunta. En la carpeta solo va `.env.preproduccion.example`.
 
-`PASOS-PRODUCCION.md` es el resumen operativo de la entrega —qué trae la versión, qué migración
+`COMANDOS-PREPRODUCCION.md` (antes `PASOS-PRODUCCION.md`) es el resumen operativo de la entrega —qué trae la versión, qué migración
 aplica, los pasos de actualización y la reversión—; este `DESPLIEGUE.md` sigue siendo la fuente
 completa, y aquel remite aquí.
 
@@ -500,7 +566,7 @@ docker load -i transporte-<fecha>.tar
 
 # 2 · Configurar. Los cuatro secretos: DB_PASSWORD, APP_DB_PASSWORD,
 #     AUTH_JWT_SECRET y SESSION_JWT_SECRET. Las dos ultimas, DISTINTAS entre si.
-cp .env.prod.example .env.prod
+cp .env.preproduccion.example .env.prod
 
 # 3 · Solo la base, y esperar a que este sana
 docker compose --env-file .env.prod -f docker-compose.prod.yml up -d transportedb
@@ -529,7 +595,7 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 
 Y el primer administrador por SQL, como explica la sección 0.
 
-> **Comprobación en producción.** La de la sección 6 vale igual, con una diferencia de puerto:
+> **Comprobación en el servidor.** La de la sección 6 vale igual, con una diferencia de puerto:
 > **el backend se publica en el `3005`** (el compose mapea `3005:3003`), no en el `3003` del
 > desarrollo; el frontend sigue en `5180` y la base no se publica.
 >
@@ -544,7 +610,7 @@ Y el primer administrador por SQL, como explica la sección 0.
 
 ### 7.4. Cuatro diferencias con el compose de desarrollo
 
-| | Desarrollo | Producción |
+| | Desarrollo | Servidor (preproducción y producción) |
 |---|---|---|
 | Imágenes | `build:` en los tres | **`image:` solamente.** Nada se construye en el servidor |
 | Puerto de la base | `5434:5432` | **No se publica** |
@@ -555,7 +621,7 @@ Y el primer administrador por SQL, como explica la sección 0.
 > publica el `5434` con el comentario «evita chocar con Instrucción en 5433». Eso vale en una
 > máquina de desarrollo y **es falso en el servidor**: el procedimiento de Instrucción dice
 > que allí movieron su base al `5434`, justamente porque el `5433` ya estaba ocupado. En
-> `172.20.136.127` el `5434` es suyo, y `docker compose up` fallaría al enlazarlo.
+> el servidor actual el `5434` es suyo, y `docker compose up` fallaría al enlazarlo.
 >
 > El motivo de fondo es mejor que la colisión: **la base no tiene por qué estar publicada**.
 > La aplicación la alcanza por la red interna. Para `psql` puntual, `docker exec`.
@@ -588,7 +654,7 @@ docker compose up -d
 declaraba `build:` y se quedaba en la imagen anterior sin avisar: una pantalla nueva no aparecía y
 no había nada en el registro que lo explicara.
 
-### 8.2. En producción, por `.tar`
+### 8.2. En preproducción (y en producción), por `.tar`
 
 El servidor **no construye**: llega el paquete nuevo (§7.1–7.2) y se actualiza sin repetir la
 primera instalación —la base, el rol `transporte_app` y la extensión ya existen—.
@@ -619,7 +685,7 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 > versión únicamente **agrega** objetos nulables (como `20260930120000_motivo_baja_funcionario`
 > de la 1.1.0: dos columnas nulables en `t_funcionario`), que la versión anterior ignora. Una
 > migración que **quite o cambie** algo existente exige un plan de reversión propio: anótalo en
-> el `PASOS-PRODUCCION.md` de esa entrega.
+> el `COMANDOS-PREPRODUCCION.md` de esa entrega.
 
 ---
 

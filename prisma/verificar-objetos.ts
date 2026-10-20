@@ -69,6 +69,25 @@ const RESTRICCIONES_ESPERADAS = [
   'ck_asignacion_hora_fin',
   'ck_asignacion_hora_par',
   'ck_asignacion_hora_distinta',
+  // 2026-10-06. Transporte por tramos: un tramo es de un operativo salvo la TAREA; sus horas
+  // HH:MM distintas; un traslado entre 0 y 600 minutos; el mes de turnos como AAAA-MM.
+  'ck_tramo_operativo',
+  'ck_tramo_horas',
+  'ck_traslado_minutos',
+  'ck_turno_conductor_mes_formato',
+  // 2026-10-06, Fase 5. Operación diaria de la flota: kilometrajes no negativos y el vale de
+  // combustible solo de 10 o 20 dólares.
+  'ck_checklist_km',
+  'ck_kilometraje_km',
+  'ck_vale_monto',
+  // 2026-10-07, versión consolidada DAF: el patrón de rotación del conductor (D/N/E/L/A, 2 a 14).
+  'ck_conductor_patron_rotacion',
+  // 2026-10-07. El trámite de Inspección copiado a una asignación siempre lleva su código.
+  'ck_tramite_inspeccion_codigo',
+  // 2026-10-19. Compartir unidad: un operativo no comparte consigo mismo, y compartir excluye el
+  // vehículo exclusivo (macrooperativo).
+  'ck_operativo_compartir_no_propio',
+  'ck_operativo_compartir_o_exclusivo',
 ];
 
 /**
@@ -98,6 +117,8 @@ const INDICES_PARCIALES_ESPERADOS = [
   'uq_plantilla_director',
   'uq_plantilla_base',
   'uq_orden_numero_vigente',
+  // 2026-10-19. Quiénes piden viajar con un operativo (compartir unidad).
+  'idx_operativo_compartir_con',
 ];
 
 // 33 desde el 2026-09-01, cuando entro t_rol_direccion -que direcciones administra cada
@@ -130,12 +151,28 @@ const INDICES_PARCIALES_ESPERADOS = [
 // son del DIA, no de cada orden: una fila por fecha de jornada (D13)-.
 // 40 desde el 2026-10-05: t_plantilla_orden_version -historial inmutable de la plantilla de cada
 // Director; una orden se resuelve con la versión con la que se generó-.
-const TABLAS_ESPERADAS = 40;
+// 41 desde el 2026-10-05: t_cobertura_mes -estado informativo (borrador/publicado) del mes de la
+// cobertura por turnos de Instruccion-.
+// 46 desde el 2026-10-06: transporte por tramos y turnos de conductores -t_tramo_transporte,
+// t_traslado_zonal, t_turno_conductor, t_turno_conductor_mes y t_activacion_conductor-.
+// 49 desde el 2026-10-06 (Fase 5): t_checklist_vehiculo, t_kilometraje_vehiculo y
+// t_vale_combustible.
+// 50 desde el 2026-10-07: t_operativo_tramite_inspeccion -copia del trámite de Inspección elegido
+// para un inspector asignado-.
+// 52 desde el 2026-10-08: t_vehiculo_jornada -qué vehículos salen el día- y t_hoja_ruta_emision
+// -cuándo y con qué huella de tramos se emitió la hoja de ruta de cada conductor-.
+// 53 desde el 2026-10-13: t_zonal_formulario -cada formulario con sus propias zonales; t_zonal
+// queda como la zona de la ciudad-.
+const TABLAS_ESPERADAS = 53;
 
 // 13: los 11 originales mas e_acceso_formulario (25-AGO) y e_sector_ciudad (31-AGO).
 // El primero tampoco se conto en su momento: este guion llevaba fallando desde entonces.
 // 15 desde el 2026-09-16: e_denominacion_instruccion y e_estado_turno (cobertura por turnos).
-const ENUMERADOS_ESPERADOS = 15;
+// 16 desde el 2026-10-05: e_estado_cobertura_mes.
+// 20 desde el 2026-10-06: e_tipo_transporte, e_tipo_tramo, e_turno_conductor y
+// e_tipo_ubicacion_vehiculo.
+// 21 desde el 2026-10-06 (Fase 5): e_estado_mantenimiento.
+const ENUMERADOS_ESPERADOS = 21;
 
 async function verificar(): Promise<void> {
   const fallos: string[] = [];
@@ -145,7 +182,9 @@ async function verificar(): Promise<void> {
     WHERE table_schema = 'public' AND table_name LIKE 't\\_%'`;
   const totalTablas = Number(tablas[0].total);
   if (totalTablas !== TABLAS_ESPERADAS) {
-    fallos.push(`Tablas: se esperaban ${TABLAS_ESPERADAS} y hay ${totalTablas}.`);
+    fallos.push(
+      `Tablas: se esperaban ${TABLAS_ESPERADAS} y hay ${totalTablas}.`,
+    );
   }
 
   const enumerados = await prisma.$queryRaw<{ total: bigint }[]>`

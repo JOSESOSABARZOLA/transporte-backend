@@ -28,10 +28,16 @@ import {
 } from '@prisma/client';
 
 import { AuditoriaService } from '../../../common/auditoria/auditoria.service';
+import { ValidacionError } from '../../../common/errors/errores-dominio';
 import { LoggerService } from '../../../common/logger/logger.service';
 import { CuadroDiarioService } from '../../cuadro-diario/application/cuadro-diario.service';
 import { OperativosService } from '../../operativos/application/operativos.service';
 import { CapacidadFlotaRepository } from '../infrastructure/capacidad-flota.repository';
+import { PlanificacionTransporteRepository } from '../infrastructure/planificacion-transporte.repository';
+import {
+  calcularCapacidad,
+  type CapacidadCalculada,
+} from './politicas/capacidad-calculada';
 import {
   verificarCapacidad,
   type VeredictoCapacidad,
@@ -62,7 +68,47 @@ export class CapacidadFlotaService {
     private readonly operativos: OperativosService,
     private readonly auditoria: AuditoriaService,
     private readonly logger: LoggerService,
+    private readonly planificacion: PlanificacionTransporteRepository,
   ) {}
+
+  /**
+   * La capacidad CALCULADA del día (2026-10-06): conductores con turno trabajable − ausentes +
+   * libres activados; vehículos activos − en taller. Ver `politicas/capacidad-calculada.ts`.
+   * Devuelve también lo declarado, para que la DAF la confirme o la corrija.
+   */
+  async calcular(
+    fecha: Date,
+  ): Promise<CapacidadCalculada & { declarada: CapacidadFlota | null }> {
+    const [
+      conductores,
+      turnos,
+      ausentes,
+      activaciones,
+      vehiculos,
+      enTaller,
+      declarada,
+    ] = await Promise.all([
+      this.planificacion.conductoresActivos(),
+      // Solo un mes PUBLICADO cuenta (2026-10-07).
+      this.planificacion.turnosPublicadosEnRango(fecha, fecha),
+      this.planificacion.conductoresAusentes(fecha),
+      this.planificacion.activacionesDe(fecha),
+      this.planificacion.vehiculosActivos(),
+      this.planificacion.vehiculosEnTaller(fecha),
+      this.repositorio.buscarPorFecha(fecha),
+    ]);
+
+    const calculo = calcularCapacidad({
+      conductoresActivos: conductores.map((c) => c.id),
+      turnos: new Map(turnos.map((t) => [t.conductorId, String(t.turno)])),
+      ausentes,
+      activados: new Set(activaciones.map((a) => a.conductorId)),
+      vehiculosActivos: vehiculos.map((v) => v.id),
+      enTaller,
+    });
+
+    return { ...calculo, declarada };
+  }
 
   /**
    * POL-07. Compara lo declarado con lo que la jornada necesita.
@@ -105,6 +151,19 @@ export class CapacidadFlotaService {
   ): Promise<EstadoCapacidad> {
     const cuadro = await this.cuadros.obtenerPorFecha(fecha);
     const anterior = await this.repositorio.buscarPorFecha(fecha);
+
+    // CONFIRMAR o CORREGIR (2026-10-06): si lo declarado difiere de lo calculado, es una
+    // corrección y debe decir por qué. Coincidir es confirmar: la observación es opcional.
+    const { calculada } = await this.calcular(fecha);
+    const corrige =
+      datos.conductoresHabiles !== calculada.conductoresHabiles ||
+      datos.vehiculosHabiles !== calculada.vehiculosHabiles;
+    if (corrige && (datos.observacion?.trim().length ?? 0) < 5) {
+      throw new ValidacionError(
+        `Para corregir la capacidad calculada escriba una observación que explique la diferencia (calculado: ${calculada.conductoresHabiles} conductores y ${calculada.vehiculosHabiles} vehículos).`,
+        { calculada },
+      );
+    }
 
     const declarada = await this.repositorio.ejecutarEnTransaccion(
       async (cliente) => {

@@ -120,6 +120,33 @@ export class SolicitudApoyoRepository extends RepositorioPrisma {
     });
   }
 
+  /** El operativo activo y quién lo registró (para «Pedir priorización» de la DAF, Fase 3). */
+  async operativoParaPriorizar(id: number): Promise<{
+    id: number;
+    identificador: string;
+    creadoPorRol: RolDepartamental;
+  } | null> {
+    return this.prisma.operativo.findFirst({
+      where: { id, activo: true },
+      select: { id: true, identificador: true, creadoPorRol: true },
+    });
+  }
+
+  /** La solicitud ABIERTA de un operativo pedida por un rol (la priorización es una sola). */
+  async buscarAbiertaDe(
+    operativoId: number,
+    rolSolicitante: RolDepartamental,
+  ): Promise<SolicitudConOperativo | null> {
+    return this.prisma.solicitudApoyo.findFirst({
+      where: {
+        operativoId,
+        rolSolicitante,
+        estado: EstadoSolicitud.SOLICITADA,
+      },
+      include: RELACIONES,
+    });
+  }
+
   async crear(
     datos: DatosSolicitud,
     cliente: Prisma.TransactionClient,

@@ -28,14 +28,31 @@ const JORNADA = new Date(Date.UTC(2026, 8, 10));
 const VEHICULO = { id: 80, placa: 'PMA7056', descripcion: null, activo: true };
 const ZONAL = { id: 3, nombre: 'ELOY ALFARO', activo: true };
 
+/** Conductor habitual de la 7056, con acta de parqueadero vigente en la jornada. */
+const CON_ACTA = {
+  id: 12,
+  nombreCompleto: 'PÉREZ JUAN',
+  activo: true,
+  parqueaderoAutorizado: true,
+  actaParqueaderoNumero: 'ACTA-2026-001',
+  actaParqueaderoDesde: new Date(Date.UTC(2026, 0, 1)),
+  actaParqueaderoHasta: new Date(Date.UTC(2026, 11, 31)),
+};
+
 const armar = (
   opciones: {
     vehiculo?: Record<string, unknown> | null;
     ubicacion?: Record<string, unknown> | null;
     anterior?: Record<string, unknown> | null;
+    habitual?: Record<string, unknown> | null;
   } = {},
 ) => {
-  const { vehiculo = VEHICULO, ubicacion = ZONAL, anterior = null } = opciones;
+  const {
+    vehiculo = VEHICULO,
+    ubicacion = ZONAL,
+    anterior = null,
+    habitual = CON_ACTA,
+  } = opciones;
 
   const declararDestino = jest
     .fn()
@@ -48,6 +65,8 @@ const armar = (
     buscarVehiculo: jest.fn().mockResolvedValue(vehiculo),
     buscarUbicacion: jest.fn().mockResolvedValue(ubicacion),
     buscarDestino: jest.fn().mockResolvedValue(anterior),
+    conductorHabitualDe: jest.fn().mockResolvedValue(habitual),
+    buscarConductor: jest.fn().mockResolvedValue(habitual),
     destinosDeLaFecha: jest.fn().mockResolvedValue([]),
     declararDestino,
     ejecutarEnTransaccion: jest
@@ -97,7 +116,51 @@ describe('RN-DAF-03 · declarar el destino de un vehículo', () => {
     await servicio.declarar(80, JORNADA, { domicilio: true }, 4);
 
     expect(declararDestino).toHaveBeenCalledWith(
-      expect.objectContaining({ ubicacionId: null, domicilio: true }),
+      expect.objectContaining({
+        ubicacionId: null,
+        domicilio: true,
+        tipo: 'DOMICILIO',
+      }),
+      expect.anything(),
+    );
+  });
+
+  /** Art. 8 (2026-10-06): sin acta vigente, el DOMICILIO se RECHAZA. */
+  it('al domicilio sin acta de parqueadero vigente se rechaza', async () => {
+    const { servicio, declararDestino } = armar({
+      habitual: {
+        ...CON_ACTA,
+        actaParqueaderoHasta: new Date(Date.UTC(2026, 7, 31)),
+      },
+    });
+
+    const fallo = await capturar(
+      servicio.declarar(80, JORNADA, { domicilio: true }, 4),
+    );
+
+    expect(fallo).toBeInstanceOf(ValidacionError);
+    expect((fallo as ValidacionError).message).toContain('acta de parqueadero');
+    expect(declararDestino).not.toHaveBeenCalled();
+  });
+
+  it('al domicilio sin conductor habitual pide indicar quién se lo lleva', async () => {
+    const { servicio, declararDestino } = armar({ habitual: null });
+
+    const fallo = await capturar(
+      servicio.declarar(80, JORNADA, { domicilio: true }, 4),
+    );
+
+    expect(fallo).toBeInstanceOf(ValidacionError);
+    expect(declararDestino).not.toHaveBeenCalled();
+  });
+
+  it('una zonal sin tipo se guarda como GARAJE', async () => {
+    const { servicio, declararDestino } = armar();
+
+    await servicio.declarar(80, JORNADA, { ubicacionId: 3 }, 4);
+
+    expect(declararDestino).toHaveBeenCalledWith(
+      expect.objectContaining({ tipo: 'GARAJE', domicilio: false }),
       expect.anything(),
     );
   });
@@ -184,6 +247,80 @@ describe('RN-DAF-03 · volver a declarar corrige', () => {
         accion: AccionAuditoria.ACTUALIZAR,
         cambios: [{ campo: 'ubic_id' }],
       }),
+      expect.anything(),
+    );
+  });
+});
+
+describe('Art. 8 · número de acta al dejarlo en el domicilio (2026-10-08)', () => {
+  it('el fin del día exige el número: sin él, se rechaza', async () => {
+    const { servicio, declararDestino } = armar();
+
+    const error = await capturar(
+      servicio.declarar(
+        80,
+        JORNADA,
+        { tipo: 'DOMICILIO', exigirNumeroActa: true },
+        4,
+      ),
+    );
+
+    expect(error).toBeInstanceOf(ValidacionError);
+    expect((error as Error).message).toBe(
+      'Escriba el número del acta de parqueadero de PÉREZ JUAN para dejar el vehículo en su domicilio.',
+    );
+    expect(declararDestino).not.toHaveBeenCalled();
+  });
+
+  it('un número que no es el del acta vigente se rechaza', async () => {
+    const { servicio, declararDestino } = armar();
+
+    const error = await capturar(
+      servicio.declarar(
+        80,
+        JORNADA,
+        { tipo: 'DOMICILIO', actaNumero: 'ACTA-9', exigirNumeroActa: true },
+        4,
+      ),
+    );
+
+    expect((error as Error).message).toBe(
+      'El acta N.º ACTA-9 no es la vigente de PÉREZ JUAN: revise el número.',
+    );
+    expect(declararDestino).not.toHaveBeenCalled();
+  });
+
+  it('el número vigente se acepta sin distinguir mayúsculas ni espacios, y se guarda', async () => {
+    const { servicio, declararDestino } = armar();
+
+    await servicio.declarar(
+      80,
+      JORNADA,
+      {
+        tipo: 'DOMICILIO',
+        actaNumero: ' acta-2026-001 ',
+        exigirNumeroActa: true,
+      },
+      4,
+    );
+
+    expect(declararDestino).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tipo: 'DOMICILIO',
+        conductorId: 12,
+        actaNumero: 'ACTA-2026-001',
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('en un garaje no se guarda número de acta', async () => {
+    const { servicio, declararDestino } = armar();
+
+    await servicio.declarar(80, JORNADA, { ubicacionId: 3 }, 4);
+
+    expect(declararDestino).toHaveBeenCalledWith(
+      expect.objectContaining({ actaNumero: null }),
       expect.anything(),
     );
   });

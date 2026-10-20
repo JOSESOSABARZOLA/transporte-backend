@@ -10,7 +10,8 @@ build/
 # Environment
 .env
 # El .env del SERVIDOR. Trae las claves de produccion y se entrega por canal seguro,
-# como hace Instruccion. La plantilla versionada es .env.prod.example.
+# como hace Instruccion. Las plantillas versionadas son .env.preproduccion.example y
+# .env.produccion.example (DESPLIEGUE.md, «Los tres ambientes»).
 .env.prod
 .env.local
 .env.*.local

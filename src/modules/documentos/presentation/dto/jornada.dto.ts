@@ -36,6 +36,11 @@ import type {
 } from '@prisma/client';
 import { PoliticaVehiculo } from '@prisma/client';
 
+import {
+  notasDeOperativo,
+  ocultarCompartidaAjena,
+  type NotaOperativo,
+} from '../../../../common/notas/notas-operativo';
 import type { Alerta } from '../../../operativos/application/politicas/alertas-operativo';
 import { estadoDeComposicion } from '../../../operativos/application/politicas/composicion-personal';
 import { textoDeTipoControl } from '../../application/tipo-control-texto';
@@ -109,6 +114,12 @@ export interface FilaJornadaDto {
   placa: string | null;
   /** Notas del operativo (bitácora, 2026-09-09): los textos, en orden. */
   observaciones: string[];
+  /**
+   * Las notas de la celda Observaciones (2026-10-19, plan «notas-jornada-matriz»): la bitácora con
+   * su autor y la tarjeta COMPARTIDA, la más reciente primero. Misma forma que en P-01/P-02. Si el
+   * anfitrión de la COMPARTIDA es de un formulario que este rol no ve, no se nombra (RN-48, J3).
+   */
+  notas: NotaOperativo[];
   estadoTransporte: EstadoTransporte;
   esNocturno: boolean;
   /**
@@ -200,6 +211,12 @@ export interface JornadaResponseDto {
 export function aJornadaResponse(
   jornada: JornadaCompuesta,
 ): JornadaResponseDto {
+  // RN-48 (J3): los operativos que este rol ve. Una COMPARTIDA hacia uno de fuera no lo nombra.
+  const visibles = new Set(
+    jornada.secciones.flatMap((seccion) =>
+      seccion.operativos.map((operativo) => operativo.id),
+    ),
+  );
   return {
     cabecera: {
       ordenTrabajo: jornada.cuadro.ordenTrabajo,
@@ -224,7 +241,7 @@ export function aJornadaResponse(
       puedeEditarPersonal: seccion.puedeEditarPersonal,
       totalOperativos: seccion.operativos.length,
       filas: seccion.operativos.map((operativo) =>
-        aFilaJornada(operativo, seccion),
+        aFilaJornada(operativo, seccion, visibles),
       ),
       evidencia: seccion.evidencia,
     })),
@@ -234,6 +251,7 @@ export function aJornadaResponse(
 function aFilaJornada(
   operativo: OperativoDeJornada,
   seccion: SeccionJornada,
+  visibles: ReadonlySet<number>,
 ): FilaJornadaDto {
   return {
     id: operativo.id,
@@ -274,6 +292,10 @@ function aFilaJornada(
         ? 'No se activa'
         : null),
     observaciones: operativo.observaciones.map((nota) => nota.texto),
+    notas: ocultarCompartidaAjena(
+      notasDeOperativo(operativo, operativo.autores ?? {}),
+      visibles,
+    ),
     estadoTransporte: operativo.estadoTransporte,
     esNocturno: operativo.esNocturno,
     areasPendientesDelRol: areasPendientesDelRol(operativo, seccion),

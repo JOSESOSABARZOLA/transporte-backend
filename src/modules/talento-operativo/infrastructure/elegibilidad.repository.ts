@@ -13,7 +13,8 @@
  * Aquí se traen los antecedentes de todo el grupo en tres consultas y se decide en
  * memoria.
  *
- * LEE `t_operativo` Y `t_asignacion_personal`, con la misma licencia que
+ * LEE `t_operativo`, `t_asignacion_personal` Y, PARA QUIEN CONDUCE, `t_tramo_transporte` (su única
+ * fuente de ocupación desde el 2026-10-14), con la misma licencia que
  * `HistorialJornadaRepository` y por el mismo motivo: las reglas de descanso necesitan
  * saber qué tiene ya asignado la persona ESE día, y el día en construcción todavía no
  * está consolidado en el historial. No importa el repositorio de otro submódulo ni
@@ -24,11 +25,13 @@ import { Injectable } from '@nestjs/common';
 import {
   EstadoDisponibilidad,
   EstadoTurno,
-  type Conductor,
   type Funcionario,
 } from '@prisma/client';
 
-import { RangoHorario } from '../../operativos/domain/rango-horario';
+import {
+  duracionEnHoras,
+  RangoHorario,
+} from '../../operativos/domain/rango-horario';
 import { RepositorioPrisma } from '../../../common/persistencia/repositorio-prisma';
 import { PrismaService } from '../../../prisma/prisma.service';
 
@@ -40,6 +43,14 @@ export interface AsignacionDelDia {
   horaInicio: string;
   horaFin: string;
   horas: number;
+}
+
+/** Un operativo que el conductor condujo (al menos un tramo suyo). RN-25. */
+export interface SalidaDeConductor {
+  conductorId: number;
+  operativoId: number;
+  fecha: Date;
+  esNocturno: boolean;
 }
 
 /** Ausencia que cubre una fecha concreta. */
@@ -82,6 +93,11 @@ export class ElegibilidadRepository extends RepositorioPrisma {
             EstadoDisponibilidad.REPOSO_MEDICO,
             EstadoDisponibilidad.CALAMIDAD,
             EstadoDisponibilidad.PERMISO,
+            // Las tres del 2026-10-08. Misma lista que `ESTADOS_QUE_EXCLUYEN` (reglas-personal):
+            // si se agrega una allí y no aquí, VAL-12 no mostraría su fecha de retorno.
+            EstadoDisponibilidad.LICENCIA,
+            EstadoDisponibilidad.CAPACITACION,
+            EstadoDisponibilidad.COMISION_SERVICIOS,
           ],
         },
         desde: { lte: fecha },
@@ -334,212 +350,130 @@ export class ElegibilidadRepository extends RepositorioPrisma {
     return new Map(filas.map((fila) => [fila.funcionarioId, fila._count._all]));
   }
 
-  // ─────────────────────── Conductores ───────────────────────
+  // ─────────────────────── Conductores (por tramos, 2026-10-14) ───────────────────────
+  //
+  // Desde el 2026-10-14 la ocupación de quien conduce sale SOLO de `t_tramo_transporte`: un
+  // operativo «dejar y retirar» ocupa al conductor en sus dos tramos, no en todo su horario. Todas
+  // las consultas son POR LOTE (una por señal para todos los conductores), no una por conductor.
+  // Los tramos de un operativo retirado (`oper_activo` en falso) no cuentan: salió del cuadro.
 
-  async buscarConductor(id: number): Promise<Conductor | null> {
-    return this.prisma.conductor.findUnique({ where: { id } });
-  }
-
-  async ausenciaDeConductor(
-    conductorId: number,
-    fecha: Date,
-  ): Promise<AusenciaEnFecha | null> {
-    const fila = await this.prisma.disponibilidad.findFirst({
-      where: {
-        conductorId,
-        desde: { lte: fecha },
-        hasta: { gte: fecha },
-        estado: { not: EstadoDisponibilidad.DISPONIBLE },
-      },
-      select: { estado: true, hasta: true },
-      orderBy: { hasta: 'desc' },
+  /** Nombre de cada conductor, para redactar los veredictos. */
+  async nombresDeConductores(
+    conductorIds: number[],
+  ): Promise<Map<number, string>> {
+    if (conductorIds.length === 0) return new Map();
+    const filas = await this.prisma.conductor.findMany({
+      where: { id: { in: conductorIds } },
+      select: { id: true, nombreCompleto: true },
     });
-
-    return fila ?? null;
+    return new Map(filas.map((fila) => [fila.id, fila.nombreCompleto]));
   }
 
   /**
-   * VAL-21 y VAL-22. Operativos que el conductor ya conduce ese día.
-   *
-   * `excluirOperativoId` sirve al reasignar: un operativo no se solapa consigo mismo, y
-   * sin excluirlo cambiar de vehículo se rechazaría a sí mismo. Mismo criterio que
-   * `asignacionesDelDia` para el personal.
-   *
-   * Los retirados no cuentan: `oper_activo` en falso significa que salió del cuadro.
+   * RN-44. Las patrullas que condujo cada conductor entre dos fechas: un TRAMO suyo en un operativo
+   * vigente de un formulario de patrulla. Devuelve el operativo para que el bloque que se está
+   * asignando no cuente contra sí mismo.
    */
-  async conduccionesDelDia(
-    conductorId: number,
-    fecha: Date,
-    excluirOperativoId?: number,
-  ): Promise<AsignacionDelDia[]> {
-    const filas = await this.prisma.operativo.findMany({
-      where: {
-        conductorId,
-        activo: true,
-        cuadro: { fecha },
-        id: excluirOperativoId ? { not: excluirOperativoId } : undefined,
-      },
-      select: {
-        id: true,
-        identificador: true,
-        horaInicio: true,
-        horaFin: true,
-        duracionHoras: true,
-      },
-    });
-
-    return filas.map((fila) => ({
-      funcionarioId: conductorId,
-      operativoId: fila.id,
-      identificador: fila.identificador,
-      horaInicio: fila.horaInicio,
-      horaFin: fila.horaFin,
-      horas: Number(fila.duracionHoras),
-    }));
-  }
-
-  /**
-   * RN-44. Última fecha en la que el conductor condujo en una patrulla.
-   *
-   * No hay proyección de conductores equivalente a `t_historial_jornada`, así que se
-   * reconstruye desde los operativos que condujo. Son pocas filas por conductor.
-   *
-   * `activo: true` por lo mismo que en `asignacionesDelDia`: un operativo retirado no se
-   * condujo, y contarlo como patrulla dejaba al conductor en descanso por un servicio que
-   * nunca ocurrió.
-   */
-  async ultimaPatrullaDeConductor(
-    conductorId: number,
-    hasta: Date,
-  ): Promise<Date | null> {
-    const operativo = await this.prisma.operativo.findFirst({
-      where: {
-        conductorId,
-        activo: true,
-        formulario: { esPatrulla: true },
-        cuadro: { fecha: { lte: hasta } },
-      },
-      select: { cuadro: { select: { fecha: true } } },
-      orderBy: { cuadro: { fecha: 'desc' } },
-    });
-
-    return operativo?.cuadro.fecha ?? null;
-  }
-
-  /**
-   * RN-25 aplicada al conductor. Salidas nocturnas o de fin de semana en el período.
-   *
-   * ═══════════════════════════════════════════════════════════════════════════════
-   * SE CUENTA DESDE `t_operativo`, SIN PROYECCIÓN PERSISTIDA, Y ES DELIBERADO.
-   *
-   * El personal tiene `t_historial_jornada`, una proyección que se consolida al cerrar el
-   * cuadro y que guarda `hist_fue_nocturna` y `hist_fue_fin_semana`. La simetría invita a
-   * crear su gemela para conductores.
-   *
-   * No hace falta, y este mismo archivo ya lo decidió así: `ultimaPatrullaDeConductor`
-   * reconstruye RN-44 desde los operativos que condujo, «son pocas filas por conductor».
-   * Vale igual aquí —treinta y cuatro conductores frente a cientos de funcionarios— y
-   * evita una tabla, un servicio de consolidación y un enganche al cierre del cuadro que
-   * habría que mantener sincronizados con la fuente.
-   *
-   * LA CONTRAPARTIDA, ESCRITA PARA QUE NADIE LA DESCUBRA TARDE: contar en vivo incluye
-   * los operativos de un cuadro **todavía abierto**, mientras que la proyección del
-   * personal solo cuenta los cerrados. Para esta regla es lo correcto —la DAF planifica
-   * sobre el cuadro del día siguiente, que aún no está cerrado, y no contarlo dejaría el
-   * tope sin efecto justo cuando se está decidiendo—.
-   * ═══════════════════════════════════════════════════════════════════════════════
-   *
-   * El fin de semana se decide en memoria: PostgreSQL podría hacerlo con `EXTRACT(DOW)`,
-   * pero eso exigiría SQL crudo y `esFinDeSemana` ya existe, probada, en
-   * `reglas-historial.ts`. Dos versiones de «qué es fin de semana» es justo lo que no
-   * conviene tener.
-   */
-  async salidasPesadasDeConductor(
-    conductorId: number,
+  async patrullasDeConductores(
+    conductorIds: number[],
     desde: Date,
     hasta: Date,
-    excluirOperativoId?: number,
-  ): Promise<{ fecha: Date; esNocturno: boolean }[]> {
-    const filas = await this.prisma.operativo.findMany({
+  ): Promise<{ conductorId: number; fecha: Date; operativoId: number }[]> {
+    if (conductorIds.length === 0) return [];
+    const filas = await this.prisma.tramoTransporte.findMany({
       where: {
-        conductorId,
-        activo: true,
-        cuadro: { fecha: { gte: desde, lte: hasta } },
-        id: excluirOperativoId ? { not: excluirOperativoId } : undefined,
+        conductorId: { in: conductorIds },
+        fecha: { gte: desde, lte: hasta },
+        operativo: { activo: true, formulario: { esPatrulla: true } },
       },
-      select: { esNocturno: true, cuadro: { select: { fecha: true } } },
+      select: { conductorId: true, fecha: true, operativoId: true },
     });
-
-    return filas.map((fila) => ({
-      fecha: fila.cuadro.fecha,
-      esNocturno: fila.esNocturno,
-    }));
+    return filas
+      .filter((fila) => fila.conductorId !== null && fila.operativoId !== null)
+      .map((fila) => ({
+        conductorId: fila.conductorId as number,
+        fecha: fila.fecha,
+        operativoId: fila.operativoId as number,
+      }));
   }
 
-  // ─────────────── Conductores · carga por lote (advisory) ───────────────
-  //
-  // Para el semáforo de carga del conductor (FRMS, 2026-09-24), que la DAF ve al asignar. Son
-  // consultas POR LOTE —una por señal para todos los conductores del desplegable, no una por
-  // conductor— por el mismo motivo que las del personal: el desplegable de flota es largo.
-
-  /** Horas ya asignadas a cada conductor ESE día (suma de duraciones de sus operativos vigentes). */
+  /**
+   * Horas al volante de cada conductor ESE día (semáforo de carga, advisory): la suma de sus
+   * TRAMOS, no la duración de los operativos enteros. Incluye las TAREAS de taller, que también
+   * son conducir.
+   */
   async horasConducidasDelDiaDeVarios(
     conductorIds: number[],
     fecha: Date,
   ): Promise<Map<number, number>> {
     if (conductorIds.length === 0) return new Map();
 
-    const filas = await this.prisma.operativo.groupBy({
-      by: ['conductorId'],
+    const filas = await this.prisma.tramoTransporte.findMany({
       where: {
         conductorId: { in: conductorIds },
-        activo: true,
-        cuadro: { fecha },
+        fecha,
+        OR: [{ operativoId: null }, { operativo: { activo: true } }],
       },
-      _sum: { duracionHoras: true },
+      select: { conductorId: true, horaInicio: true, horaFin: true },
     });
 
-    return new Map(
-      filas
-        .filter((fila) => fila.conductorId !== null)
-        .map((fila) => [
-          fila.conductorId as number,
-          Number(fila._sum.duracionHoras ?? 0),
-        ]),
-    );
+    const horas = new Map<number, number>();
+    for (const fila of filas) {
+      if (fila.conductorId === null) continue;
+      horas.set(
+        fila.conductorId,
+        (horas.get(fila.conductorId) ?? 0) +
+          duracionEnHoras(fila.horaInicio, fila.horaFin),
+      );
+    }
+    return horas;
   }
 
   /**
-   * Salidas de cada conductor en el período, con su fecha y si fueron nocturnas. El servicio
-   * cuenta las PESADAS (nocturnas o de fin de semana) con `esFinDeSemana`, igual que en el
-   * veredicto individual: una sola definición de «fin de semana».
+   * Los operativos que cada conductor condujo en el período (al menos un tramo suyo), con su fecha
+   * y si fueron nocturnos. Uno por par conductor–operativo: dos tramos del mismo operativo son UNA
+   * salida. El servicio cuenta las PESADAS (nocturnas o de fin de semana) con `esFinDeSemana`: una
+   * sola definición de «fin de semana».
+   *
+   * SE CUENTA EN VIVO, SIN PROYECCIÓN PERSISTIDA, y es deliberado: son pocas filas por conductor y
+   * la DAF planifica sobre el cuadro de mañana, todavía abierto; una proyección que solo contara
+   * los cuadros cerrados dejaría el tope (RN-25) sin efecto justo cuando se está decidiendo.
    */
   async salidasDeConductoresEnPeriodo(
     conductorIds: number[],
     desde: Date,
     hasta: Date,
-  ): Promise<{ conductorId: number; fecha: Date; esNocturno: boolean }[]> {
+  ): Promise<SalidaDeConductor[]> {
     if (conductorIds.length === 0) return [];
 
-    const filas = await this.prisma.operativo.findMany({
+    const filas = await this.prisma.tramoTransporte.findMany({
       where: {
         conductorId: { in: conductorIds },
-        activo: true,
-        cuadro: { fecha: { gte: desde, lte: hasta } },
+        fecha: { gte: desde, lte: hasta },
+        operativo: { activo: true },
       },
       select: {
         conductorId: true,
-        esNocturno: true,
-        cuadro: { select: { fecha: true } },
+        operativoId: true,
+        fecha: true,
+        operativo: { select: { esNocturno: true } },
       },
     });
 
-    return filas
-      .filter((fila) => fila.conductorId !== null)
-      .map((fila) => ({
-        conductorId: fila.conductorId as number,
-        fecha: fila.cuadro.fecha,
-        esNocturno: fila.esNocturno,
-      }));
+    const vistos = new Set<string>();
+    const salidas: SalidaDeConductor[] = [];
+    for (const fila of filas) {
+      if (fila.conductorId === null || fila.operativoId === null) continue;
+      const clave = `${fila.conductorId}-${fila.operativoId}`;
+      if (vistos.has(clave)) continue;
+      vistos.add(clave);
+      salidas.push({
+        conductorId: fila.conductorId,
+        operativoId: fila.operativoId,
+        fecha: fila.fecha,
+        esNocturno: fila.operativo?.esNocturno ?? false,
+      });
+    }
+    return salidas;
   }
 }

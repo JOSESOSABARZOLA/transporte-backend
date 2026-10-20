@@ -167,7 +167,7 @@ describe('SesionService', () => {
     });
 
     it('cuando no se puede contactar con Auth central', async () => {
-      peticionesAAuth.mockRejectedValue(new Error('ECONNREFUSED 10.0.0.1:443'));
+      peticionesAAuth.mockRejectedValue(new Error('ECONNREFUSED auth.int:443'));
       // El mensaje NO debe filtrar el host interno de Auth al navegador.
       await expect(servicio.canjear('codigo')).rejects.toThrow(
         /Intente nuevamente en unos minutos/,

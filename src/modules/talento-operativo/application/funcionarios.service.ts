@@ -37,6 +37,7 @@ import { CODIGOS_ERROR } from '../../../common/errors/codigos-error';
 import {
   AutorizacionError,
   RecursoNoEncontradoError,
+  ReglaNegocioError,
   ValidacionError,
 } from '../../../common/errors/errores-dominio';
 import { direccionesDeLosRoles, ROL_DEL_AREA } from '../domain/areas-del-rol';
@@ -243,6 +244,11 @@ export class FuncionariosService {
     return funcionario;
   }
 
+  /** Varias fichas en una sola consulta; los ids inexistentes se omiten (2026-10-07). */
+  async obtenerVarios(ids: readonly number[]): Promise<Funcionario[]> {
+    return this.repositorio.buscarPorIds([...new Set(ids)]);
+  }
+
   /**
    * Personal activo de las áreas indicadas, **sin cédula ni teléfono**.
    *
@@ -287,8 +293,11 @@ export class FuncionariosService {
     // Caso 1 del plan. La base lo respalda con `uq_funcionario_cedula`; comprobarlo
     // antes permite decir de quién se trata en lugar de devolver un error del motor.
     const existente = await this.repositorio.buscarPorCedula(limpio.cedula);
+    // 409 desde el rediseño de P-07 (2026-10-08): la petición es correcta, lo que choca es el
+    // estado del maestro. Con un código propio el frontend lleva el mensaje al campo cédula.
     if (existente) {
-      throw new ValidacionError(
+      throw new ReglaNegocioError(
+        CODIGOS_ERROR.CEDULA_CON_FICHA,
         `La cédula ${limpio.cedula} ya está registrada a nombre de ${existente.apellidos} ${existente.nombres}. Si la persona reingresó, reactive su ficha en lugar de crear otra.`,
         { cedula: limpio.cedula, funcionarioId: existente.id },
       );
@@ -363,9 +372,16 @@ export class FuncionariosService {
       });
     }
 
+    /*
+      EL TELÉFONO SOLO SE COMPRUEBA SI CAMBIA (2026-10-08). El formato pasó a ser estricto
+      (09 + 8 dígitos) y hay fichas con números del formato anterior: comprobar el que ya
+      estaba impediría corregir el cargo de esa persona sin tocar su teléfono.
+    */
+    const telefonoCambia =
+      cambios.telefono !== undefined && propuesto.telefono !== actual.telefono;
     this.exigirIdentidadValida(
       propuesto.cedula,
-      propuesto.telefono,
+      telefonoCambia ? propuesto.telefono : null,
       propuesto.correoInstitucional,
       propuesto.correoPersonal,
     );
@@ -375,7 +391,8 @@ export class FuncionariosService {
     if (propuesto.cedula !== actual.cedula) {
       const otro = await this.repositorio.buscarPorCedula(propuesto.cedula);
       if (otro && otro.id !== id) {
-        throw new ValidacionError(
+        throw new ReglaNegocioError(
+          CODIGOS_ERROR.CEDULA_CON_FICHA,
           `La cédula ${propuesto.cedula} pertenece a otra ficha del maestro.`,
           { cedula: propuesto.cedula },
         );
@@ -639,10 +656,10 @@ export class FuncionariosService {
   }
 
   /**
-   * La zonal de la ficha es OPCIONAL (2026-09-21). Se ofrece al personal de la DMIP
-   * (OPERATIVOS/GENERAL/TECNICO); para INSTRUCCION la fija la matriz de cobertura del DMIT, no la
-   * ficha. Cuando LLEGA una zonal se exige que esté vigente en el catálogo; si no llega, se deja
-   * nula sin más.
+   * La zonal de la ficha es OPCIONAL (2026-09-21) y vale para TODAS las áreas: desde el
+   * 2026-10-08 la ficha de INSTRUCCION también la ofrece (antes solo la fijaba la matriz de
+   * cobertura del DMIT; las dos escriben la misma columna). Cuando LLEGA una zonal se exige que
+   * esté vigente en el catálogo; si no llega, se conserva la que hubiera.
    */
   private async exigirZonalVigente(
     zonalId: number | null | undefined,
@@ -673,7 +690,7 @@ export class FuncionariosService {
 
     if (telefono && !esTelefonoValido(telefono)) {
       throw new ValidacionError(
-        'El teléfono debe contener entre siete y trece dígitos.',
+        'El teléfono debe ser un celular de diez dígitos que empiece por 09, por ejemplo 0985144231.',
         {},
       );
     }

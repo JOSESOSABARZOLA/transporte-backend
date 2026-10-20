@@ -36,7 +36,10 @@ import {
 } from '@prisma/client';
 
 import { AuditoriaService } from '../../../common/auditoria/auditoria.service';
-import { ValidacionError } from '../../../common/errors/errores-dominio';
+import {
+  RecursoNoEncontradoError,
+  ValidacionError,
+} from '../../../common/errors/errores-dominio';
 import { LoggerService } from '../../../common/logger/logger.service';
 import { CuadroDiarioService } from '../../cuadro-diario/application/cuadro-diario.service';
 import {
@@ -159,6 +162,88 @@ export class SolicitudApoyoService {
     });
 
     return solicitud;
+  }
+
+  /**
+   * «PEDIR PRIORIZACIÓN» (Transporte DAF, Fase 3). Cuando el optimizador deja un operativo «sin
+   * recurso», la DAF avisa a QUIEN LO REGISTRÓ con las opciones de la reunión: propios medios,
+   * compartir carro o liberar otro operativo. Reutiliza la solicitud de apoyo (decisión del usuario,
+   * 2026-10-06): llega a la bandeja de esa dirección sin infraestructura nueva.
+   *
+   * A diferencia de `solicitar`, NO exige que el operativo sea del rol que pide: la DAF no es dueña
+   * de ningún formulario, y justamente le escribe al dueño. `areaRequerida` no aplica (null) y la
+   * `cantidad` es 1 (un pedido, no un cupo de personas).
+   *
+   * IDEMPOTENTE: si ya hay una abierta de este rol para el operativo, se devuelve esa.
+   */
+  async solicitarPriorizacion(
+    operativoId: number,
+    opciones: readonly string[],
+    motivo: string | null,
+    autor: Autor,
+  ): Promise<{ solicitud: SolicitudConOperativo; creada: boolean }> {
+    const operativo =
+      await this.repositorio.operativoParaPriorizar(operativoId);
+    if (!operativo) {
+      throw new RecursoNoEncontradoError(
+        'El operativo indicado no existe o fue retirado.',
+        { operativoId },
+      );
+    }
+
+    const abierta = await this.repositorio.buscarAbiertaDe(
+      operativoId,
+      autor.rol,
+    );
+    if (abierta) return { solicitud: abierta, creada: false };
+
+    const NOMBRES: Record<string, string> = {
+      PROPIOS_MEDIOS: 'ir por propios medios',
+      COMPARTIR: 'compartir carro',
+      LIBERAR_OTRO: 'liberar otro operativo',
+    };
+    const lista = (opciones.length > 0 ? opciones : Object.keys(NOMBRES))
+      .map((o) => NOMBRES[o] ?? o)
+      .join(', ');
+    const observacion =
+      `Priorización de transporte: la DAF no tiene conductor disponible para ${operativo.identificador}. Opciones: ${lista}.${motivo ? ` Motivo: ${motivo}` : ''}`.slice(
+        0,
+        400,
+      );
+
+    const solicitud = await this.repositorio.ejecutarEnTransaccion(
+      async (cliente) => {
+        const creada = await this.repositorio.crear(
+          {
+            operativoId,
+            rolSolicitante: autor.rol,
+            rolRequerido: operativo.creadoPorRol,
+            areaRequerida: null,
+            cantidad: 1,
+            observacion,
+          },
+          cliente,
+        );
+        await this.auditoria.registrar(
+          {
+            entidad: 't_solicitud_apoyo',
+            entidadId: creada.id,
+            operativoId,
+            accion: AccionAuditoria.CREAR,
+            usuario: autor.usuarioId,
+            rol: autor.rol,
+          },
+          cliente,
+        );
+        return creada;
+      },
+    );
+
+    this.logger.log('Priorización de transporte solicitada', {
+      identificador: operativo.identificador,
+      rolRequerido: operativo.creadoPorRol,
+    });
+    return { solicitud, creada: true };
   }
 
   /** Las solicitudes de un operativo. Para la pantalla de registro (P-01, M-22). */

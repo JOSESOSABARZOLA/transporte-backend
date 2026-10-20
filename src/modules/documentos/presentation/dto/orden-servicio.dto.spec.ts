@@ -37,7 +37,11 @@ describe('estadoDeOrden', () => {
 
   it('vigente con faltantes → BORRADOR (aunque conserve un número reservado)', () => {
     const faltantes = [
-      { token: 'nut', etiqueta: 'NUT', origen: 'cuadro' as const },
+      {
+        token: 'elaboradoPor',
+        etiqueta: 'Elaborado por',
+        origen: 'plantilla' as const,
+      },
     ];
     expect(estadoDeOrden(true, faltantes, false)).toBe('BORRADOR');
     expect(estadoDeOrden(true, faltantes, true)).toBe('BORRADOR');
@@ -80,7 +84,13 @@ describe('aOrdenServicioResponse (plantilla por Director, 2026-10-05)', () => {
   it('un BORRADOR nunca expone número, aunque tenga uno reservado (H36)', () => {
     const dto = aOrdenServicioResponse(
       ordenBase({}),
-      [{ token: 'nut', etiqueta: 'NUT', origen: 'cuadro' }],
+      [
+        {
+          token: 'elaboradoPor',
+          etiqueta: 'Elaborado por',
+          origen: 'plantilla',
+        },
+      ],
       contexto,
     );
     expect(dto.estado).toBe('BORRADOR');

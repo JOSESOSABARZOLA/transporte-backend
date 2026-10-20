@@ -25,7 +25,11 @@
  * la llama ya resolvió el estado. Así los casos se prueban sin levantar nada.
  */
 
-import { EstadoTransporte, PoliticaVehiculo } from '@prisma/client';
+import {
+  EstadoTransporte,
+  PoliticaVehiculo,
+  TipoTransporte,
+} from '@prisma/client';
 
 /** Celda del cuadro que la alerta marca. FASE2 §18.1. */
 export type CampoAlertado =
@@ -60,6 +64,13 @@ export interface EstadoParaAlertas {
   puntoLibre: string | null;
   /** RN-20. Ídem para el tipo de control. ALV-06. */
   tipoLibre: string | null;
+  /**
+   * Transporte requerido (2026-10-07). Lo que pide quien registra. Con PROPIOS_MEDIOS no se
+   * solicita vehículo a la DAF, así que no hay conductor que esperar: no hay ALV-02/03/04.
+   */
+  tipoTransporte: TipoTransporte;
+  /** ALV-07. El registro cambió el tipo con la asignación hecha y esta se liberó. */
+  transporteLiberado: boolean;
 }
 
 /**
@@ -102,6 +113,9 @@ function alertaPersonal(estado: EstadoParaAlertas): Alerta[] {
 function alertasDeTransporte(estado: EstadoParaAlertas): Alerta[] {
   if (estado.politicaVehiculo === PoliticaVehiculo.NO_APLICA) return [];
   if (estado.estadoTransporte !== EstadoTransporte.PENDIENTE) return [];
+  // Quien registra pidió PROPIOS_MEDIOS: no se solicita vehículo a la DAF y no hay nada que
+  // completar. Marcarlo en amarillo sería una alerta que nadie puede resolver.
+  if (estado.tipoTransporte === TipoTransporte.PROPIOS_MEDIOS) return [];
 
   // ALV-04. El condicionante nocturno convierte lo pendiente en crítico: RN-43 exige
   // conductor cuando el horario entra en la franja, y sin él el cuadro no cierra
@@ -123,7 +137,22 @@ function alertasDeTransporte(estado: EstadoParaAlertas): Alerta[] {
         critica: false,
       };
 
+  // ALV-07 (2026-10-07). El registro cambió el tipo de transporte con la asignación hecha y
+  // esta se liberó: la DAF debe volver a asignarlo. Va antes que el resto para que se vea primero.
+  const liberado: Alerta[] = estado.transporteLiberado
+    ? [
+        {
+          codigo: 'ALV-07',
+          campo: 'conductor',
+          mensaje:
+            'Transporte liberado: el registro cambió el tipo de transporte. La DAF debe volver a asignarlo.',
+          critica: false,
+        },
+      ]
+    : [];
+
   return [
+    ...liberado,
     conductor,
     {
       codigo: 'ALV-03',

@@ -27,7 +27,10 @@ import type {
   VigenteAnterior,
 } from '../infrastructure/orden-servicio.repository';
 import * as exportador from './exportador-orden-memorando';
-import { OrdenServicioService } from './orden-servicio.service';
+import {
+  OrdenServicioService,
+  tokensDeTramites,
+} from './orden-servicio.service';
 
 const CLIENTE = { marca: 'transaccion' };
 const JORNADA = new Date(Date.UTC(2026, 6, 31));
@@ -39,10 +42,11 @@ const DIRECTOR = {
 };
 
 /**
- * Datos generales del Director COMPLETOS: con ellos (y la config del día) la plantilla por defecto
+ * Datos generales del Director COMPLETOS: con ellos la plantilla por defecto
  * —que usa {{direccionResponsable}}, {{numeroMemorando}}, {{fechaMemorando}} y {{designado}}— no deja
  * faltantes de origen «plantilla», así que el borrador puede numerar. Incluyen el FIRMANTE (nombre,
- * cargo y dependencia), que desde el 2026-10-02 vive en los datos generales de la plantilla.
+ * cargo y dependencia), que desde el 2026-10-02 vive en los datos generales de la plantilla, y la
+ * TABLA DE CONTROL (acción, elaborado por y siglas), que vive ahí desde el 2026-10-08.
  */
 const DATOS_GENERALES_LLENOS = {
   direccionResponsable: 'Dirección Metropolitana de Inspección',
@@ -52,6 +56,10 @@ const DATOS_GENERALES_LLENOS = {
   firmante: 'Mgs. CARRERA LUIS',
   firmanteCargo: 'Director Metropolitano',
   firmanteDependencia: 'Dirección Metropolitana de Inspección',
+  // Tabla de control del final (2026-10-08): también de la plantilla.
+  accion: 'Elaborado por',
+  elaboradoPor: 'Analista PÉREZ',
+  siglasUnidad: 'DMI',
 };
 
 const persona = (funcionarioId: number, apellidos: string) => ({
@@ -101,11 +109,18 @@ const armar = (
     /** Parámetros de config del documento (D13): vacío = sin configurar. */
     ciudad?: string;
     siglasUnidad?: string;
-    /** Config del memorando POR CUADRO (D13, 2026-10-02): NUT y elaborado por (del día). */
+    /**
+     * Config del memorando POR CUADRO: desde el 2026-10-08 solo es el RESPALDO de «elaborado por»
+     * para las versiones de plantilla anteriores a la tabla de control (`legada`).
+     */
     configCuadro?: {
-      nut: string | null;
       elaboradoPor: string | null;
     };
+    /**
+     * La plantilla es de una versión ANTERIOR a la tabla de control (2026-10-08): sus datos generales
+     * no traen `accion`, `elaboradoPor` ni `siglasUnidad`, y la orden usa el respaldo.
+     */
+    legada?: boolean;
     /**
      * Datos generales del Director en la plantilla (2026-10-02): dirección, memorando, fecha y
      * designado. `null` = aún sin guardar → el servicio usa los de omisión (solo dirección llena).
@@ -118,8 +133,11 @@ const armar = (
       firmante?: string;
       firmanteCargo?: string;
       firmanteDependencia?: string;
+      accion?: string;
+      elaboradoPor?: string;
+      siglasUnidad?: string;
     } | null;
-    /** Borradores de la jornada que devuelve el repositorio al guardar la config del cuadro. */
+    /** Borradores del Director que devuelve el repositorio al guardar su plantilla. */
     borradores?: unknown[];
   } = {},
 ) => {
@@ -134,7 +152,8 @@ const armar = (
     firmanteDependencia = '',
     ciudad = '',
     siglasUnidad = '',
-    configCuadro = { nut: null, elaboradoPor: null },
+    configCuadro = { elaboradoPor: null },
+    legada = false,
     datosGenerales = null,
     borradores = [],
   } = opciones;
@@ -166,8 +185,6 @@ const armar = (
   const actualizarEditables = jest.fn().mockResolvedValue(undefined);
   const actualizarFirmante = jest.fn().mockResolvedValue(undefined);
   const obtenerConfigCuadro = jest.fn().mockResolvedValue(configCuadro);
-  const upsertConfigCuadro = jest.fn().mockResolvedValue(undefined);
-  const borradoresSinNumeroDeCuadro = jest.fn().mockResolvedValue(borradores);
   // Plantilla por Director (2026-10-05): los borradores de ESE Director al guardar su plantilla.
   const borradoresDeDirector = jest.fn().mockResolvedValue(borradores);
   const registrar = jest.fn().mockResolvedValue(undefined);
@@ -194,6 +211,14 @@ const armar = (
     firmanteCargo: datosGenerales?.firmanteCargo ?? firmanteCargo,
     firmanteDependencia:
       datosGenerales?.firmanteDependencia ?? firmanteDependencia,
+    // Tabla de control (2026-10-08). Una plantilla `legada` no la trae (versión anterior).
+    ...(legada
+      ? {}
+      : {
+          accion: datosGenerales?.accion ?? 'Elaborado por',
+          elaboradoPor: datosGenerales?.elaboradoPor ?? '',
+          siglasUnidad: datosGenerales?.siglasUnidad ?? '',
+        }),
   };
   // PLANTILLA POR DIRECTOR (2026-10-05). La del Director en sesión (id 77, versión 1) trae los
   // apartados de omisión (null) y los datos generales armados arriba. Cada orden se resuelve con SU
@@ -260,8 +285,6 @@ const armar = (
       actualizarEditables,
       actualizarFirmante,
       obtenerConfigCuadro,
-      upsertConfigCuadro,
-      borradoresSinNumeroDeCuadro,
       borradoresDeDirector,
       plantillaDeDirector,
       plantillaBase,
@@ -302,8 +325,6 @@ const armar = (
     actualizarEditables,
     actualizarFirmante,
     obtenerConfigCuadro,
-    upsertConfigCuadro,
-    borradoresSinNumeroDeCuadro,
     borradoresDeDirector,
     plantillaDeDirector,
     plantillaBase,
@@ -589,7 +610,6 @@ describe('G · numeración AMC-OS', () => {
           numeroMemorando: 'M-1',
           paraCargo: 'C',
           paraDependencia: 'D',
-          nut: 'N',
         },
         firmante: { nombre: 'X', cargo: 'CARGO', dependencia: 'DEP' },
         numeroSecuencial: 5572,
@@ -634,17 +654,16 @@ describe('G · numeración AMC-OS', () => {
       armar({
         firmanteCargo: 'CARGO',
         firmanteDependencia: 'DEP',
-        // Datos generales del Director (plantilla) completos y el NUT del día configurado.
+        // Datos generales del Director (plantilla) completos, con la tabla de control.
         datosGenerales: DATOS_GENERALES_LLENOS,
-        configCuadro: { nut: 'N', elaboradoPor: null },
         siguienteSecuencial: 5572,
       });
     paraCompletar.mockResolvedValue(ordenParaCompletar());
 
-    // Lo único que queda por completar en el editor por-orden es el cargo del destinatario.
+    // La ficha no tiene cargo y aun así se numera: el cargo sin dato va en blanco (2026-10-08).
     await servicio.guardarEditables(
       'OS-ABC-101-1',
-      { paraCargo: 'C' },
+      { numeroMemorando: 'M-1' },
       DIRECTOR.usuarioId,
     );
 
@@ -657,15 +676,14 @@ describe('G · numeración AMC-OS', () => {
       armar({
         firmanteCargo: 'CARGO',
         firmanteDependencia: 'DEP',
-        datosGenerales: DATOS_GENERALES_LLENOS,
-        // Falta el NUT en la config del cuadro: la orden sigue en borrador.
-        configCuadro: { nut: null, elaboradoPor: null },
+        // Falta quién elabora en la PLANTILLA (2026-10-08): la orden sigue en borrador.
+        datosGenerales: { ...DATOS_GENERALES_LLENOS, elaboradoPor: '' },
       });
     paraCompletar.mockResolvedValue(ordenParaCompletar());
 
     await servicio.guardarEditables(
       'OS-ABC-101-1',
-      { paraCargo: 'C' },
+      { numeroMemorando: 'M-1' },
       DIRECTOR.usuarioId,
     );
 
@@ -679,7 +697,6 @@ describe('G · numeración AMC-OS', () => {
         firmanteCargo: 'CARGO',
         firmanteDependencia: 'DEP',
         datosGenerales: DATOS_GENERALES_LLENOS,
-        configCuadro: { nut: 'N', elaboradoPor: null },
       });
     paraCompletar.mockResolvedValue(
       ordenParaCompletar({ numeroSecuencial: 5572, numeroAnio: 2026 }),
@@ -687,7 +704,7 @@ describe('G · numeración AMC-OS', () => {
 
     await servicio.guardarEditables(
       'OS-ABC-101-1',
-      { paraCargo: 'C' },
+      { numeroMemorando: 'M-1' },
       DIRECTOR.usuarioId,
     );
 
@@ -708,149 +725,287 @@ describe('G · numeración AMC-OS', () => {
 
     expect(fallo).toBeInstanceOf(RecursoNoEncontradoError);
   });
-
-  it('«Completar datos» (E21) MEZCLA el cargo sobre lo guardado y, con el resto listo, numera', async () => {
-    const {
-      servicio,
-      buscarPorCodigo,
-      paraCompletar,
-      actualizarEditables,
-      asignarNumero,
-    } = armar({
-      firmanteCargo: 'CARGO',
-      firmanteDependencia: 'DEP',
-      datosGenerales: DATOS_GENERALES_LLENOS,
-      configCuadro: { nut: 'N', elaboradoPor: null },
-      siguienteSecuencial: 5572,
-    });
-    // La orden ya tenía algún editable; completar el cargo NO debe borrarlo.
-    buscarPorCodigo.mockResolvedValue({
-      directorId: DIRECTOR.usuarioId,
-      editables: { numeroMemorando: 'previo' },
-    });
-    paraCompletar.mockResolvedValue(ordenParaCompletar());
-
-    await servicio.completarDatosPersona(
-      'OS-ABC-101-1',
-      'Agente de control',
-      DIRECTOR.usuarioId,
-    );
-
-    expect(actualizarEditables).toHaveBeenCalledWith(
-      'OS-ABC-101-1',
-      { numeroMemorando: 'previo', paraCargo: 'Agente de control' },
-      CLIENTE,
-    );
-    // Con el cargo del destinatario y la config del día completos, el borrador pasa a Vigente.
-    expect(asignarNumero).toHaveBeenCalledWith(42, 2026, 5572, CLIENTE);
-  });
-
-  it('«Completar datos» sobre una orden inexistente da 404', async () => {
-    const { servicio } = armar();
-
-    const fallo = await capturar(
-      servicio.completarDatosPersona(
-        'OS-NO-EXISTE',
-        'Agente',
-        DIRECTOR.usuarioId,
-      ),
-    );
-
-    expect(fallo).toBeInstanceOf(RecursoNoEncontradoError);
-  });
 });
 
-describe('D13 · config del memorando por cuadro', () => {
-  /** Un borrador de la jornada tal como lo devuelve `borradoresSinNumeroDeCuadro`. */
-  const borradorDeCuadro = (parcial: Record<string, unknown> = {}) => ({
-    id: 7,
-    codigo: 'OS-ICNECU-001-101-1',
-    firmante: { nombre: 'X', cargo: 'CARGO', dependencia: 'DEP' },
-    // El cargo ya está completado en el editor por-orden; lo del día llega con la config.
-    editables: { paraCargo: 'C' },
+/* ═══════════════════════════════════════════════════════════════════════════════
+   TABLA DE CONTROL DESDE LA PLANTILLA (2026-10-08)
+
+   El NUT dejó de imprimirse y la config del día dejó de editarse: «elaborado por» y las siglas de la
+   unidad viven en los datos generales de la plantilla de cada Director, versionados con ella. Una
+   orden resuelta con una versión ANTERIOR conserva lo de entonces por el respaldo.
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+describe('Tabla de control desde la plantilla (2026-10-08)', () => {
+  /** Una orden tal como la devuelve `buscarPorCodigo`, generada por `directorId` con su plantilla. */
+  const ordenDelDirector = (
+    directorId: number,
+    plantillaId: number,
+    editables: Record<string, string> | null = null,
+  ) => ({
+    id: 9,
+    codigo: `OS-ABC-${directorId}-1`,
+    vigente: true,
+    firmante: { nombre: 'X', cargo: 'C', dependencia: 'D' },
+    directorId,
+    plantillaId,
+    plantillaVersion: 2,
+    editables,
     numeroSecuencial: null,
     numeroAnio: null,
-    emitidaEn: new Date('2026-10-02T12:00:00Z'),
+    emitidaEn: new Date('2026-07-31T12:00:00Z'),
+    funcionarioId: 101,
     funcionario: {
       nombres: 'NOMBRE',
       apellidos: 'BENAVIDES',
       cargo: null,
       direccion: RolDepartamental.DMIP_OPERATIVOS,
+      telefono: null,
     },
-    ...parcial,
+    operativo: { cuadro: { fecha: JORNADA } },
   });
 
-  it('guarda la config y persiste vacío como NULL («sin configurar»)', async () => {
-    const { servicio, upsertConfigCuadro } = armar();
+  it('la fila sale con la acción, quién elabora y las siglas de la plantilla, y la fecha de emisión', async () => {
+    const { servicio, buscarPorCodigo, versionesDePlantilla } = armar();
+    buscarPorCodigo.mockResolvedValueOnce(ordenDelDirector(14, 1));
+    versionesDePlantilla.mockResolvedValueOnce([
+      {
+        plantillaId: 1,
+        version: 2,
+        apartados: null,
+        datosGenerales: {
+          ...DATOS_GENERALES_LLENOS,
+          accion: 'Revisado por',
+          elaboradoPor: 'Jose Sosa',
+          siglasUnidad: 'dmi',
+        },
+      },
+    ]);
 
-    const guardada = await servicio.guardarConfigCuadro(JORNADA, {
-      nut: '  N-1  ',
-      elaboradoPor: '   ',
+    const datos = await servicio.datosDeMemorando('OS-ABC-14-1');
+
+    expect(datos.accion).toBe('Revisado por');
+    expect(datos.elaboradoPor).toBe('Jose Sosa');
+    // Las siglas se normalizan a mayúsculas.
+    expect(datos.siglasUnidad).toBe('DMI');
+    // La fecha es la de emisión de la jornada (automática).
+    expect(datos.fechaEmision).toBe('31/07/2026');
+    // El NUT ya no viaja al documento.
+    expect(datos).not.toHaveProperty('nut');
+  });
+
+  it('dos Directores obtienen valores distintos, cada uno según SU plantilla', async () => {
+    const { servicio, buscarPorCodigo, versionesDePlantilla } = armar();
+    const dePlantilla = (
+      plantillaId: number,
+      nombre: string,
+      siglas: string,
+    ) => ({
+      plantillaId,
+      version: 2,
+      apartados: null,
+      datosGenerales: {
+        ...DATOS_GENERALES_LLENOS,
+        elaboradoPor: nombre,
+        siglasUnidad: siglas,
+      },
     });
+    buscarPorCodigo
+      .mockResolvedValueOnce(ordenDelDirector(14, 1))
+      .mockResolvedValueOnce(ordenDelDirector(20, 2));
+    versionesDePlantilla
+      .mockResolvedValueOnce([dePlantilla(1, 'Jose Sosa', 'DMI')])
+      .mockResolvedValueOnce([dePlantilla(2, 'Ana Simbaña', 'DMIT')]);
 
-    // Se recorta el texto y el campo en blanco queda NULL. El número de memorando ya NO va aquí.
-    expect(guardada).toEqual({ nut: 'N-1', elaboradoPor: null });
-    expect(upsertConfigCuadro).toHaveBeenCalledWith(
-      JORNADA,
-      { nut: 'N-1', elaboradoPor: null },
-      CLIENTE,
+    const primera = await servicio.datosDeMemorando('OS-ABC-14-1');
+    const segunda = await servicio.datosDeMemorando('OS-ABC-20-1');
+
+    expect([primera.elaboradoPor, primera.siglasUnidad]).toEqual([
+      'Jose Sosa',
+      'DMI',
+    ]);
+    expect([segunda.elaboradoPor, segunda.siglasUnidad]).toEqual([
+      'Ana Simbaña',
+      'DMIT',
+    ]);
+  });
+
+  it('sin quién elabora o sin siglas en la plantilla, la orden es Borrador por un faltante de origen «plantilla»', async () => {
+    const { servicio, buscarPorCodigo, versionesDePlantilla } = armar();
+    buscarPorCodigo.mockResolvedValueOnce(ordenDelDirector(14, 1));
+    versionesDePlantilla.mockResolvedValueOnce([
+      {
+        plantillaId: 1,
+        version: 2,
+        apartados: null,
+        datosGenerales: {
+          ...DATOS_GENERALES_LLENOS,
+          elaboradoPor: '',
+          siglasUnidad: '',
+        },
+      },
+    ]);
+
+    const datos = await servicio.datosDeMemorando('OS-ABC-14-1');
+
+    expect(datos.esBorrador).toBe(true);
+    const faltantes = await servicio.faltantesPorCodigo([
+      ordenDelDirector(14, 1),
+    ] as unknown as Parameters<typeof servicio.faltantesPorCodigo>[0]);
+    expect(faltantes.get('OS-ABC-14-1')).toEqual(
+      expect.arrayContaining([
+        {
+          token: 'elaboradoPor',
+          etiqueta: 'Elaborado por',
+          origen: 'plantilla',
+        },
+        {
+          token: 'siglasUnidad',
+          etiqueta: 'Siglas de la unidad',
+          origen: 'plantilla',
+        },
+      ]),
     );
   });
 
-  it('al guardar, PROMUEVE los borradores de la jornada que quedan completos', async () => {
-    const { servicio, siguienteSecuencial, asignarNumero, registrar } = armar({
-      firmanteCargo: 'CARGO',
-      firmanteDependencia: 'DEP',
-      datosGenerales: DATOS_GENERALES_LLENOS,
-      siguienteSecuencial: 5572,
-      borradores: [borradorDeCuadro()],
-    });
-
-    await servicio.guardarConfigCuadro(JORNADA, {
-      nut: 'N',
-      elaboradoPor: null,
-    });
-
-    // Con la config del día completa, el borrador ya no tiene faltantes y recibe su número.
-    expect(siguienteSecuencial).toHaveBeenCalledWith(2026, CLIENTE);
-    expect(asignarNumero).toHaveBeenCalledWith(7, 2026, 5572, CLIENTE);
-    expect(registrar).toHaveBeenCalledWith(
-      expect.objectContaining({
-        entidad: 't_orden_servicio',
-        entidadId: 7,
-        accion: AccionAuditoria.EMITIR,
-      }),
-      CLIENTE,
-    );
-  });
-
-  it('un borrador que sigue incompleto tras guardar la config NO se numera', async () => {
-    const { servicio, siguienteSecuencial, asignarNumero } = armar({
-      firmanteCargo: 'CARGO',
-      firmanteDependencia: 'DEP',
-      datosGenerales: DATOS_GENERALES_LLENOS,
-      borradores: [borradorDeCuadro()],
-    });
-
-    // Se guarda la config SIN el NUT: el borrador sigue teniéndolo como faltante.
-    await servicio.guardarConfigCuadro(JORNADA, {
-      nut: null,
-      elaboradoPor: null,
-    });
-
-    expect(siguienteSecuencial).not.toHaveBeenCalled();
-    expect(asignarNumero).not.toHaveBeenCalled();
-  });
-
-  it('lee la config de una jornada (NULL donde no se ha configurado)', async () => {
+  it('sin NUT ya no hay faltante: con la plantilla completa, nada de «NUT» en los faltantes', async () => {
     const { servicio } = armar({
-      configCuadro: { nut: 'N-9', elaboradoPor: null },
+      datosGenerales: DATOS_GENERALES_LLENOS,
     });
 
-    await expect(servicio.obtenerConfigCuadro(JORNADA)).resolves.toEqual({
-      nut: 'N-9',
-      elaboradoPor: null,
+    const faltantes = await servicio.faltantesPorCodigo([
+      ordenDelDirector(5, 77, { paraCargo: 'Agente' }),
+    ] as unknown as Parameters<typeof servicio.faltantesPorCodigo>[0]);
+
+    expect(faltantes.get('OS-ABC-5-1')).toEqual([]);
+  });
+
+  it('una versión ANTERIOR a la tabla de control usa el respaldo: «elaborado por» del día y siglas del parámetro', async () => {
+    const { servicio, buscarPorCodigo, obtenerConfigCuadro } = armar({
+      legada: true,
+      datosGenerales: DATOS_GENERALES_LLENOS,
+      configCuadro: { elaboradoPor: 'Bryam Simbaña' },
+      siglasUnidad: 'amc-dmi',
     });
+    buscarPorCodigo.mockResolvedValueOnce(ordenDelDirector(5, 77));
+
+    const datos = await servicio.datosDeMemorando('OS-ABC-5-1');
+
+    expect(obtenerConfigCuadro).toHaveBeenCalledWith(JORNADA);
+    expect(datos.accion).toBe('Elaborado por');
+    expect(datos.elaboradoPor).toBe('Bryam Simbaña');
+    expect(datos.siglasUnidad).toBe('AMC-DMI');
+  });
+
+  it('una versión ANTERIOR sin siglas en el parámetro toma las que se guardaron en la orden', async () => {
+    const { servicio, buscarPorCodigo } = armar({
+      legada: true,
+      datosGenerales: DATOS_GENERALES_LLENOS,
+    });
+    buscarPorCodigo.mockResolvedValueOnce(
+      ordenDelDirector(5, 77, { siglasUnidad: 'GADDMQ-AMC' }),
+    );
+
+    const datos = await servicio.datosDeMemorando('OS-ABC-5-1');
+
+    expect(datos.siglasUnidad).toBe('GADDMQ-AMC');
+  });
+
+  it('al guardar la plantilla, las siglas quedan en mayúsculas y la acción vacía vuelve a «Elaborado por»', async () => {
+    const { servicio, guardarNuevaVersion } = armar();
+
+    const devuelto = await servicio.guardarPlantilla(
+      [],
+      { ...DATOS_GENERALES_LLENOS, accion: '  ', siglasUnidad: ' dmi ' },
+      DIRECTOR.usuarioId,
+    );
+
+    expect(devuelto.datosGenerales.accion).toBe('Elaborado por');
+    expect(devuelto.datosGenerales.siglasUnidad).toBe('DMI');
+    expect(guardarNuevaVersion).toHaveBeenCalledWith(
+      77,
+      [],
+      expect.objectContaining({ accion: 'Elaborado por', siglasUnidad: 'DMI' }),
+      DIRECTOR.usuarioId,
+      CLIENTE,
+    );
+  });
+
+  it('la plantilla de un Director nuevo nace con «Elaborado por» y las siglas del parámetro', async () => {
+    const { servicio, plantillaDeDirector, crearPlantillaDirector } = armar({
+      siglasUnidad: 'dmi',
+    });
+    plantillaDeDirector.mockResolvedValueOnce(null);
+    crearPlantillaDirector.mockImplementation(
+      (datos: { datosGenerales: unknown }) =>
+        Promise.resolve({
+          id: 90,
+          version: 1,
+          apartados: null,
+          datosGenerales: datos.datosGenerales,
+        }),
+    );
+
+    const plantilla = await servicio.plantillaDelDirector(DIRECTOR.usuarioId);
+
+    expect(plantilla.datosGenerales).toEqual(
+      expect.objectContaining({
+        accion: 'Elaborado por',
+        elaboradoPor: '',
+        siglasUnidad: 'DMI',
+      }),
+    );
+  });
+
+  /* CARGO DESDE LA FICHA (2026-10-08): sale de `func_cargo`; sin dato va en blanco, sin faltante. */
+
+  it('el cargo sale de la ficha de Personal aunque la orden guarde un `paraCargo` antiguo', async () => {
+    const { servicio, buscarPorCodigo } = armar({
+      datosGenerales: DATOS_GENERALES_LLENOS,
+    });
+    const orden = ordenDelDirector(5, 77, { paraCargo: 'Agente antiguo' });
+    buscarPorCodigo.mockResolvedValueOnce({
+      ...orden,
+      funcionario: { ...orden.funcionario, cargo: '  Inspector General ' },
+    });
+
+    const datos = await servicio.datosDeMemorando('OS-ABC-5-1');
+
+    expect(datos.para.cargo).toBe('Inspector General');
+  });
+
+  it('una ficha SIN cargo deja el cargo en blanco y no es faltante', async () => {
+    const { servicio, buscarPorCodigo } = armar({
+      datosGenerales: DATOS_GENERALES_LLENOS,
+    });
+    buscarPorCodigo.mockResolvedValueOnce(ordenDelDirector(5, 77));
+
+    const datos = await servicio.datosDeMemorando('OS-ABC-5-1');
+    const faltantes = await servicio.faltantesPorCodigo([
+      ordenDelDirector(5, 77),
+    ] as unknown as Parameters<typeof servicio.faltantesPorCodigo>[0]);
+
+    expect(datos.para.cargo).toBe('');
+    expect(faltantes.get('OS-ABC-5-1')).toEqual([]);
+  });
+
+  it('{{cargo}} en el cuerpo, sin cargo en la ficha, queda en blanco y no como «[Cargo…]»', async () => {
+    const { servicio, buscarPorCodigo, versionesDePlantilla } = armar();
+    buscarPorCodigo.mockResolvedValueOnce(ordenDelDirector(14, 1));
+    versionesDePlantilla.mockResolvedValueOnce([
+      {
+        plantillaId: 1,
+        version: 2,
+        apartados: [
+          { titulo: 'PARA', tipo: 'texto', contenido: 'Cargo: {{cargo}}.' },
+        ],
+        datosGenerales: DATOS_GENERALES_LLENOS,
+      },
+    ]);
+
+    const datos = await servicio.datosDeMemorando('OS-ABC-14-1');
+
+    expect(JSON.stringify(datos)).not.toContain('[Cargo');
+    expect(datos.apartados[0].contenido).toBe('Cargo: .');
   });
 });
 
@@ -860,7 +1015,7 @@ describe('F · el firmante de la plantilla promueve los borradores al guardarla'
     id: 7,
     codigo: 'OS-ICNECU-001-101-1',
     firmante,
-    // El cargo del destinatario ya está completo; lo único pendiente era el firmante.
+    // Lo único pendiente era el firmante. El `paraCargo` viejo se conserva en el JSON pero no se lee.
     editables: { paraCargo: 'Agente de control' },
     numeroSecuencial: null,
     numeroAnio: null,
@@ -877,7 +1032,6 @@ describe('F · el firmante de la plantilla promueve los borradores al guardarla'
   it('re-sella el firmante incompleto de un borrador y lo promueve a Vigente con su número', async () => {
     const { servicio, actualizarFirmante, asignarNumero, siguienteSecuencial } =
       armar({
-        configCuadro: { nut: 'N-1', elaboradoPor: 'DMI' },
         siguienteSecuencial: 5572,
         borradores: [
           borradorGlobal({ nombre: '', cargo: '', dependencia: '' }),
@@ -907,7 +1061,6 @@ describe('F · el firmante de la plantilla promueve los borradores al guardarla'
 
   it('no re-sella una firma ya válida (F20)', async () => {
     const { servicio, actualizarFirmante } = armar({
-      configCuadro: { nut: 'N-1', elaboradoPor: 'DMI' },
       borradores: [
         borradorGlobal({ nombre: 'X', cargo: 'C', dependencia: 'D' }),
       ],
@@ -1127,6 +1280,10 @@ describe('Plantilla por Director (2026-10-05)', () => {
       firmante: '',
       firmanteCargo: '',
       firmanteDependencia: '',
+      // Tabla de control (2026-10-08): la acción tiene valor por omisión; lo demás queda vacío.
+      accion: 'Elaborado por',
+      elaboradoPor: '',
+      siglasUnidad: '',
     });
   });
 
@@ -1187,7 +1344,6 @@ describe('Plantilla por Director (2026-10-05)', () => {
   it('con datos generales completos, una orden nueva nace Vigente y numera', async () => {
     const { servicio, asignarNumero, emitidas } = armar({
       datosGenerales: DATOS_GENERALES_LLENOS,
-      configCuadro: { nut: 'N', elaboradoPor: null },
       operativoActual: operativo({
         personal: [
           {
@@ -1221,7 +1377,6 @@ describe('Plantilla por Director (2026-10-05)', () => {
         direccionResponsable: '',
         firmante: '',
       },
-      configCuadro: { nut: 'N', elaboradoPor: null },
       operativoActual: operativo({
         personal: [
           {
@@ -1271,23 +1426,12 @@ describe('Propiedad de la orden (2026-10-05)', () => {
     paraCompletar.mockResolvedValueOnce(ordenDe(14));
 
     const fallo = await capturar(
-      servicio.guardarEditables('OS-ABC-101-1', { paraCargo: 'C' }, 20),
+      servicio.guardarEditables('OS-ABC-101-1', { numeroMemorando: 'M-1' }, 20),
     );
 
     expect(fallo).toBeInstanceOf(AutorizacionError);
     expect((fallo as AutorizacionError).message).toContain('solo lectura');
     expect(actualizarEditables).not.toHaveBeenCalled();
-  });
-
-  it('«Completar datos» sobre una orden ajena también es 403', async () => {
-    const { servicio, buscarPorCodigo } = armar();
-    buscarPorCodigo.mockResolvedValueOnce(ordenDe(14));
-
-    const fallo = await capturar(
-      servicio.completarDatosPersona('OS-ABC-101-1', 'Agente', 20),
-    );
-
-    expect(fallo).toBeInstanceOf(AutorizacionError);
   });
 
   it('no se reemiten las órdenes vigentes que generó OTRO Director (403)', async () => {
@@ -1376,7 +1520,16 @@ describe('Paso automático a Vigente y numeración por año (2026-10-05)', () =>
         },
       ] as unknown as Parameters<typeof servicio.asegurarVigencia>[0],
       new Map([
-        ['OS-X-1', [{ token: 'nut', etiqueta: 'NUT', origen: 'cuadro' }]],
+        [
+          'OS-X-1',
+          [
+            {
+              token: 'elaboradoPor',
+              etiqueta: 'Elaborado por',
+              origen: 'plantilla',
+            },
+          ],
+        ],
       ]),
     );
 
@@ -1464,5 +1617,38 @@ describe('OrdenServicioService · la vista previa no usa la fecha de hoy (2026-1
       'Fecha de emisión: [Fecha de emisión]',
     );
     espia.mockRestore();
+  });
+});
+
+describe('tokensDeTramites · el trámite de Inspección en la orden (2026-10-07)', () => {
+  const copia = (codigoTramite: string, materia: string | null = null) => ({
+    tramiteInspeccion: {
+      codigoTramite,
+      nroSitra: `SITRA-${codigoTramite}`,
+      predio: null,
+      zonal: 'Los Chillos',
+      materia,
+    },
+  });
+
+  it('une los trámites DISTINTOS del día; las copias del 8 no se repiten', () => {
+    const tokens = tokensDeTramites([
+      copia('DENUNCIA-26-3415', 'Espacio público'),
+      copia('DENUNCIA-26-3415', 'Espacio público'),
+      copia('ESCRITO-26-0489'),
+      { tramiteInspeccion: null },
+    ]);
+
+    expect(tokens.tramiteCodigo).toBe('DENUNCIA-26-3415; ESCRITO-26-0489');
+    expect(tokens.tramiteSitra).toBe(
+      'SITRA-DENUNCIA-26-3415; SITRA-ESCRITO-26-0489',
+    );
+    // Los vacíos no dejan separadores colgando.
+    expect(tokens.tramiteMateria).toBe('Espacio público');
+    expect(tokens.tramitePredio).toBe('');
+  });
+
+  it('sin trámites, todo vacío', () => {
+    expect(tokensDeTramites([]).tramiteCodigo).toBe('');
   });
 });

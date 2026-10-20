@@ -25,6 +25,7 @@ import type { OperativosService } from '../../operativos/application/operativos.
 import type { OperativoCompleto } from '../../operativos/infrastructure/operativos.repository';
 import type { ElegibilidadService } from '../../talento-operativo/application/elegibilidad.service';
 import type { FlotaRepository } from '../infrastructure/flota.repository';
+import type { PlanificacionTransporteService } from './planificacion-transporte.service';
 import { TransporteService } from './transporte.service';
 
 const JORNADA = new Date(Date.UTC(2026, 11, 2));
@@ -82,18 +83,13 @@ const armar = (
     conductor?: Record<string, unknown> | null;
     vehiculo?: Record<string, unknown> | null;
     ausenciaVehiculo?: { estado: EstadoDisponibilidad; hasta: Date } | null;
-    /** RN-DAF-01. Operativos que ya ocupan el vehículo esa fecha. */
-    ocupacionesVehiculo?: {
-      identificador: string;
-      horaInicio: string;
-      horaFin: string;
-    }[];
+    /** Lo que responde la asignación por tramos (2026-10-14): un rechazo, si lo hay. */
+    rechazoBloque?: Error;
     ausentes?: number[];
     /** PV-33. Toda la flota activa, no solo la de los conductores libres. */
     flotaCompleta?: Record<string, unknown>[];
     /** PV-33. Ausencias de la flota en la fecha, por identificador de vehículo. */
     ausenciasFlota?: Map<number, { estado: EstadoDisponibilidad; hasta: Date }>;
-    veredicto?: { elegible: boolean; codigo?: string; motivo?: string };
     escrituraBloqueada?: Error;
     /** Semáforo de carga por conductor (advisory), para el desplegable de la DAF. */
     cargasConductor?: Map<number, { nivelFatiga: string }>;
@@ -104,38 +100,41 @@ const armar = (
     conductor = CONDUCTOR,
     vehiculo = VEHICULO,
     ausenciaVehiculo = null,
-    ocupacionesVehiculo = [],
+    rechazoBloque,
     ausentes = [],
     flotaCompleta = [VEHICULO],
     ausenciasFlota = new Map(),
-    veredicto = { elegible: true },
     escrituraBloqueada,
     cargasConductor = new Map(),
   } = opciones;
 
-  /** Lo que el servicio pidió escribir, con tipo, para poder afirmar sobre ello. */
-  const escrituras: ({ conductorId: number; vehiculoId: number } | null)[] = [];
-
-  const asignarTransporte = jest
+  // Lo usa solo «propios medios»: la asignación va por tramos.
+  const asignarTransporte = jest.fn().mockResolvedValue(
+    operativo({
+      estadoTransporte: EstadoTransporte.PROPIOS_MEDIOS,
+      alertaActiva: false,
+    }),
+  );
+  // La primera lectura es el operativo tal cual; las siguientes, como queda tras asignar.
+  const obtener = jest
     .fn()
-    .mockImplementation(
-      (
-        _id: number,
-        datos: { conductorId: number; vehiculoId: number } | null,
-      ) => {
-        escrituras.push(datos);
-
-        return Promise.resolve(
-          operativo({
-            estadoTransporte: datos
-              ? EstadoTransporte.ASIGNADO
-              : EstadoTransporte.PROPIOS_MEDIOS,
-            alertaActiva: false,
-          }),
-        );
-      },
+    .mockResolvedValueOnce(operativoActual)
+    .mockResolvedValue(
+      operativo({
+        estadoTransporte: EstadoTransporte.ASIGNADO,
+        conductorId: 70,
+        vehiculoId: 80,
+        alertaActiva: false,
+      }),
     );
-  const obtener = jest.fn().mockResolvedValue(operativoActual);
+  const asignarBloque = jest
+    .fn()
+    .mockImplementation(() =>
+      rechazoBloque
+        ? Promise.reject(rechazoBloque)
+        : Promise.resolve({ tramosAsignados: 1 }),
+    );
+  const liberarOperativo = jest.fn().mockResolvedValue(1);
   const consultarPendientesDeTransporte = jest.fn().mockResolvedValue([]);
   const desasignarTransporte = jest.fn().mockResolvedValue(
     operativo({
@@ -145,7 +144,6 @@ const armar = (
       alertaActiva: true,
     }),
   );
-  const verificarConductor = jest.fn().mockResolvedValue(veredicto);
   const calcularCargasConductores = jest
     .fn()
     .mockResolvedValue(cargasConductor);
@@ -162,7 +160,6 @@ const armar = (
     buscarConductor: jest.fn().mockResolvedValue(conductor),
     buscarVehiculo: jest.fn().mockResolvedValue(vehiculo),
     ausenciaDeVehiculo: jest.fn().mockResolvedValue(ausenciaVehiculo),
-    asignacionesDelVehiculoEn: jest.fn().mockResolvedValue(ocupacionesVehiculo),
     listarConductores: jest.fn().mockResolvedValue([CONDUCTOR]),
     conductoresAusentes: jest.fn().mockResolvedValue(new Set(ausentes)),
     listarVehiculos: jest.fn().mockResolvedValue(flotaCompleta),
@@ -177,12 +174,13 @@ const armar = (
       desasignarTransporte,
       consultarPendientesDeTransporte,
     } as unknown as OperativosService,
-    {
-      verificarConductor,
-      calcularCargasConductores,
-    } as unknown as ElegibilidadService,
+    { calcularCargasConductores } as unknown as ElegibilidadService,
     { exigirEscritura } as unknown as CuadroDiarioService,
     { log } as unknown as LoggerService,
+    {
+      asignarBloque,
+      liberarOperativo,
+    } as unknown as PlanificacionTransporteService,
   );
 
   return {
@@ -190,9 +188,9 @@ const armar = (
     flota,
     asignarTransporte,
     desasignarTransporte,
-    escrituras,
+    asignarBloque,
+    liberarOperativo,
     obtener,
-    verificarConductor,
     exigirEscritura,
     consultarPendientesDeTransporte,
     log,
@@ -203,8 +201,17 @@ const capturar = async (promesa: Promise<unknown>): Promise<unknown> =>
   promesa.catch((error: unknown) => error);
 
 describe('TransporteService · asignación', () => {
-  it('caso 1 del plan · asigna conductor y vehículo, y la alerta se retira', async () => {
-    const { servicio, asignarTransporte } = armar();
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════════
+   * 2026-10-14 · UNA SOLA FUENTE DE OCUPACIÓN. El endpoint clásico ya no escribe conductor y
+   * vehículo en el operativo por su cuenta: delega en la asignación POR TRAMOS, que aplica
+   * las mismas reglas que «Planificar el día» (solapamiento y traslado por tramo, la placa
+   * ocupada RN-DAF-01, RN-44 y RN-25). Aquí se prueba el cableado; las reglas, en
+   * `planificacion-transporte.service.spec.ts` y en las políticas.
+   * ═══════════════════════════════════════════════════════════════════════════════
+   */
+  it('caso 1 del plan · asigna por tramos y devuelve el operativo ya asignado', async () => {
+    const { servicio, asignarBloque } = armar();
 
     const resultado = await servicio.asignar(
       500,
@@ -212,9 +219,13 @@ describe('TransporteService · asignación', () => {
       DAF,
     );
 
-    expect(asignarTransporte).toHaveBeenCalledWith(
-      500,
-      { conductorId: 70, vehiculoId: 80 },
+    expect(asignarBloque).toHaveBeenCalledWith(
+      {
+        fecha: JORNADA,
+        operativoIds: [500],
+        conductorId: 70,
+        vehiculoId: 80,
+      },
       DAF,
     );
     expect(resultado.operativo.estadoTransporte).toBe(
@@ -225,135 +236,39 @@ describe('TransporteService · asignación', () => {
     expect(resultado.vehiculo?.placa).toBe('PBA1234');
   });
 
-  it('caso 11 del plan · el servicio solo pide escribir conductor, vehículo y estado', async () => {
-    const { servicio, escrituras } = armar();
+  it('caso 11 del plan · solo viajan conductor y vehículo del operativo (regla 3)', async () => {
+    const { servicio, asignarBloque, asignarTransporte } = armar();
 
     await servicio.asignar(500, { conductorId: 70, vehiculoId: 80 }, DAF);
 
-    // La firma de `asignarTransporte` no admite otra columna: lo que se envía tiene
-    // exactamente dos claves, y el estado lo deriva el propio método.
-    expect(Object.keys(escrituras[0] ?? {}).sort()).toEqual([
+    const [datos] = asignarBloque.mock.calls[0] as [Record<string, unknown>];
+    expect(Object.keys(datos).sort()).toEqual([
       'conductorId',
+      'fecha',
+      'operativoIds',
       'vehiculoId',
     ]);
-  });
-
-  it('consulta el descanso del conductor con el horario del operativo', async () => {
-    const { servicio, verificarConductor } = armar();
-
-    await servicio.asignar(500, { conductorId: 70, vehiculoId: 80 }, DAF);
-
-    expect(verificarConductor).toHaveBeenCalledWith(70, {
-      fecha: JORNADA,
-      horaInicio: '08:00',
-      horaFin: '12:00',
-      esPatrulla: false,
-      operativoId: 500,
-    });
-  });
-
-  it('casos 5, 6 y 7 · el veredicto de descanso se traslada tal cual', async () => {
-    for (const veredicto of [
-      {
-        elegible: false,
-        codigo: 'PERSONA_NO_DISPONIBLE',
-        motivo: 'de vacaciones',
-      },
-      {
-        elegible: false,
-        codigo: 'CONDUCTOR_PATRULLA_CONSECUTIVA',
-        motivo: 'condujo en patrulla',
-      },
-      {
-        elegible: false,
-        codigo: 'SOLAPAMIENTO_HORARIO',
-        motivo: 'ya conduce en el operativo PMO-002',
-      },
-    ]) {
-      const { servicio, asignarTransporte } = armar({ veredicto });
-
-      const fallo = await capturar(
-        servicio.asignar(500, { conductorId: 70, vehiculoId: 80 }, DAF),
-      );
-
-      expect((fallo as ReglaNegocioError).code).toBe(veredicto.codigo);
-      expect((fallo as ReglaNegocioError).message).toContain(veredicto.motivo);
-      expect(asignarTransporte).not.toHaveBeenCalled();
-    }
-  });
-
-  /**
-   * ═══════════════════════════════════════════════════════════════════════════════
-   * RN-DAF-01 · 2026-08-28. Hasta esta fecha las tres pruebas siguientes no existían
-   * porque la comprobación tampoco: el servicio verificaba que el vehículo existiera,
-   * que no estuviera de baja y que no estuviera en taller ese día, y nunca miraba si ya
-   * estaba sirviendo a otro operativo a la misma hora.
-   *
-   * La aritmética la prueba `ocupacion-vehiculo.spec.ts`. Lo que se prueba AQUÍ es el
-   * cableado: que el servicio consulta, que traslada el rechazo con su código propio y
-   * que no llega a escribir.
-   * ═══════════════════════════════════════════════════════════════════════════════
-   */
-  it('RN-DAF-01 · rechaza la placa que ya sirve a otro operativo cruzado', async () => {
-    const { servicio, asignarTransporte } = armar({
-      ocupacionesVehiculo: [
-        {
-          identificador: 'PMO-007-02-DIC-2026',
-          horaInicio: '10:00',
-          horaFin: '14:00',
-        },
-      ],
-    });
-
-    const fallo = await capturar(
-      servicio.asignar(500, { conductorId: 70, vehiculoId: 80 }, DAF),
-    );
-
-    expect(fallo).toBeInstanceOf(ReglaNegocioError);
-    expect((fallo as ReglaNegocioError).code).toBe('VEHICULO_OCUPADO');
-    // El mensaje llega íntegro a la DAF: nombra la placa y el operativo que estorba.
-    expect((fallo as ReglaNegocioError).message).toContain('PBA1234');
-    expect((fallo as ReglaNegocioError).message).toContain(
-      'PMO-007-02-DIC-2026',
-    );
+    // El servicio ya no escribe el operativo directamente: lo sincroniza la asignación.
     expect(asignarTransporte).not.toHaveBeenCalled();
   });
 
-  it('RN-DAF-01 · la misma placa encadena si el horario no se cruza', async () => {
-    const { servicio, asignarTransporte } = armar({
-      // El operativo de prueba es de 08H00 a 12H00: este empieza justo donde termina.
-      ocupacionesVehiculo: [
-        {
-          identificador: 'PMO-007-02-DIC-2026',
-          horaInicio: '12:00',
-          horaFin: '16:00',
-        },
-      ],
-    });
-
-    await servicio.asignar(500, { conductorId: 70, vehiculoId: 80 }, DAF);
-
-    expect(asignarTransporte).toHaveBeenCalled();
-  });
-
-  /**
-   * Sin excluir el propio operativo, cambiar de conductor conservando el vehículo se
-   * rechazaría a sí mismo, y ese es el camino de la reasignación.
-   */
-  it('RN-DAF-01 · al consultar la ocupación excluye el operativo que se está asignando', async () => {
-    const { servicio, flota } = armar();
-
-    await servicio.asignar(500, { conductorId: 70, vehiculoId: 80 }, DAF);
-
-    expect(flota.asignacionesDelVehiculoEn).toHaveBeenCalledWith(
-      80,
-      JORNADA,
-      500,
+  it('el rechazo de la asignación por tramos (descanso, solapamiento, placa) se traslada tal cual', async () => {
+    const rechazo = new ReglaNegocioError(
+      'VEHICULO_OCUPADO',
+      'La placa PBA1234 ya está con OTRO CONDUCTOR de 10:00 a 14:00.',
+      {},
     );
+    const { servicio, obtener } = armar({ rechazoBloque: rechazo });
+
+    await expect(
+      servicio.asignar(500, { conductorId: 70, vehiculoId: 80 }, DAF),
+    ).rejects.toBe(rechazo);
+    // No se relee el operativo: no cambió.
+    expect(obtener).toHaveBeenCalledTimes(1);
   });
 
   it('INV-13 · un formulario que opera por propios medios no admite conductor', async () => {
-    const { servicio, asignarTransporte } = armar({
+    const { servicio, asignarBloque } = armar({
       operativoActual: operativo({
         formulario: {
           id: 1,
@@ -371,7 +286,7 @@ describe('TransporteService · asignación', () => {
 
     expect(fallo).toBeInstanceOf(ReglaNegocioError);
     expect((fallo as ReglaNegocioError).message).toContain('propios medios');
-    expect(asignarTransporte).not.toHaveBeenCalled();
+    expect(asignarBloque).not.toHaveBeenCalled();
   });
 
   it('un conductor inexistente produce 404', async () => {
@@ -429,14 +344,14 @@ describe('TransporteService · asignación', () => {
 
   it('un cuadro cerrado no admite asignación', async () => {
     const cerrado = new Error('cuadro cerrado');
-    const { servicio, asignarTransporte } = armar({
+    const { servicio, asignarBloque } = armar({
       escrituraBloqueada: cerrado,
     });
 
     await expect(
       servicio.asignar(500, { conductorId: 70, vehiculoId: 80 }, DAF),
     ).rejects.toBe(cerrado);
-    expect(asignarTransporte).not.toHaveBeenCalled();
+    expect(asignarBloque).not.toHaveBeenCalled();
   });
 });
 
@@ -640,8 +555,8 @@ describe('TransporteService · flota completa del día', () => {
  * ═══════════════════════════════════════════════════════════════════════════════
  */
 describe('TransporteService · desasignación', () => {
-  it('devuelve el operativo a PENDIENTE, sin conductor ni vehículo', async () => {
-    const { servicio, desasignarTransporte } = armar({
+  it('un ASIGNADO vacía sus TRAMOS (2026-10-14), que es lo que libera al conductor', async () => {
+    const { servicio, liberarOperativo, desasignarTransporte } = armar({
       operativoActual: operativo({
         estadoTransporte: EstadoTransporte.ASIGNADO,
         conductorId: 70,
@@ -652,10 +567,8 @@ describe('TransporteService · desasignación', () => {
 
     const resultado = await servicio.desasignar(500, DAF);
 
-    expect(desasignarTransporte).toHaveBeenCalledWith(500, DAF);
-    expect(resultado.operativo.estadoTransporte).toBe(
-      EstadoTransporte.PENDIENTE,
-    );
+    expect(liberarOperativo).toHaveBeenCalledWith(500, DAF);
+    expect(desasignarTransporte).not.toHaveBeenCalled();
     expect(resultado.conductor).toBeNull();
     expect(resultado.vehiculo).toBeNull();
   });
@@ -683,7 +596,7 @@ describe('TransporteService · desasignación', () => {
    * ninguna salida por la aplicación, que es justo el defecto que esto corrige.
    */
   it('un nocturno con condicionante se puede desasignar', async () => {
-    const { servicio, desasignarTransporte } = armar({
+    const { servicio, liberarOperativo } = armar({
       operativoActual: operativo({
         estadoTransporte: EstadoTransporte.ASIGNADO,
         conductorId: 70,
@@ -701,17 +614,18 @@ describe('TransporteService · desasignación', () => {
 
     await servicio.desasignar(500, DAF);
 
-    expect(desasignarTransporte).toHaveBeenCalled();
+    expect(liberarOperativo).toHaveBeenCalled();
   });
 
   it('respeta la jornada cerrada: si no admite escritura, no escribe', async () => {
-    const { servicio, desasignarTransporte } = armar({
+    const { servicio, desasignarTransporte, liberarOperativo } = armar({
       escrituraBloqueada: new Error('El cuadro está cerrado.'),
     });
 
     await capturar(servicio.desasignar(500, DAF));
 
     expect(desasignarTransporte).not.toHaveBeenCalled();
+    expect(liberarOperativo).not.toHaveBeenCalled();
   });
 });
 

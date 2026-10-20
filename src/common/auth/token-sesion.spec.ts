@@ -199,7 +199,7 @@ describe('token-sesion', () => {
 
     /**
      * EL AUTH DESPLEGADO VA POR DETRÁS DEL REPOSITORIO. Comprobado el 2026-08-17 contra
-     * 172.20.136.127:10004: sus tokens de sesión traen solo `{userId, iat, exp}`.
+     * su API en el 10004: sus tokens de sesión traen solo `{userId, iat, exp}`.
      * Exigir `tokenType` y `subsystemId` dejaría la integración inservible contra el
      * único Auth que hay hoy, así que se aceptan ausentes y se advierte.
      */

@@ -8,9 +8,13 @@
  * Fecha: 2026-09-29
  *
  * EL NÚMERO Y EL CÓDIGO SOLO VIAJAN AL CREAR. Los referencian los operativos y la identidad
- * legible del formulario, así que son inmutables tras el alta: `ActualizarFormularioDto` ni
- * siquiera los declara, de modo que un intento de cambiarlos se descarta en el borde
- * (`whitelist`), no en el servicio.
+ * legible del formulario, así que son inmutables tras el alta. Desde el 2026-10-13 la edición
+ * los DECLARA solo para rechazarlos con un mensaje claro (`CampoFijo`): antes los rechazaba
+ * `forbidNonWhitelisted` con el texto genérico de class-validator, en inglés.
+ *
+ * LAS ÁREAS NO VIAJAN NI AL CREAR NI AL EDITAR (2026-10-13). Se configuran solo en Catálogos del
+ * cuadro (`PUT /administracion/formularios/:codigo/areas`): una sola fuente de verdad. Un
+ * formulario nuevo nace sin áreas, y si el cuerpo las trae se responde 400.
  *
  * LOS COLORES SE VALIDAN DOS VECES: aquí el formato hexadecimal (para no chocar con el CHECK
  * de la base) y en el servicio que el trío pertenezca a la PALETA (`esColorDePaleta`), que es
@@ -18,13 +22,12 @@
  */
 
 import {
-  AreaPersonal,
   PoliticaVehiculo,
+  TipoTransporte,
   RolDepartamental,
 } from '@prisma/client';
 import {
-  ArrayNotEmpty,
-  IsArray,
+  Equals,
   IsBoolean,
   IsEnum,
   IsInt,
@@ -35,10 +38,24 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
+
+import { MENSAJES_CAMPO_FIJO } from '../../application/politicas/formulario-admin';
 
 /** Un color hexadecimal de seis dígitos, el mismo formato que exige el CHECK de la base. */
 const HEX = /^#[0-9A-Fa-f]{6}$/;
+
+/**
+ * Declara un campo que NO se acepta por esta vía: si llega con cualquier valor, 400 con su
+ * mensaje. Ausente, no se valida.
+ */
+function CampoFijo(mensaje: string): PropertyDecorator {
+  return (objetivo, propiedad) => {
+    Equals(undefined, { message: mensaje })(objetivo, propiedad);
+    ValidateIf((_objeto, valor) => valor !== undefined)(objetivo, propiedad);
+  };
+}
 
 export class CrearFormularioDto {
   @Max(99, { message: 'El número del formulario va del 1 al 99.' })
@@ -83,19 +100,22 @@ export class CrearFormularioDto {
   @IsString({ message: 'El prefijo debe ser texto.' })
   prefijo!: string;
 
-  @IsArray({ message: 'Las áreas deben ser una lista.' })
-  @ArrayNotEmpty({ message: 'El formulario debe admitir al menos un área.' })
-  @IsEnum(AreaPersonal, {
-    each: true,
-    message: 'Alguna de las áreas indicadas no existe.',
-  })
-  areas!: AreaPersonal[];
+  /** Se configuran en Catálogos del cuadro: el formulario nace sin áreas. */
+  @CampoFijo(MENSAJES_CAMPO_FIJO.areas)
+  areas?: unknown;
 
   @IsEnum(PoliticaVehiculo, {
     message: 'La política de vehículo indicada no existe.',
   })
   @IsOptional()
   politicaVehiculo?: PoliticaVehiculo;
+
+  /** Tipo de transporte que toma un operativo nuevo que no lo indica (2026-10-07). */
+  @IsEnum(TipoTransporte, {
+    message: 'El tipo de transporte por defecto indicado no existe.',
+  })
+  @IsOptional()
+  tipoTransportePorDefecto?: TipoTransporte;
 
   @IsInt({ message: 'El orden es un entero.' })
   @IsOptional()
@@ -143,10 +163,16 @@ export class CrearFormularioDto {
 }
 
 /**
- * Todo opcional: se modifica lo que llega y se conserva lo demás. **Sin `numero` ni `codigo`**
- * (inmutables). `activo` permite reactivar un formulario dado de baja.
+ * Todo opcional: se modifica lo que llega y se conserva lo demás. `numero`, `codigo` y `areas`
+ * se declaran solo para rechazarlos. `activo` permite reactivar un formulario dado de baja.
  */
 export class ActualizarFormularioDto {
+  @CampoFijo(MENSAJES_CAMPO_FIJO.numero)
+  numero?: unknown;
+
+  @CampoFijo(MENSAJES_CAMPO_FIJO.codigo)
+  codigo?: unknown;
+
   @MaxLength(160, { message: 'El nombre no puede superar los 160 caracteres.' })
   @IsNotEmpty({ message: 'El nombre no puede quedar vacío.' })
   @IsString({ message: 'El nombre debe ser texto.' })
@@ -185,20 +211,22 @@ export class ActualizarFormularioDto {
   @IsOptional()
   prefijo?: string;
 
-  @IsArray({ message: 'Las áreas deben ser una lista.' })
-  @ArrayNotEmpty({ message: 'El formulario debe admitir al menos un área.' })
-  @IsEnum(AreaPersonal, {
-    each: true,
-    message: 'Alguna de las áreas indicadas no existe.',
-  })
-  @IsOptional()
-  areas?: AreaPersonal[];
+  /** Se configuran en Catálogos del cuadro. */
+  @CampoFijo(MENSAJES_CAMPO_FIJO.areas)
+  areas?: unknown;
 
   @IsEnum(PoliticaVehiculo, {
     message: 'La política de vehículo indicada no existe.',
   })
   @IsOptional()
   politicaVehiculo?: PoliticaVehiculo;
+
+  /** Tipo de transporte que toma un operativo nuevo que no lo indica (2026-10-07). */
+  @IsEnum(TipoTransporte, {
+    message: 'El tipo de transporte por defecto indicado no existe.',
+  })
+  @IsOptional()
+  tipoTransportePorDefecto?: TipoTransporte;
 
   @IsInt({ message: 'El orden es un entero.' })
   @IsOptional()

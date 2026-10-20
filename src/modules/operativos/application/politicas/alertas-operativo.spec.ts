@@ -8,7 +8,11 @@
  * Fecha: 2026-08-06
  */
 
-import { EstadoTransporte, PoliticaVehiculo } from '@prisma/client';
+import {
+  EstadoTransporte,
+  PoliticaVehiculo,
+  TipoTransporte,
+} from '@prisma/client';
 
 import { calcularAlertas, type EstadoParaAlertas } from './alertas-operativo';
 
@@ -21,6 +25,8 @@ const COMPLETO: EstadoParaAlertas = {
   esNocturno: false,
   puntoLibre: null,
   tipoLibre: null,
+  tipoTransporte: TipoTransporte.COMPLETO,
+  transporteLiberado: false,
 };
 
 const codigos = (estado: EstadoParaAlertas): string[] =>
@@ -191,6 +197,8 @@ describe('el cálculo es completo, no incremental (RN-55)', () => {
       esNocturno: false,
       puntoLibre: null,
       tipoLibre: null,
+      tipoTransporte: TipoTransporte.COMPLETO,
+      transporteLiberado: false,
     };
 
     expect(codigos(recienRegistrado)).toEqual(['ALV-01', 'ALV-02', 'ALV-03']);
@@ -204,5 +212,38 @@ describe('el cálculo es completo, no incremental (RN-55)', () => {
 
     expect(antes).toHaveLength(1);
     expect(despues).toHaveLength(0);
+  });
+});
+
+describe('Transporte requerido (2026-10-07)', () => {
+  const pendiente: EstadoParaAlertas = {
+    ...COMPLETO,
+    estadoTransporte: EstadoTransporte.PENDIENTE,
+  };
+
+  it('PROPIOS_MEDIOS no espera conductor: sin ALV-02/03/04', () => {
+    expect(
+      codigos({ ...pendiente, tipoTransporte: TipoTransporte.PROPIOS_MEDIOS }),
+    ).toEqual([]);
+    expect(
+      codigos({
+        ...pendiente,
+        tipoTransporte: TipoTransporte.PROPIOS_MEDIOS,
+        condicionanteNocturno: true,
+        esNocturno: true,
+      }),
+    ).toEqual([]);
+  });
+
+  it('ALV-07 avisa a la DAF de un transporte liberado, primero', () => {
+    expect(codigos({ ...pendiente, transporteLiberado: true })).toEqual([
+      'ALV-07',
+      'ALV-02',
+      'ALV-03',
+    ]);
+  });
+
+  it('ALV-07 desaparece al reasignar (deja de estar pendiente)', () => {
+    expect(codigos({ ...COMPLETO, transporteLiberado: true })).toEqual([]);
   });
 });

@@ -83,6 +83,8 @@ export const SEMILLA_ROL_PERMISO: Record<string, R[]> = {
   'transporte:desasignar': [R.DAF],
   'flota:administrar': [R.ADMINISTRADOR_DAF, R.DAF, R.ADMINISTRADOR],
   'flota:mantenimiento': [R.ADMINISTRADOR_DAF, R.DAF, R.ADMINISTRADOR],
+  // 2026-10-16 (migración 20261016120000): ausencias de conductores desde «Flota y garajes».
+  'flota:ausencias': [R.ADMINISTRADOR_DAF, R.DAF, R.ADMINISTRADOR],
   'flota:capacidad:ver': [R.DAF, R.DIRECTOR],
   'flota:capacidad:declarar': [R.DAF, R.ADMINISTRADOR_DMIP, R.ADMINISTRADOR],
   'matriz:ver': [R.DIRECTOR],
@@ -103,10 +105,14 @@ export const SEMILLA_ROL_PERMISO: Record<string, R[]> = {
   'ventanas:administrar': [R.ADMINISTRADOR_DMIP, R.ADMINISTRADOR],
   'roles-auth:administrar': [R.ADMINISTRADOR_DMIP, R.ADMINISTRADOR],
   'roles:ver': [R.ADMINISTRADOR_DMIP, R.ADMINISTRADOR],
+  // + ADMINISTRADOR_DAF (2026-10-07): administra los parámetros DAF_ (los acota alcance-parametro).
   'parametros:administrar': [
     R.ADMINISTRADOR_DMIP,
     R.ADMINISTRADOR,
     R.ADMINISTRADOR_DMIT,
+    R.ADMINISTRADOR_DAF,
   ],
   'permisos:administrar': [R.ADMINISTRADOR],
+  // Carga inicial desde Excel (2026-10-07): opción oculta, solo del administrador general.
+  'carga-inicial:administrar': [R.ADMINISTRADOR],
 };

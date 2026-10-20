@@ -65,6 +65,14 @@ export function validarEntorno(config: AppConfig): ResultadoValidacion {
     );
   }
 
+  // TRUST_PROXY (2026-10-16): un valor que no es un entero de saltos detiene el arranque.
+  // Adivinar uno sería peor: de más, el cliente elige su IP; de menos, todos comparten cupo.
+  if (Number.isNaN(config.saltosProxy)) {
+    errores.push(
+      'TRUST_PROXY: debe ser un número entero de saltos (por ejemplo 2: Gateway y nginx del frontend), o quedar vacía.',
+    );
+  }
+
   // ─── Integración con Auth central: etapa 1 abierta, se avisa y no se detiene ───
   if (!config.sesion.secretoAuth) {
     advertencias.push(

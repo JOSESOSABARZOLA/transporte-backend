@@ -20,6 +20,10 @@
 import type { EstadoCuadro, EstadoTransporte } from '@prisma/client';
 import { PoliticaVehiculo } from '@prisma/client';
 
+import {
+  notasDeOperativo,
+  type NotaOperativo,
+} from '../../../../common/notas/notas-operativo';
 import type { Alerta } from '../../../operativos/application/politicas/alertas-operativo';
 import type { MatrizCompuesta } from '../../application/matriz-consolidada.service';
 import { textoDeTipoControl } from '../../application/tipo-control-texto';
@@ -89,6 +93,12 @@ export interface FilaMatrizDto {
   placa: string | null;
   /** Notas del operativo (bitácora, 2026-09-09): los textos, en orden. La matriz las pinta separadas. */
   observaciones: string[];
+  /**
+   * Las notas de la celda Observaciones (2026-10-19, plan «notas-jornada-matriz»): la bitácora con
+   * su autor y la tarjeta COMPARTIDA, la más reciente primero. La Dirección ve el día entero, así
+   * que la COMPARTIDA va siempre completa.
+   */
+  notas: NotaOperativo[];
   estadoTransporte: EstadoTransporte;
   esNocturno: boolean;
   /** POL-06. Por celda: la pantalla sabe cuál marcar en Amarillo de Alerta. */
@@ -219,6 +229,7 @@ function aFilaMatriz(operativo: OperativoDeMatriz): FilaMatrizDto {
         ? 'No se activa'
         : null),
     observaciones: operativo.observaciones.map((nota) => nota.texto),
+    notas: notasDeOperativo(operativo, operativo.autores ?? {}),
     estadoTransporte: operativo.estadoTransporte,
     esNocturno: operativo.esNocturno,
     alertas: (operativo.alertas as unknown as Alerta[] | null) ?? [],

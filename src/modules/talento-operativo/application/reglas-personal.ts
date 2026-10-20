@@ -10,38 +10,23 @@
  * Funciones puras: no tocan la base ni el contenedor. Se prueban solas.
  */
 
-import { EstadoDisponibilidad } from '@prisma/client';
-
-/** Fecha sin hora, tal como la guarda `@db.Date`. */
-export interface Periodo {
-  desde: Date;
-  hasta: Date;
-}
-
 /**
- * RN-30. Estados que EXCLUYEN a la persona de un operativo.
- *
- * `DISPONIBLE` no excluye —es el registro explícito de que sí está— y `MANTENIMIENTO`
- * no le corresponde: es de vehículos. Enumerar los que excluyen, en lugar de los que
- * no, evita que un estado nuevo entre por omisión como excluyente sin que nadie lo
- * decida.
+ * Los períodos y las fechas viven desde el 2026-10-16 en `common/ausencias/reglas-ausencia.ts`
+ * (los comparte la flota para las ausencias de conductores). Se reexportan aquí para que las
+ * importaciones existentes no cambien.
  */
-export const ESTADOS_QUE_EXCLUYEN: EstadoDisponibilidad[] = [
-  EstadoDisponibilidad.VACACIONES,
-  EstadoDisponibilidad.REPOSO_MEDICO,
-  EstadoDisponibilidad.CALAMIDAD,
-  EstadoDisponibilidad.PERMISO,
-];
-
-/** Estados que puede tener una persona. `MANTENIMIENTO` es solo de vehículos. */
-export const ESTADOS_DE_PERSONA: EstadoDisponibilidad[] = [
-  EstadoDisponibilidad.DISPONIBLE,
-  ...ESTADOS_QUE_EXCLUYEN,
-];
-
-export function excluyeDelOperativo(estado: EstadoDisponibilidad): boolean {
-  return ESTADOS_QUE_EXCLUYEN.includes(estado);
-}
+export {
+  aFechaUtc,
+  comoFechaIso,
+  cubre,
+  ESTADOS_DE_PERSONA,
+  ESTADOS_QUE_EXCLUYEN,
+  estadoDeAusencia,
+  excluyeDelOperativo,
+  seSolapan,
+  type EstadoDeAusencia,
+  type Periodo,
+} from '../../../common/ausencias/reglas-ausencia';
 
 // ─────────────────────────── Cédula ───────────────────────────
 
@@ -109,14 +94,20 @@ export function tieneFormatoCedula(cedula: string): boolean {
 /**
  * RN-34. El teléfono vive únicamente en el maestro de personal.
  *
- * La comprobación es deliberadamente holgada: dígitos, espacios, guiones y un
- * prefijo internacional opcional. Rechazar formatos que el negocio usa —«98 514
- * 4231»— obligaría al administrador a pelear con el campo, y el teléfono no es una
- * clave: es un dato de contacto.
+ * ═══════════════════════════════════════════════════════════════════════════════
+ * CELULAR ECUATORIANO: 10 DÍGITOS QUE EMPIEZAN POR 09. Desde el 2026-10-08 (rediseño de
+ * P-07). Antes era holgada —de 7 a 13 dígitos—, y en el maestro acabaron fijos de oficina y
+ * números con prefijo internacional a los que no se puede escribir por mensajería, que es
+ * para lo que se pide el dato. Se toleran los espacios y guiones de quien lo dicta por
+ * partes («098 514 4231»): se miran solo los dígitos.
+ *
+ * Solo se exige AL ESCRIBIR. Las fichas que ya tienen un número con el formato anterior no se
+ * tocan hasta que alguien las edite y envíe el teléfono.
+ * ═══════════════════════════════════════════════════════════════════════════════
  */
 export function esTelefonoValido(telefono: string): boolean {
-  const soloDigitos = telefono.replace(/[\s\-()+]/g, '');
-  return /^\d{7,13}$/.test(soloDigitos);
+  const soloDigitos = telefono.replace(/[\s-]/g, '');
+  return /^09\d{8}$/.test(soloDigitos);
 }
 
 /**
@@ -139,57 +130,4 @@ export function esTelefonoValido(telefono: string): boolean {
  */
 export function esCorreoValido(correo: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correo);
-}
-
-// ─────────────────────────── Períodos ───────────────────────────
-
-/**
- * INV-14. Dos períodos de la misma persona no pueden solaparse.
- *
- * Los extremos son INCLUSIVOS: una ausencia del 1 al 15 comprende ambos días, y una
- * de un solo día tiene `desde` igual a `hasta`. Por eso la comparación usa `<=` y no
- * `<`, al revés que `RangoHorario`, donde encadenar dos operativos a la misma hora sí
- * es legítimo. Aquí encadenar sería estar dos veces ausente el mismo día.
- */
-export function seSolapan(uno: Periodo, otro: Periodo): boolean {
-  return uno.desde <= otro.hasta && otro.desde <= uno.hasta;
-}
-
-/** Un período cubre la fecha indicada. */
-export function cubre(periodo: Periodo, fecha: Date): boolean {
-  return periodo.desde <= fecha && fecha <= periodo.hasta;
-}
-
-/**
- * Interpreta una fecha `AAAA-MM-DD` en UTC.
- *
- * Las columnas son `@db.Date`, sin hora ni zona. Interpretarlas con el huso del
- * proceso desplazaría la ausencia un día en cualquier servidor al oeste de Greenwich
- * —Quito lo está—, y una persona figuraría disponible el día que empieza su reposo
- * médico.
- */
-/**
- * Escribe una fecha de calendario como `AAAA-MM-DD`.
- *
- * Es la operación inversa de `aFechaUtc` y estaba escrita dos veces: en el servicio,
- * para los mensajes, y en el DTO, para la respuesta. Dos copias del mismo corte de
- * cadena que podían divergir en el momento en que una de las dos cambiara de huso.
- */
-export function comoFechaIso(fecha: Date): string {
-  return fecha.toISOString().slice(0, 10);
-}
-
-export function aFechaUtc(texto: string): Date | undefined {
-  const partes = /^(\d{4})-(\d{2})-(\d{2})$/.exec(texto);
-  if (!partes) return undefined;
-
-  const [, anio, mes, dia] = partes.map(Number);
-  const fecha = new Date(Date.UTC(anio, mes - 1, dia));
-
-  const correcta =
-    fecha.getUTCFullYear() === anio &&
-    fecha.getUTCMonth() === mes - 1 &&
-    fecha.getUTCDate() === dia;
-
-  return correcta ? fecha : undefined;
 }

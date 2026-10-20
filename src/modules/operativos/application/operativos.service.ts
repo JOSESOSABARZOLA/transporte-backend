@@ -38,6 +38,7 @@ import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import {
   AccionAuditoria,
+  TipoTransporte,
   AreaPersonal,
   EstadoCuadro,
   EstadoTransporte,
@@ -51,6 +52,7 @@ import {
 } from '../../../common/auditoria/auditoria.service';
 import { VentanaCargaEvaluador } from '../../../common/auth/application/ventana-carga.evaluador';
 import { VentanaCargaRepository } from '../../../common/auth/infrastructure/ventana-carga.repository';
+import type { ApplicationError } from '../../../common/errors/application.error';
 import { CODIGOS_ERROR } from '../../../common/errors/codigos-error';
 import {
   AutorizacionError,
@@ -79,14 +81,28 @@ import {
   type DatosOperativo,
   type FiltroOperativos,
   type OperativoCompleto,
+  type OperativoParaCoincidencia,
 } from '../infrastructure/operativos.repository';
+import type { TramiteDeInspeccion } from '../infrastructure/inspeccion-tramites.client';
 import { CalculadorAlertasService } from './calculador-alertas.service';
+import { TramitesInspeccionService } from './tramites-inspeccion.service';
 import { GeneradorIdentificadorService } from './generador-identificador.service';
+import {
+  RegistroCompatibilidadCompartir,
+  type OperativoParaCompartir,
+} from './compartir-transporte.puerto';
+import { RegistroHerenciaTransporte } from './herencia-transporte.puerto';
 import {
   verificarComposicion,
   type AsignacionExistente,
   type FormularioParaComposicion,
 } from './politicas/composicion-personal';
+import {
+  admiteEdicion,
+  CLAVE_RANGO_MAX_DIAS,
+  fechaVigente,
+  interpretarRangoMax,
+} from './politicas/rango-consulta';
 
 /** Quién realiza la operación. Lo resuelve `IdentidadGuard`, nunca el cuerpo. */
 export interface Autor {
@@ -126,6 +142,20 @@ export interface DatosRegistro {
   personal?: AsignacionSolicitada[];
   /** Notas del operativo (bitácora, 2026-09-09). Cada una entra como una fila propia. */
   observaciones?: string[];
+  /**
+   * Qué transporte pide el departamento (2026-10-06): COMPLETO, SOLO_INICIO, SOLO_FIN, INICIO_Y_FIN o
+   * PROPIOS_MEDIOS. Lo dice QUIEN REGISTRA; no es conductor ni vehículo, así que no toca RN-40.
+   * Si no viaja, COMPLETO (valor por defecto del esquema).
+   */
+  tipoTransporte?: TipoTransporte;
+  /** Macrooperativo: la DAF lo prioriza al asignar. */
+  esMacrooperativo?: boolean;
+  /**
+   * COMPARTIR UNIDAD (2026-10-19): con quién pide viajar en la misma unidad (intención que la DAF
+   * ejecuta) y por qué pide vehículo exclusivo. Ver `validarCompartir`.
+   */
+  compartirConOperativoId?: number | null;
+  justificacionExclusivo?: string | null;
 }
 
 /**
@@ -137,7 +167,10 @@ export interface DatosRegistro {
  */
 export type DatosAdicional = Omit<
   DatosRegistro,
-  'cuadroFecha' | 'formularioCodigo'
+  | 'cuadroFecha'
+  | 'formularioCodigo'
+  | 'compartirConOperativoId'
+  | 'justificacionExclusivo'
 >;
 
 /** Datos de edición. Lo que no viene, no cambia. */
@@ -155,6 +188,17 @@ export interface DatosEdicion {
   institucionesIds?: number[];
   /** Notas NUEVAS a agregar (bitácora append-only, 2026-09-09). Las ya escritas no cambian. */
   observacionesNuevas?: string[];
+  tipoTransporte?: TipoTransporte;
+  esMacrooperativo?: boolean;
+  /** Compartir unidad (2026-10-19). Lo que no viene, no cambia; `null` la retira. */
+  compartirConOperativoId?: number | null;
+  justificacionExclusivo?: string | null;
+  /**
+   * Transporte requerido (2026-10-07). Cambiar el tipo de un operativo que ya tiene transporte
+   * asignado LIBERA la asignación: sin esta confirmación expresa se rechaza con 409
+   * (`CAMBIO_TIPO_CON_TRANSPORTE`) para que la pantalla pregunte antes.
+   */
+  confirmarLiberacion?: boolean;
 }
 
 /**
@@ -172,10 +216,19 @@ interface CambiosGeneralesPreparados {
   tipoIds: number[];
   observacionesNuevas: string[];
   traza: CambioCampo[];
+  /** Transporte requerido (2026-10-07): el tipo de transporte cambia con esta edición. */
+  cambiaTipo: boolean;
+  /**
+   * Ocupación por tramos (2026-10-14): cambia el horario o la zonal. Los tramos se cortaron con
+   * los anteriores, así que dejan de corresponder (D4).
+   */
+  cambiaFranja: boolean;
 }
 
 export interface CriteriosConsulta {
-  fecha?: Date;
+  /** Rango de fechas del cuadro, inclusive (2026-10-13). Un día: desde = hasta. */
+  desde?: Date;
+  hasta?: Date;
   formularioCodigo?: string;
   pagina: number;
   tamanio: number;
@@ -215,6 +268,117 @@ const DEPARTAMENTALES: RolDepartamental[] = [
   RolDepartamental.DMIT_INSTRUCTOR,
 ];
 
+/**
+ * Bajo qué roles se ve el listado (PER-02). `null` = la jornada entera.
+ *
+ * Los roles con ámbito departamental propio (escriben o aportan) ACOTAN la consulta si el
+ * usuario tiene ALGUNO: un rol de lectura total (Dirección/DAF) que lleve encima NO amplía las
+ * pantallas departamentales (Camino B, 2026-09-10). Así, el listado sigue mostrando la UNIÓN
+ * de lo departamental —DMIP Operativos + Inspecciones ve 1–4 y el 8—, pero tener DIRECTOR
+ * entre los roles ya no revela lo de los demás departamentos.
+ *
+ * Ve todo SOLO quien es de lectura total y NO tiene ningún rol departamental que acotar: la
+ * Dirección o la DAF «puras». Su visión completa vive en sus propias pantallas (matriz,
+ * órdenes, transporte); aquí, sin departamento, ven la jornada entera.
+ */
+function visiblesPara(
+  roles: readonly RolDepartamental[],
+): RolDepartamental[] | null {
+  const departamentales = roles.filter((rol) => DEPARTAMENTALES.includes(rol));
+
+  const veTodo =
+    departamentales.length === 0 && roles.some((rol) => VEN_TODO.includes(rol));
+
+  return veTodo ? null : departamentales;
+}
+
+/** El operativo en captura, visto para buscar con quién compartir unidad (2026-10-19). */
+export interface FiltroCoincidencias {
+  fecha: Date;
+  puntoEncuentroId: number;
+  zonalId: number;
+  horaInicio: string;
+  horaFin: string;
+  tipoTransporte: TipoTransporte;
+  esMacrooperativo?: boolean;
+  excluirOperativoId?: number;
+}
+
+/** Un operativo con el que se podría compartir unidad (2026-10-19). Solo nombra al personal. */
+export interface CoincidenciaTransporte {
+  operativoId: number;
+  identificador: string;
+  formularioNumero: number;
+  personal: string[];
+  horaInicio: string;
+  horaFin: string;
+  tipoTransporte: TipoTransporte;
+  esMacrooperativo: boolean;
+  compatible: boolean;
+  motivo?: string;
+  /** Traslados que harían juntos en la misma unidad («dejar»). Vacío si no es compatible. */
+  comparte: string[];
+  /** Traslados del invitado sin pareja («retirar»): la misma unidad o la DAF los hacen aparte. */
+  propios: string[];
+  /** Con qué operativo de la unidad viaja cada traslado compartido. */
+  comparteCon: { tipo: string; con: string }[];
+  /** «Completo» (2026-10-20): traslados de la unidad que el «completo» del invitado abarca. */
+  contiene: string[];
+  /** El «completo» de la unidad dentro del que viajan los traslados del invitado, o `null`. */
+  contenidoEn: string | null;
+}
+
+/**
+ * Aviso de una edición (2026-10-19): el operativo dejó de coincidir con el anfitrión con el que
+ * pedía compartir unidad, y la intención se retiró. La pantalla lo dice con un aviso breve.
+ */
+export const AVISO_COMPARTIR_RETIRADO = 'COMPARTIR_RETIRADO';
+
+/** Lo que devuelve `editar`: el operativo y, si los hay, los avisos de la edición. */
+export type OperativoEditado = OperativoCompleto & { avisos?: string[] };
+
+/** Cuántas coincidencias ofrece el registro: las de hora más cercana. */
+const MAX_COINCIDENCIAS = 5;
+
+/** El operativo en los términos del puerto de compartir unidad: lo que decide sus tramos. */
+interface OperativoEnTerminosDeCompartir {
+  horaInicio: string;
+  horaFin: string;
+  tipoTransporte: TipoTransporte;
+  zonalIds: number[];
+  esMacrooperativo: boolean;
+}
+
+function paraCompartir(op: OperativoEnTerminosDeCompartir) {
+  return {
+    horaInicio: op.horaInicio,
+    horaFin: op.horaFin,
+    tipoTransporte: op.tipoTransporte,
+    zonalId: op.zonalIds[0] ?? null,
+    esMacrooperativo: op.esMacrooperativo,
+  };
+}
+
+function paraCompartirDe(
+  op: OperativoParaCoincidencia,
+  miembros: readonly OperativoParaCoincidencia[] = [],
+): OperativoParaCompartir {
+  return {
+    ...paraCompartir({
+      ...op,
+      zonalIds: op.zonales.map((fila) => fila.zonalId),
+    }),
+    identificador: op.identificador,
+    miembros: miembros.map((m) => paraCompartirDe(m)),
+  };
+}
+
+/** «HH:MM» → minutos desde la medianoche. */
+function minutosDe(hora: string): number {
+  const [horas, minutos] = hora.split(':').map(Number);
+  return horas * 60 + minutos;
+}
+
 const INTENTOS_SECUENCIAL = 3;
 
 /** Clave del `Map` de conteo cuando se numera por FORMULARIO (una serie única), no por prefijo. */
@@ -227,6 +391,8 @@ interface AsignacionParaCrear {
   esResponsable: boolean;
   horaInicio: string | null;
   horaFin: string | null;
+  /** Trámite de Inspección ya comprobado, a copiar en la asignación (2026-10-07). */
+  tramite?: TramiteDeInspeccion | null;
 }
 
 @Injectable()
@@ -249,6 +415,12 @@ export class OperativosService {
     private readonly ventanas: VentanaCargaRepository,
     private readonly evaluadorDeVentana: VentanaCargaEvaluador,
     private readonly logger: LoggerService,
+    // Trámites de Inspección de los inspectores asignados (2026-10-07).
+    private readonly tramites: TramitesInspeccionService,
+    // El adicional hereda el transporte del original (2026-10-14): lo implementa `transporte`.
+    private readonly herencia: RegistroHerenciaTransporte,
+    // Compartir unidad (2026-10-19): la compatibilidad de tramos la responde `transporte`.
+    private readonly compartir: RegistroCompatibilidadCompartir,
   ) {}
 
   // ─────────────────────────── Consulta ───────────────────────────
@@ -265,31 +437,245 @@ export class OperativosService {
     // multi-rol promete: «ve la unión de los formularios de cada uno».
     roles: readonly RolDepartamental[],
   ): Promise<{ datos: OperativoCompleto[]; total: number }> {
-    // Los roles con ámbito departamental propio (escriben o aportan). Si el usuario tiene
-    // ALGUNO, la consulta se ACOTA a ellos: un rol de lectura total (Dirección/DAF) que lleve
-    // encima NO amplía las pantallas departamentales (Camino B, 2026-09-10). Así, el listado
-    // sigue mostrando la UNIÓN de lo departamental —DMIP Operativos + Inspecciones ve 1–4 y
-    // el 8—, pero tener DIRECTOR entre los roles ya no revela lo de los demás departamentos.
-    const departamentales = roles.filter((rol) =>
-      DEPARTAMENTALES.includes(rol),
-    );
-
-    // Ve todo SOLO quien es de lectura total y NO tiene ningún rol departamental que acotar:
-    // la Dirección o la DAF «puras». Su visión completa vive en sus propias pantallas
-    // (matriz, órdenes, transporte); aquí, sin departamento, ven la jornada entera.
-    const veTodo =
-      departamentales.length === 0 &&
-      roles.some((rol) => VEN_TODO.includes(rol));
-
     const filtro: FiltroOperativos = {
-      fecha: criterios.fecha,
+      desde: criterios.desde,
+      hasta: criterios.hasta,
       formularioCodigo: criterios.formularioCodigo,
-      visiblesPara: veTodo ? null : departamentales,
+      visiblesPara: visiblesPara(roles),
       pagina: criterios.pagina,
       tamanio: criterios.tamanio,
     };
 
     return this.repositorio.listar(filtro);
+  }
+
+  /**
+   * Cuántos operativos vigentes lleva cada formulario permitido en el cuadro de `fecha`
+   * (2026-10-16): el «N hoy» del selector de formularios del registro.
+   *
+   * Cuenta con la MISMA visibilidad que `consultar` (PER-02, Camino B), así el número coincide
+   * con lo que el usuario ve en la tabla. Devuelve TODOS los formularios de
+   * `obtenerPermitidos`, con 0 los que no tienen operativos; una fecha sin cuadro da todo en 0.
+   */
+  async contarPorFormulario(
+    fecha: Date,
+    roles: readonly RolDepartamental[],
+  ): Promise<{ formularioId: number; total: number }[]> {
+    const [permitidos, conteo] = await Promise.all([
+      this.formularios.obtenerPermitidos([...roles]),
+      this.repositorio.contarPorFormulario({
+        desde: fecha,
+        hasta: fecha,
+        visiblesPara: visiblesPara(roles),
+      }),
+    ]);
+
+    return permitidos.map(({ formulario }) => ({
+      formularioId: formulario.id,
+      total: conteo.get(formulario.id) ?? 0,
+    }));
+  }
+
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════════
+   * COINCIDENCIAS PARA COMPARTIR UNIDAD · 2026-10-19 (plan «compartir unidad»).
+   *
+   * Mientras se registra un operativo con transporte de la DAF, la pantalla pregunta si ya hay otro
+   * en el MISMO día, punto de encuentro, zonal y horario, para sugerir viajar en la misma unidad. Es
+   * la causa del bloqueo por SOLAPAMIENTO que la DAF no puede resolver por su cuenta: varios
+   * operativos de una persona en el mismo punto y hora.
+   *
+   * RN-48 (aislamiento): la misma visibilidad que el listado (`visiblesPara`). Nunca devuelve
+   * operativos de formularios ajenos, y del personal solo el nombre. Si un candidato ya pide viajar
+   * con otro, se ofrece ese ANFITRIÓN (no hay cadenas). Máximo `MAX_COINCIDENCIAS`, los de hora más
+   * cercana primero. `compatible` lo decide `transporte` con la misma regla del optimizador, sin
+   * asientos: todavía no hay vehículo.
+   * ═══════════════════════════════════════════════════════════════════════════════
+   */
+  async coincidenciasTransporte(
+    filtro: FiltroCoincidencias,
+    roles: readonly RolDepartamental[],
+  ): Promise<CoincidenciaTransporte[]> {
+    const visibles = visiblesPara(roles);
+    const rango = RangoHorario.de(filtro.horaInicio, filtro.horaFin);
+    const candidatos = await this.repositorio.buscarCoincidencias({
+      fecha: filtro.fecha,
+      puntoEncuentroId: filtro.puntoEncuentroId,
+      zonalId: filtro.zonalId,
+      excluirOperativoId: filtro.excluirOperativoId,
+      visiblesPara: visibles,
+    });
+    const cruzan = candidatos.filter((candidato) =>
+      RangoHorario.de(candidato.horaInicio, candidato.horaFin).seSolapaCon(
+        rango,
+      ),
+    );
+
+    // El anfitrión raíz: quien ya pide viajar con otro se ofrece como ese otro.
+    const porId = new Map(cruzan.map((op) => [op.id, op]));
+    const faltan = cruzan
+      .map((op) => op.compartirConId)
+      .filter((id): id is number => id !== null && !porId.has(id));
+    const raices = new Map(
+      (await this.repositorio.buscarParaCompartir(faltan, visibles)).map(
+        (op) => [op.id, op],
+      ),
+    );
+    const anfitriones = new Map<number, OperativoParaCoincidencia>();
+    for (const op of cruzan) {
+      const raiz =
+        op.compartirConId === null
+          ? undefined
+          : (porId.get(op.compartirConId) ?? raices.get(op.compartirConId));
+      const elegido = raiz && raiz.id !== filtro.excluirOperativoId ? raiz : op;
+      anfitriones.set(elegido.id, elegido);
+    }
+
+    const inicio = minutosDe(filtro.horaInicio);
+    const lista = [...anfitriones.values()]
+      .sort(
+        (a, b) =>
+          Math.abs(minutosDe(a.horaInicio) - inicio) -
+            Math.abs(minutosDe(b.horaInicio) - inicio) ||
+          a.identificador.localeCompare(b.identificador),
+      )
+      .slice(0, MAX_COINCIDENCIAS);
+
+    // La unidad es la del GRUPO (2026-10-19): con cada anfitrión van quienes ya piden viajar en ella.
+    const miembros = await this.repositorio.miembrosDeUnidad(
+      lista.map((op) => op.id),
+      visibles,
+      filtro.excluirOperativoId,
+    );
+    const veredictos = await this.compartir.evaluar(
+      {
+        horaInicio: filtro.horaInicio,
+        horaFin: filtro.horaFin,
+        tipoTransporte: filtro.tipoTransporte,
+        zonalId: filtro.zonalId,
+        esMacrooperativo: filtro.esMacrooperativo ?? false,
+      },
+      lista.map((op) =>
+        paraCompartirDe(
+          op,
+          miembros.filter((m) => m.compartirConId === op.id),
+        ),
+      ),
+    );
+
+    return lista.map((op, i) => {
+      const veredicto = veredictos[i] ?? {
+        compatible: true,
+        comparte: [],
+        propios: [],
+      };
+      return {
+        operativoId: op.id,
+        identificador: op.identificador,
+        formularioNumero: op.formulario.numero,
+        personal: op.personal.map(
+          (fila) => `${fila.funcionario.apellidos} ${fila.funcionario.nombres}`,
+        ),
+        horaInicio: op.horaInicio,
+        horaFin: op.horaFin,
+        tipoTransporte: op.tipoTransporte,
+        esMacrooperativo: op.esMacrooperativo,
+        compatible: veredicto.compatible,
+        ...(veredicto.compatible
+          ? {
+              comparte: veredicto.comparte,
+              propios: veredicto.propios,
+              comparteCon: veredicto.comparteCon ?? [],
+              contiene: veredicto.contiene ?? [],
+              contenidoEn: veredicto.contenidoEn ?? null,
+            }
+          : {
+              motivo: veredicto.motivo,
+              comparte: [],
+              propios: [],
+              comparteCon: [],
+              contiene: [],
+              contenidoEn: null,
+            }),
+      };
+    });
+  }
+
+  /**
+   * Lo que la pantalla necesita ANTES de consultar un rango (2026-10-13): la fecha del cuadro
+   * vigente y el rango máximo, para validar sin pedir. Si el parámetro aún no está sembrado,
+   * rige el valor por defecto en vez de romper el listado.
+   */
+  async parametrosDeRango(
+    ahora: Date = new Date(),
+  ): Promise<{ fechaVigente: string; rangoMaxDias: number }> {
+    return {
+      fechaVigente: fechaVigente(ahora),
+      rangoMaxDias: interpretarRangoMax(
+        await this.parametros.obtenerTextoOpcional(CLAVE_RANGO_MAX_DIAS),
+      ),
+    };
+  }
+
+  /**
+   * Conductor y placa de cada fila del listado (2026-10-13), en el mismo orden que `operativos`.
+   * Solo lectura de lo que asignó la DAF; dos consultas para toda la página.
+   */
+  async transporteDelListado(
+    operativos: readonly OperativoCompleto[],
+  ): Promise<{ conductor: string; placa: string | null }[][]> {
+    const porId = await this.repositorio.transporteDeOperativos(
+      operativos.map((op) => op.id),
+    );
+    return operativos.map((op) => porId.get(op.id) ?? []);
+  }
+
+  /**
+   * Si cada fila admite edición (2026-10-13): su cuadro no está cerrado, es el vigente y la
+   * ventana está abierta. La ventana se evalúa UNA vez por rol en toda la petición, con el
+   * mismo evaluador que `VentanaCargaGuard`. Para cada fila manda el rol que la creó si el
+   * usuario lo tiene; si no —participa o aporta—, basta con que alguno de sus roles
+   * departamentales tenga la ventana abierta. La propiedad sigue decidiéndola el cliente.
+   */
+  async admisionDeEdicion(
+    operativos: readonly OperativoCompleto[],
+    roles: readonly RolDepartamental[],
+    ahora: Date = new Date(),
+  ): Promise<boolean[]> {
+    const vigente = fechaVigente(ahora);
+    const propios = roles.filter((rol) => DEPARTAMENTALES.includes(rol));
+    const abiertaPorRol = new Map<RolDepartamental, boolean>();
+
+    // Solo hace falta evaluar la ventana si alguna fila es del cuadro vigente.
+    if (
+      operativos.some(
+        (op) => op.cuadro.fecha.toISOString().slice(0, 10) === vigente,
+      )
+    ) {
+      for (const rol of propios) {
+        const veredicto = this.evaluadorDeVentana.evaluar(
+          await this.ventanas.buscarPorRol(rol),
+          ahora,
+        );
+        abiertaPorRol.set(rol, veredicto.puedeEscribir);
+      }
+    }
+
+    const algunaAbierta = [...abiertaPorRol.values()].some(Boolean);
+
+    return operativos.map((op) => {
+      const abierta = abiertaPorRol.has(op.creadoPorRol)
+        ? (abiertaPorRol.get(op.creadoPorRol) ?? false)
+        : algunaAbierta;
+      return admiteEdicion(
+        {
+          cuadroFecha: op.cuadro.fecha.toISOString().slice(0, 10),
+          cuadroEstado: op.cuadro.estado,
+        },
+        vigente,
+        abierta,
+      );
+    });
   }
 
   /**
@@ -354,6 +740,9 @@ export class OperativosService {
   async registrar(
     datos: DatosRegistro,
     autor: Autor,
+    // Token de Auth central de la sesión: con él se vuelve a preguntar a Inspección por los
+    // trámites elegidos (2026-10-07). Nunca se registra en la bitácora.
+    tokenAuth: string | null = null,
   ): Promise<OperativoCompleto> {
     // Regla del 2026-08-11: registrar ABRE la jornada si todavía no existe, en lugar de
     // exigir que el administrador la haya abierto antes. El motivo y su alcance están en
@@ -470,6 +859,9 @@ export class OperativosService {
       { fecha: cuadro.fecha, rango, esPatrulla: formulario.esPatrulla },
       autor,
     );
+    // Trámites de Inspección (2026-10-07): se comprueban contra Inspección ANTES de la
+    // transacción, igual que el personal. Con cantidad > 1 en el 8, las copias heredan el mismo.
+    await this.adjuntarTramites(personal, cuadro.fecha, tokenAuth);
 
     // VARIOS OPERATIVOS POR PERSONA (2026-09-10). Solo en los formularios con `variosPorPersona`
     // (el 8 y, desde 2026-09-14, el 5): cada persona genera SUS propios operativos —uno por unidad
@@ -499,6 +891,37 @@ export class OperativosService {
     // patrulla —numera por formulario y sus códigos se editan/retiran uno por uno—.
     const grupoRegistro = catalogos.variosPorPersona ? randomUUID() : null;
 
+    // COMPARTIR UNIDAD (2026-10-19): la intención se valida ANTES de abrir la transacción, como el
+    // personal: si el destino no coincide, no se escribe nada. Propios medios la limpia, y sin
+    // vehículo exclusivo la justificación sobra. Ver `evaluarDestinoCompartir`.
+    const tipoTransporte =
+      datos.tipoTransporte ?? formulario.tipoTransporteDefecto;
+    const esMacrooperativo = macroSegunTipo(
+      tipoTransporte,
+      datos.esMacrooperativo,
+    );
+    let compartirConId: number | null = null;
+    if (
+      tipoTransporte !== TipoTransporte.PROPIOS_MEDIOS &&
+      datos.compartirConOperativoId
+    ) {
+      const resultado = await this.evaluarDestinoCompartir(
+        datos.compartirConOperativoId,
+        {
+          cuadroId: cuadro.id,
+          puntoEncuentroId: ubicacion.puntoId,
+          zonalIds: [...ubicacion.zonalIds],
+          horaInicio: rango.horaInicio,
+          horaFin: rango.horaFin,
+          tipoTransporte,
+          esMacrooperativo,
+        },
+        [autor.rol],
+      );
+      if ('error' in resultado) throw resultado.error;
+      compartirConId = resultado.anfitrionId;
+    }
+
     const operativo = await this.registrarConSecuencial(
       {
         cuadroId: cuadro.id,
@@ -514,6 +937,13 @@ export class OperativosService {
         personal,
         grupoRegistro,
         numeraPorPrefijo: esPatrulla,
+        // Sin tipo indicado, el del formulario (2026-10-07).
+        tipoTransporte,
+        esMacrooperativo,
+        compartirConId,
+        justificacionExclusivo: esMacrooperativo
+          ? (datos.justificacionExclusivo ?? null)
+          : null,
       },
       autor,
       operativos,
@@ -529,7 +959,8 @@ export class OperativosService {
       horario: rango.toString(),
     });
 
-    return operativo;
+    // Con el nombre de quien firmó sus notas (2026-10-19): la respuesta trae `notas` con autor.
+    return (await this.repositorio.conAutores([operativo]))[0];
   }
 
   // ─────────────────────────── Adicional del día ───────────────────────────
@@ -580,6 +1011,7 @@ export class OperativosService {
     datos: DatosAdicional,
     autor: Autor,
     roles: readonly RolDepartamental[] = [autor.rol],
+    tokenAuth: string | null = null,
   ): Promise<OperativoCompleto> {
     // ═══════════════════════════════════════════════════════════════════════════
     // LA DIRECCIÓN SE MIDE CON OTRA VARA, Y ES LO QUE HACE UTILIZABLE ESTO. 2026-08-20.
@@ -676,9 +1108,9 @@ export class OperativosService {
       { fecha: padre.cuadro.fecha, rango, esPatrulla: formulario.esPatrulla },
       autorEfectivo,
     );
+    await this.adjuntarTramites(personal, padre.cuadro.fecha, tokenAuth);
 
     const ventana = await this.estadoDeLaVentana(autorEfectivo.rol);
-    const transporte = await this.heredarTransporte(padre, rango, formulario);
 
     const adicional = await this.registrarConSecuencial(
       {
@@ -692,7 +1124,12 @@ export class OperativosService {
         institucionIds: [...new Set(datos.institucionesIds)],
         observaciones: notasLimpias(datos.observaciones),
         personal,
-        transporte,
+        // El adicional pide el mismo tipo de transporte que su padre, salvo que diga otro.
+        tipoTransporte: datos.tipoTransporte ?? padre.tipoTransporte,
+        esMacrooperativo: macroSegunTipo(
+          datos.tipoTransporte ?? padre.tipoTransporte,
+          datos.esMacrooperativo ?? padre.esMacrooperativo,
+        ),
         origen: {
           id: padre.id,
           identificador: padre.identificador,
@@ -717,74 +1154,56 @@ export class OperativosService {
       horario: rango.toString(),
       ventanaDeCarga: ventana.abierta ? 'abierta' : 'cerrada',
       estadoCuadro: padre.cuadro.estado,
-      transporte: transporte.conductorId === null ? 'sin heredar' : 'heredado',
     });
 
-    return adicional;
+    return this.heredarTransporte(padre, adicional, autorEfectivo);
   }
 
   /**
    * ═══════════════════════════════════════════════════════════════════════════════
-   * EL TRANSPORTE DEL OPERATIVO ORIGINAL, SI SIGUE SIENDO VIABLE. 2026-08-21.
+   * EL TRANSPORTE DEL OPERATIVO ORIGINAL, SI SIGUE SIENDO VIABLE. 2026-08-21; por tramos desde
+   * el 2026-10-14.
    *
-   * POR QUÉ SE HEREDA. Un adicional se dispone cuando la ventana de la DAF —15H00 a
-   * 16H30— **también ha cerrado**. Sin heredar, el adicional nacería sin conductor ni
-   * vehículo y nadie podría asignárselos hasta el día siguiente: llegaría al operativo
-   * sin transporte, que es tanto como no existir.
+   * POR QUÉ SE HEREDA. Un adicional se dispone cuando la ventana de la DAF —15H00 a 16H30—
+   * **también ha cerrado**. Sin heredar, nacería sin conductor y nadie podría asignárselo hasta
+   * que la ventana vuelva a abrir: llegaría al operativo sin transporte.
    *
-   * POR QUÉ NO CONTRADICE RN-40. La regla dice que la DAF es quien escribe conductor y
-   * vehículo, y sigue siendo cierta: **no llegan del cliente** —`CrearAdicionalDto` no los
-   * admite y el servidor los rechazaría con `400`— sino que se copian del operativo del
-   * que nace, donde ya los puso ella. Se hereda una decisión de la DAF, no se toma una
-   * nueva en su nombre.
+   * POR QUÉ NO CONTRADICE RN-40. Conductor y vehículo no llegan del cliente —`CrearAdicionalDto`
+   * no los admite—: se copian del original, donde ya los puso la DAF. Se reutiliza una decisión
+   * suya, no se toma una nueva en su nombre.
    *
-   * PERO SE VERIFICA, y por eso esto no es una copia. El conductor pasa por
-   * `ElegibilidadService`, que es quien sabe de descanso, solapamiento y jornada: si el
-   * adicional cruza el horario del padre, el mismo conductor **no puede estar en los dos**
-   * (RN-28), y heredarlo produciría un cuadro que afirma algo imposible. Igual que con el
-   * personal: se hereda a quien puede, y de quien no, se dice el motivo.
+   * POR TRAMOS (2026-10-14). La ocupación sale solo de `t_tramo_transporte`, así que heredar es
+   * crear los tramos del adicional YA asignados, validados con las mismas reglas que la
+   * asignación de la DAF (`asignarBloque`). Lo hace `transporte`, detrás del puerto
+   * `RegistroHerenciaTransporte`. Se hereda a quien puede, y de quien no, la traza dice el motivo.
    *
-   * LOS DOS O NINGUNO. `ck_operativo_transporte` exige que `ASIGNADO` lleve conductor y
-   * vehículo; si el conductor no puede, el adicional nace `PENDIENTE` y la DAF lo resuelve
-   * cuando su ventana vuelva a abrirse.
+   * DESPUÉS DE CONFIRMAR EL ALTA (regla 6). Si la herencia falla a mitad, el adicional ya existe
+   * y queda PENDIENTE: la DAF lo asigna como cualquier otro. El fallo queda en la bitácora; el
+   * operativo no se pierde.
    * ═══════════════════════════════════════════════════════════════════════════════
    */
   private async heredarTransporte(
     padre: OperativoCompleto,
-    rango: RangoHorario,
-    formulario: { esPatrulla: boolean },
-  ): Promise<TransporteHeredado> {
-    // El padre no tiene transporte asignado: no hay nada que heredar, y no es un fallo.
-    if (padre.conductorId === null || padre.vehiculoId === null) {
-      return { conductorId: null, vehiculoId: null, motivo: null };
+    adicional: OperativoCompleto,
+    autor: Autor,
+  ): Promise<OperativoCompleto> {
+    const implementacion = this.herencia.obtener();
+    if (!implementacion) return adicional;
+    try {
+      const resultado = await implementacion.heredar(
+        { padreId: padre.id, adicionalId: adicional.id },
+        autor,
+      );
+      if (!resultado.heredado) return adicional;
+    } catch (error) {
+      this.logger.warn('El adicional no pudo heredar el transporte', {
+        identificador: adicional.identificador,
+        origen: padre.identificador,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return adicional;
     }
-
-    const veredicto = await this.elegibilidad.verificarConductor(
-      padre.conductorId,
-      {
-        fecha: padre.cuadro.fecha,
-        horaInicio: rango.horaInicio,
-        horaFin: rango.horaFin,
-        esPatrulla: formulario.esPatrulla,
-      },
-    );
-
-    if (!veredicto.elegible) {
-      return {
-        conductorId: null,
-        vehiculoId: null,
-        // Redactado por `talento-operativo`, que es quien decidió. Se traslada tal cual.
-        motivo:
-          veredicto.motivo ??
-          'El conductor del operativo original no puede conducir en este horario.',
-      };
-    }
-
-    return {
-      conductorId: padre.conductorId,
-      vehiculoId: padre.vehiculoId,
-      motivo: null,
-    };
+    return (await this.repositorio.buscarPorId(adicional.id)) ?? adicional;
   }
 
   /**
@@ -795,6 +1214,138 @@ export class OperativosService {
    * criterio distinto del que bloquea al resto del sistema, y la evidencia dejaría de
    * significar lo que dice.
    */
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════════
+   * COMPARTIR UNIDAD · ¿puede este operativo pedir viajar en la unidad de `destinoId`? 2026-10-19.
+   *
+   * Es la INTENCIÓN de quien registra; la DAF la ejecuta con la flota a la vista (RN-40), así que
+   * aquí no hay asientos. Se exige:
+   *
+   *   · que el destino exista y esté a su alcance (RN-48): si no, 404 SIN revelar si existe;
+   *   · que ninguno pida vehículo exclusivo (409 COMPARTIR_CON_EXCLUSIVO; lo respalda
+   *     ck_operativo_compartir_o_exclusivo);
+   *   · mismo cuadro, mismo punto de encuentro del catálogo, alguna zonal en común, horarios que se
+   *     cruzan y transporte de la DAF en los dos (409 COMPARTIR_NO_COMPATIBLE);
+   *   · que los tramos puedan ir juntos con la MISMA regla del optimizador: la responde
+   *     `transporte` por el puerto `RegistroCompatibilidadCompartir`.
+   *
+   * Si el destino ya pide viajar con otro, se resuelve a ESE anfitrión: no hay cadenas. Devuelve el
+   * error en vez de lanzarlo para que la edición pueda retirar la intención en silencio cuando un
+   * cambio de horario o punto deja de coincidir (aviso COMPARTIR_RETIRADO).
+   * ═══════════════════════════════════════════════════════════════════════════════
+   */
+  private async evaluarDestinoCompartir(
+    destinoId: number,
+    propio: {
+      id?: number;
+      cuadroId: number;
+      puntoEncuentroId: number | null;
+      zonalIds: number[];
+      horaInicio: string;
+      horaFin: string;
+      tipoTransporte: TipoTransporte;
+      esMacrooperativo: boolean;
+    },
+    roles: readonly RolDepartamental[],
+  ): Promise<{ anfitrionId: number } | { error: ApplicationError }> {
+    if (propio.id === destinoId) {
+      return {
+        error: new ValidacionError(
+          'Un operativo no puede compartir unidad consigo mismo.',
+          { operativoId: destinoId },
+        ),
+      };
+    }
+    if (propio.esMacrooperativo) {
+      return {
+        error: new ReglaNegocioError(
+          CODIGOS_ERROR.COMPARTIR_CON_EXCLUSIVO,
+          'Un operativo con vehículo exclusivo (macrooperativo) no comparte unidad. Elija una de las dos opciones.',
+          { compartirConOperativoId: destinoId },
+        ),
+      };
+    }
+
+    const visibles = visiblesPara(roles);
+    const [destino] = await this.repositorio.buscarParaCompartir(
+      [destinoId],
+      visibles,
+    );
+    if (!destino) {
+      return {
+        error: new RecursoNoEncontradoError(
+          'El operativo con el que pide compartir unidad no existe o no está a su alcance.',
+          { compartirConOperativoId: destinoId },
+        ),
+      };
+    }
+    let anfitrion = destino;
+    if (
+      destino.compartirConId !== null &&
+      destino.compartirConId !== propio.id
+    ) {
+      const [raiz] = await this.repositorio.buscarParaCompartir(
+        [destino.compartirConId],
+        visibles,
+      );
+      if (raiz) anfitrion = raiz;
+    }
+
+    const coincide =
+      anfitrion.cuadroId === propio.cuadroId &&
+      propio.puntoEncuentroId !== null &&
+      anfitrion.puntoEncuentroId === propio.puntoEncuentroId &&
+      anfitrion.tipoTransporte !== TipoTransporte.PROPIOS_MEDIOS &&
+      propio.tipoTransporte !== TipoTransporte.PROPIOS_MEDIOS &&
+      anfitrion.zonales.some((fila) =>
+        propio.zonalIds.includes(fila.zonalId),
+      ) &&
+      RangoHorario.de(anfitrion.horaInicio, anfitrion.horaFin).seSolapaCon(
+        RangoHorario.de(propio.horaInicio, propio.horaFin),
+      );
+    const detalles = {
+      anfitrionId: anfitrion.id,
+      anfitrion: anfitrion.identificador,
+    };
+    if (!coincide) {
+      return {
+        error: new ReglaNegocioError(
+          CODIGOS_ERROR.COMPARTIR_NO_COMPATIBLE,
+          `${anfitrion.identificador} no está en el mismo día, punto de encuentro, zonal y horario: no se puede pedir compartir unidad con él.`,
+          detalles,
+        ),
+      };
+    }
+    if (anfitrion.esMacrooperativo) {
+      return {
+        error: new ReglaNegocioError(
+          CODIGOS_ERROR.COMPARTIR_CON_EXCLUSIVO,
+          `${anfitrion.identificador} pide vehículo exclusivo (macrooperativo): no comparte unidad.`,
+          detalles,
+        ),
+      };
+    }
+
+    const miembros = await this.repositorio.miembrosDeUnidad(
+      [anfitrion.id],
+      visibles,
+      propio.id,
+    );
+    const [veredicto] = await this.compartir.evaluar(paraCompartir(propio), [
+      paraCompartirDe(anfitrion, miembros),
+    ]);
+    if (veredicto && !veredicto.compatible) {
+      return {
+        error: new ReglaNegocioError(
+          CODIGOS_ERROR.COMPARTIR_NO_COMPATIBLE,
+          `No se puede compartir unidad con ${anfitrion.identificador}: ${veredicto.motivo}`,
+          detalles,
+        ),
+      };
+    }
+    return { anfitrionId: anfitrion.id };
+  }
+
   private async estadoDeLaVentana(
     rol: RolDepartamental,
   ): Promise<EstadoDeVentana> {
@@ -822,7 +1373,7 @@ export class OperativosService {
     datos: DatosEdicion,
     autor: Autor,
     roles: readonly RolDepartamental[] = [autor.rol],
-  ): Promise<OperativoCompleto> {
+  ): Promise<OperativoEditado> {
     const actual = await this.exigirOperativo(id);
     // Multi-rol (2026-09-09): edita quien lo creó (alguno de sus roles), y la traza queda a
     // nombre de ESE rol, no del que la guarda eligió primero.
@@ -836,6 +1387,17 @@ export class OperativosService {
       actual.formulario.codigo,
     );
     const prep = await this.prepararCambiosGenerales(actual, datos, catalogos);
+    const avisos = await this.revisarCompartirDeEdicion(
+      actual,
+      datos,
+      prep,
+      roles,
+    );
+    const liberacion = await this.exigirConfirmacionDeLiberacion(
+      [actual],
+      [prep],
+      datos.confirmarLiberacion,
+    );
 
     const editado = await this.repositorio.ejecutarEnTransaccion((cliente) =>
       this.escribirCambiosGenerales(
@@ -844,6 +1406,7 @@ export class OperativosService {
         prep,
         datos.version,
         autorEfectivo,
+        liberacion.get(actual.id),
       ),
     );
 
@@ -853,7 +1416,64 @@ export class OperativosService {
       campos: prep.traza.map((cambio) => cambio.campo),
     });
 
-    return (await this.repositorio.buscarPorId(id)) ?? editado;
+    const resultado = (await this.repositorio.buscarPorId(id)) ?? editado;
+    // Los avisos viajan SOLO si hay alguno: la respuesta de siempre no cambia.
+    return avisos.length > 0 ? { ...resultado, avisos } : resultado;
+  }
+
+  /**
+   * COMPARTIR UNIDAD en la edición (2026-10-19). Con la intención final ya resuelta por
+   * `prepararCambiosGenerales`, comprueba que el anfitrión siga coincidiendo:
+   *
+   *   · si quien edita la PIDIÓ ahora, un destino que no coincide es un error (404 / 409);
+   *   · si solo la CONSERVA y el cambio —de horario, punto, zonal o traslado— la deja sin
+   *     coincidencia, se RETIRA en silencio y se avisa con `COMPARTIR_RETIRADO`: el horario se
+   *     re-deriva de las personas y no tiene sentido rechazar la edición por eso.
+   *
+   * Si la intención cambia, la traza se recalcula para que la auditoría la recoja.
+   */
+  private async revisarCompartirDeEdicion(
+    actual: OperativoCompleto,
+    datos: DatosEdicion,
+    prep: CambiosGeneralesPreparados,
+    roles: readonly RolDepartamental[],
+  ): Promise<string[]> {
+    const destino = prep.cambios.compartirConId ?? null;
+    if (destino === null) return [];
+
+    const resultado = await this.evaluarDestinoCompartir(
+      destino,
+      {
+        id: actual.id,
+        cuadroId: actual.cuadroId,
+        puntoEncuentroId: prep.cambios.puntoEncuentroId ?? null,
+        zonalIds: prep.zonalIds,
+        horaInicio: prep.cambios.horaInicio ?? actual.horaInicio,
+        horaFin: prep.cambios.horaFin ?? actual.horaFin,
+        tipoTransporte: prep.cambios.tipoTransporte ?? actual.tipoTransporte,
+        esMacrooperativo:
+          prep.cambios.esMacrooperativo ?? actual.esMacrooperativo,
+      },
+      roles,
+    );
+
+    const avisos: string[] = [];
+    if ('error' in resultado) {
+      const pidioAhora =
+        datos.compartirConOperativoId !== undefined &&
+        datos.compartirConOperativoId !== null;
+      if (pidioAhora) throw resultado.error;
+      prep.cambios.compartirConId = null;
+      avisos.push(AVISO_COMPARTIR_RETIRADO);
+    } else {
+      prep.cambios.compartirConId = resultado.anfitrionId;
+    }
+
+    prep.traza = this.auditoria.compararCambios(
+      comoColumnas(actual),
+      comoColumnas({ ...actual, ...prep.cambios }),
+    );
+    return avisos;
   }
 
   /**
@@ -912,19 +1532,28 @@ export class OperativosService {
       miembros[0].formulario.codigo,
     );
 
+    // Se preparan TODOS antes de abrir la transacción: si alguno exige confirmar la liberación
+    // del transporte (2026-10-07), se pregunta una sola vez por toda la patrulla.
+    const preparados = await Promise.all(
+      miembros.map((miembro) =>
+        this.prepararCambiosGenerales(miembro, datos, catalogos),
+      ),
+    );
+    const liberacion = await this.exigirConfirmacionDeLiberacion(
+      miembros,
+      preparados,
+      datos.confirmarLiberacion,
+    );
+
     await this.repositorio.ejecutarEnTransaccion(async (cliente) => {
-      for (const miembro of miembros) {
-        const prep = await this.prepararCambiosGenerales(
-          miembro,
-          datos,
-          catalogos,
-        );
+      for (const [indice, miembro] of miembros.entries()) {
         await this.escribirCambiosGenerales(
           cliente,
           miembro,
-          prep,
+          preparados[indice],
           miembro.version,
           autorEfectivo,
+          liberacion.get(miembro.id),
         );
       }
     });
@@ -1005,7 +1634,47 @@ export class OperativosService {
       puntoLibre: ubicacion.puntoLibre,
       tipoControlId: clasificacion.tipoId,
       tipoLibre: clasificacion.tipoLibre,
+      tipoTransporte: datos.tipoTransporte ?? actual.tipoTransporte,
+      // Solo COMPLETO admite el macrooperativo (2026-10-19); en otro tipo se limpia.
+      esMacrooperativo: macroSegunTipo(
+        datos.tipoTransporte ?? actual.tipoTransporte,
+        datos.esMacrooperativo ?? actual.esMacrooperativo,
+      ),
     };
+
+    // COMPARTIR UNIDAD (2026-10-19). Lo que no viene, se conserva. Propios medios limpia los dos;
+    // sin vehículo exclusivo la justificación sobra; y compartir y exclusivo se excluyen
+    // (ck_operativo_compartir_o_exclusivo): si se marca exclusivo, la intención de compartir se
+    // retira, salvo que se pidan las dos a la vez, que es un error de quien registra. La
+    // compatibilidad con el anfitrión la revisa `editar`, que conoce los roles.
+    const pidioCompartir =
+      datos.compartirConOperativoId !== undefined &&
+      datos.compartirConOperativoId !== null;
+    let compartirConId: number | null =
+      datos.compartirConOperativoId !== undefined
+        ? datos.compartirConOperativoId
+        : (actual.compartirConId ?? null);
+    let justificacionExclusivo: string | null =
+      datos.justificacionExclusivo !== undefined
+        ? datos.justificacionExclusivo
+        : (actual.justificacionExclusivo ?? null);
+    if (cambios.tipoTransporte === TipoTransporte.PROPIOS_MEDIOS) {
+      compartirConId = null;
+      justificacionExclusivo = null;
+    }
+    if (!cambios.esMacrooperativo) justificacionExclusivo = null;
+    if (cambios.esMacrooperativo && compartirConId !== null) {
+      if (pidioCompartir) {
+        throw new ReglaNegocioError(
+          CODIGOS_ERROR.COMPARTIR_CON_EXCLUSIVO,
+          'Un operativo con vehículo exclusivo (macrooperativo) no comparte unidad. Elija una de las dos opciones.',
+          { operativoId: actual.id },
+        );
+      }
+      compartirConId = null;
+    }
+    cambios.compartirConId = compartirConId;
+    cambios.justificacionExclusivo = justificacionExclusivo;
 
     // Las notas ya escritas no cambian (bitácora append-only); solo se AGREGAN las nuevas.
     const observacionesNuevas = notasLimpias(datos.observacionesNuevas);
@@ -1022,6 +1691,14 @@ export class OperativosService {
       tipoIds: clasificacion.tipoIds,
       observacionesNuevas,
       traza,
+      cambiaTipo: cambios.tipoTransporte !== actual.tipoTransporte,
+      cambiaFranja:
+        rango.horaInicio !== actual.horaInicio ||
+        rango.horaFin !== actual.horaFin ||
+        cambiaronNumeros(
+          zonalIds,
+          actual.zonales.map((f) => f.zonal.id),
+        ),
     };
   }
 
@@ -1036,8 +1713,25 @@ export class OperativosService {
     prep: CambiosGeneralesPreparados,
     version: number,
     autorEfectivo: Autor,
+    liberacion?: { conTransporte: boolean },
   ): Promise<OperativoCompleto> {
-    const guardado = await this.repositorio.actualizar(
+    // Quién pidió compartir unidad y cuándo (2026-10-19): se fija al pedirla o cambiarla y se
+    // vacía al retirarla. Va a la traza con lo demás.
+    const solicitud = solicitudDeCompartir(
+      actual,
+      prep.cambios.compartirConId,
+      autorEfectivo.usuarioId,
+      new Date(),
+    );
+    if (solicitud) {
+      Object.assign(prep.cambios, solicitud);
+      prep.traza = this.auditoria.compararCambios(
+        comoColumnas(actual),
+        comoColumnas({ ...actual, ...prep.cambios }),
+      );
+    }
+
+    let guardado = await this.repositorio.actualizar(
       actual.id,
       version,
       prep.cambios,
@@ -1094,6 +1788,20 @@ export class OperativosService {
       );
     }
 
+    // Transporte requerido (2026-10-07). Cambió el tipo —o, desde el 2026-10-14, el horario o la
+    // zonal—: los tramos ya no corresponden y se borran (transporte los regenera al planificar). Si
+    // había transporte asignado (ya confirmado por quien edita), se libera y la DAF ve ALV-07.
+    if (liberacion) {
+      await this.liberarTransportePorCambio(
+        cliente,
+        guardado,
+        liberacion.conTransporte,
+        autorEfectivo,
+      );
+      guardado =
+        (await this.repositorio.buscarPorIdEn(actual.id, cliente)) ?? guardado;
+    }
+
     // Caso 8 del plan. POL-06 sobre el estado YA modificado: cambiar el horario de un operativo
     // con transporte puede volverlo nocturno, y con ello aparece ALV-04. Se recalcula el conjunto.
     await this.alertas.recalcular(guardado, cliente);
@@ -1112,6 +1820,98 @@ export class OperativosService {
     );
 
     return guardado;
+  }
+
+  /**
+   * Transporte requerido (2026-10-07). De los operativos que cambian de tipo —o de horario o zonal,
+   * desde el 2026-10-14 (D4)—, cuáles tienen ya transporte asignado. Si alguno lo tiene y no llegó
+   * `confirmarLiberacion`, se rechaza con 409: la pantalla pregunta y reenvía. Devuelve, por
+   * operativo que cambia, si hay que liberar.
+   *
+   * EL CÓDIGO: `CAMBIO_TIPO_CON_TRANSPORTE` si solo cambia el tipo (el de siempre, para no romper
+   * la pantalla que ya lo conoce) y `CAMBIO_CON_TRANSPORTE` si cambia el horario o la zonal.
+   */
+  private async exigirConfirmacionDeLiberacion(
+    operativos: readonly OperativoCompleto[],
+    preparados: readonly CambiosGeneralesPreparados[],
+    confirmado: boolean | undefined,
+  ): Promise<Map<number, { conTransporte: boolean }>> {
+    const liberacion = new Map<number, { conTransporte: boolean }>();
+    const conTransporte: string[] = [];
+    let porFranja = false;
+    for (const [indice, operativo] of operativos.entries()) {
+      const { cambiaTipo, cambiaFranja } = preparados[indice];
+      if (!cambiaTipo && !cambiaFranja) continue;
+      const asignado = await this.repositorio.tieneTransporteAsignado(
+        operativo.id,
+      );
+      liberacion.set(operativo.id, { conTransporte: asignado });
+      if (asignado) {
+        conTransporte.push(operativo.identificador);
+        porFranja ||= cambiaFranja;
+      }
+    }
+    if (conTransporte.length > 0 && confirmado !== true) {
+      throw porFranja
+        ? errorCambioConTransporte(conTransporte)
+        : new ReglaNegocioError(
+            CODIGOS_ERROR.CAMBIO_TIPO_CON_TRANSPORTE,
+            'Este operativo ya tiene transporte asignado. Si cambia el tipo de transporte, la asignación se libera y la DAF tendrá que volver a resolverlo. Confirme el cambio para continuar.',
+            { operativos: conTransporte },
+          );
+    }
+    return liberacion;
+  }
+
+  /**
+   * Libera el transporte de un operativo cuyo tipo, horario o zonal cambió, y deja la traza. Sus
+   * tramos se borran siempre (ya no corresponden); conductor y vehículo, solo si los tenía.
+   */
+  private async liberarTransportePorCambio(
+    cliente: Prisma.TransactionClient,
+    operativo: OperativoCompleto,
+    conTransporte: boolean,
+    autor: Autor,
+  ): Promise<void> {
+    await this.repositorio.liberarPorCambio(
+      operativo.id,
+      {
+        conTransporte,
+        marcarLiberado:
+          operativo.tipoTransporte !== TipoTransporte.PROPIOS_MEDIOS,
+      },
+      cliente,
+    );
+    if (!conTransporte) return;
+
+    await this.auditoria.registrar(
+      {
+        entidad: 't_operativo',
+        entidadId: operativo.id,
+        operativoId: operativo.id,
+        accion: AccionAuditoria.ACTUALIZAR,
+        cambios: this.auditoria.compararCambios(
+          {
+            cond_id: operativo.conductorId,
+            vehi_id: operativo.vehiculoId,
+            oper_estado_transporte: operativo.estadoTransporte,
+          },
+          {
+            cond_id: null,
+            vehi_id: null,
+            oper_estado_transporte: EstadoTransporte.PENDIENTE,
+          },
+        ),
+        usuario: autor.usuarioId,
+        rol: autor.rol,
+      },
+      cliente,
+    );
+
+    this.logger.log('Transporte liberado por cambio del operativo', {
+      identificador: operativo.identificador,
+      tipoTransporte: operativo.tipoTransporte,
+    });
   }
 
   // ─────────────────────────── Baja ───────────────────────────
@@ -1478,7 +2278,9 @@ export class OperativosService {
               ),
               origenId: null,
               grupoRegistro: patrulla.grupoRegistro,
-              transporte: null,
+              // El aporte viaja con la patrulla: mismo transporte pedido.
+              tipoTransporte: patrulla.tipoTransporte,
+              esMacrooperativo: patrulla.esMacrooperativo,
               rol: autor.rol,
               usuarioId: autor.usuarioId,
             },
@@ -1793,7 +2595,12 @@ export class OperativosService {
   async actualizarTurnoPersonal(
     operativoId: number,
     funcionarioId: number,
-    datos: { horaInicio: string; horaFin: string },
+    datos: {
+      horaInicio: string;
+      horaFin: string;
+      /** Ocupación por tramos (2026-10-14): confirma liberar el transporte si la ventana cambia. */
+      confirmarLiberacion?: boolean;
+    },
     autor: Autor,
     roles: readonly RolDepartamental[] = [autor.rol],
   ): Promise<OperativoCompleto> {
@@ -1867,6 +2674,18 @@ export class OperativosService {
       );
     }
 
+    // D4 (2026-10-14): si la ventana del operativo cambia, sus tramos de transporte ya no
+    // corresponden. Con transporte asignado, se exige confirmar que se libera.
+    const cambiaVentana =
+      envolvente.horaInicio !== operativo.horaInicio ||
+      envolvente.horaFin !== operativo.horaFin;
+    const conTransporte =
+      cambiaVentana &&
+      (await this.repositorio.tieneTransporteAsignado(operativoId));
+    if (conTransporte && datos.confirmarLiberacion !== true) {
+      throw errorCambioConTransporte([operativo.identificador]);
+    }
+
     const actualizado = await this.repositorio.ejecutarEnTransaccion(
       async (cliente) => {
         await this.personal.actualizarTurno(
@@ -1915,6 +2734,15 @@ export class OperativosService {
           cliente,
         );
 
+        if (cambiaVentana) {
+          await this.liberarTransportePorCambio(
+            cliente,
+            operativo,
+            conTransporte,
+            autorEfectivo,
+          );
+        }
+
         return this.recalcularEn(operativoId, cliente);
       },
     );
@@ -1925,6 +2753,159 @@ export class OperativosService {
     });
 
     return actualizado;
+  }
+
+  /**
+   * Fija o quita el trámite de Inspección de una persona ya asignada (2026-10-07).
+   *
+   * Es la edición del combo «Trámite de Inspección» en el cajón de corrección. Mismas guardas que
+   * el cambio de turno: jornada escribible, la persona figura en el operativo, y el compartido solo
+   * toca lo suyo. Con un código, el servidor vuelve a preguntar a Inspección antes de copiarlo;
+   * con `null`, lo quita sin preguntar a nadie.
+   *
+   * POR LOTE (decisión del usuario, 2026-10-07): las N copias que el form 8 genera para una persona
+   * comparten `grupoRegistro` y nacen con el MISMO trámite. Cambiarlo en una lo cambia en todas las
+   * de esa persona en ese registro, en una sola transacción y con su auditoría por operativo. Sin
+   * `grupoRegistro` (operativo suelto) solo se toca este operativo.
+   */
+  async fijarTramitePersonal(
+    operativoId: number,
+    funcionarioId: number,
+    codigoTramite: string | null,
+    autor: Autor,
+    roles: readonly RolDepartamental[] = [autor.rol],
+    tokenAuth: string | null = null,
+  ): Promise<OperativoCompleto> {
+    const operativo = await this.exigirOperativo(operativoId);
+    const autorEfectivo: Autor = {
+      usuarioId: autor.usuarioId,
+      rol: this.rolParticipanteEntre(operativo, roles),
+    };
+    await this.cuadros.exigirEscritura(operativo.cuadro.fecha);
+
+    const asignacion = operativo.personal.find(
+      (fila) => fila.funcionarioId === funcionarioId,
+    );
+
+    if (!asignacion) {
+      throw new RecursoNoEncontradoError(
+        `Esa persona no figura en el operativo ${operativo.identificador}, así que no tiene trámite que editar.`,
+        { operativoId, funcionarioId },
+      );
+    }
+
+    if (
+      autorEfectivo.rol !== operativo.formulario.rolDueno &&
+      asignacion.asignadoPorRol !== autorEfectivo.rol
+    ) {
+      throw new AutorizacionError(
+        CODIGOS_ERROR.FORMULARIO_NO_AUTORIZADO,
+        `Esa persona fue asignada por otro departamento: solicite el cambio de trámite a quien la asignó.`,
+        { operativoId, funcionarioId, rol: autorEfectivo.rol },
+      );
+    }
+
+    const codigo = codigoTramite?.trim() || null;
+    const copia = codigo
+      ? (
+          await this.tramites.copiasParaGuardar(
+            comoFecha(operativo.cuadro.fecha),
+            [
+              {
+                funcionarioId,
+                cedula: asignacion.funcionario.cedula,
+                area: asignacion.funcionario.area,
+                nombre: `${asignacion.funcionario.apellidos} ${asignacion.funcionario.nombres}`,
+                codigoTramite: codigo,
+              },
+            ],
+            tokenAuth,
+          )
+        ).get(funcionarioId)
+      : undefined;
+
+    const lote = await this.loteDeTramite(operativo, funcionarioId);
+
+    const actualizado = await this.repositorio.ejecutarEnTransaccion(
+      async (cliente) => {
+        for (const copiaDelLote of lote) {
+          if (copia) {
+            await this.personal.guardarTramite(
+              copiaDelLote.asignacion.id,
+              copia,
+              autorEfectivo.usuarioId,
+              cliente,
+            );
+          } else {
+            await this.personal.quitarTramite(
+              copiaDelLote.asignacion.id,
+              cliente,
+            );
+          }
+
+          await this.auditoria.registrar(
+            {
+              entidad: 't_operativo_tramite_inspeccion',
+              entidadId: copiaDelLote.asignacion.id,
+              operativoId: copiaDelLote.operativoId,
+              accion: AccionAuditoria.ACTUALIZAR,
+              usuario: autorEfectivo.usuarioId,
+              rol: autorEfectivo.rol,
+              cambios: [
+                {
+                  campo: 'tramiteInspeccion',
+                  valorAnterior:
+                    copiaDelLote.asignacion.tramiteInspeccion?.codigoTramite,
+                  valorNuevo: copia?.codigoTramite,
+                },
+              ],
+            },
+            cliente,
+          );
+        }
+
+        return this.recalcularEn(operativoId, cliente);
+      },
+    );
+
+    this.logger.log('Trámite de Inspección actualizado', {
+      identificador: operativo.identificador,
+      funcionarioId,
+      tramite: copia?.codigoTramite ?? null,
+      copias: lote.length,
+    });
+
+    return actualizado;
+  }
+
+  /**
+   * Las asignaciones de la persona que comparten el trámite: este operativo y, si nació de un
+   * registro por lote (`grupoRegistro`), las demás copias activas de esa misma persona.
+   */
+  private async loteDeTramite(
+    operativo: OperativoCompleto,
+    funcionarioId: number,
+  ): Promise<
+    {
+      operativoId: number;
+      asignacion: OperativoCompleto['personal'][number];
+    }[]
+  > {
+    const propios = (op: OperativoCompleto) =>
+      op.personal
+        .filter((fila) => fila.funcionarioId === funcionarioId)
+        .map((asignacion) => ({ operativoId: op.id, asignacion }));
+
+    if (!operativo.grupoRegistro) return propios(operativo);
+
+    const delGrupo = await this.repositorio.buscarPorGrupoRegistro(
+      operativo.grupoRegistro,
+    );
+    const lote = delGrupo.flatMap(propios);
+    // El operativo que se edita siempre entra, aunque la lectura del grupo no lo trajera.
+    return lote.some((fila) => fila.operativoId === operativo.id)
+      ? lote
+      : [...propios(operativo), ...lote];
   }
 
   // ─────────────────────────── Transporte (M-17) ───────────────────────────
@@ -2002,6 +2983,14 @@ export class OperativosService {
           },
           cliente,
         );
+
+        // ALV-07 (2026-10-07): la DAF volvió a resolver el transporte liberado.
+        if (actual.transporteLiberadoEn !== null) {
+          await this.repositorio.limpiarTransporteLiberado(
+            operativoId,
+            cliente,
+          );
+        }
 
         await this.auditoria.registrar(
           {
@@ -2272,10 +3261,51 @@ export class OperativosService {
         horaInicio: tienePropio ? asignacion.horaInicio! : null,
         horaFin: tienePropio ? asignacion.horaFin! : null,
         cantidad: asignacion.cantidad ?? 1,
+        cedula: funcionario.cedula,
+        nombre: `${funcionario.apellidos} ${funcionario.nombres}`,
+        codigoTramite:
+          asignacion.tramiteInspeccion?.codigoTramite?.trim() || null,
+        tramite: null,
       });
     }
 
     return admitidas;
+  }
+
+  /**
+   * Comprueba contra Inspección los trámites elegidos y los deja en cada persona (2026-10-07).
+   *
+   * UNA sola consulta para todo el registro. Si nadie eligió trámite, no se pregunta a Inspección:
+   * el registro de siempre no depende de que otro sistema conteste.
+   */
+  private async adjuntarTramites(
+    personal: PersonaVerificada[],
+    fecha: Date,
+    tokenAuth: string | null,
+  ): Promise<void> {
+    const solicitudes = personal.flatMap((persona) =>
+      persona.codigoTramite === null
+        ? []
+        : [
+            {
+              funcionarioId: persona.id,
+              cedula: persona.cedula,
+              area: persona.area,
+              nombre: persona.nombre,
+              codigoTramite: persona.codigoTramite,
+            },
+          ],
+    );
+    if (solicitudes.length === 0) return;
+
+    const copias = await this.tramites.copiasParaGuardar(
+      comoFecha(fecha),
+      solicitudes,
+      tokenAuth,
+    );
+    for (const persona of personal) {
+      persona.tramite = copias.get(persona.id) ?? null;
+    }
   }
 
   /**
@@ -2533,17 +3563,10 @@ export class OperativosService {
                 institucionIds: contexto.institucionIds,
                 origenId: contexto.origen?.id ?? null,
                 grupoRegistro: contexto.grupoRegistro ?? null,
-                // Los dos juntos o ninguno: `ck_operativo_transporte` no admite un
-                // `ASIGNADO` a medias.
-                transporte:
-                  contexto.transporte?.conductorId !== undefined &&
-                  contexto.transporte.conductorId !== null &&
-                  contexto.transporte.vehiculoId !== null
-                    ? {
-                        conductorId: contexto.transporte.conductorId,
-                        vehiculoId: contexto.transporte.vehiculoId,
-                      }
-                    : null,
+                tipoTransporte: contexto.tipoTransporte,
+                esMacrooperativo: contexto.esMacrooperativo,
+                compartirConId: contexto.compartirConId ?? null,
+                justificacionExclusivo: contexto.justificacionExclusivo ?? null,
                 rol: autor.rol,
                 usuarioId: autor.usuarioId,
               },
@@ -2553,12 +3576,11 @@ export class OperativosService {
                 esResponsable: false,
                 horaInicio,
                 horaFin,
+                tramite: persona.tramite,
               })),
               autor,
               // El adicional lleva detalle en la traza (nace de una excepción); el ordinario no.
-              contexto.origen
-                ? trazaDelAdicional(contexto.origen, contexto.transporte)
-                : undefined,
+              contexto.origen ? trazaDelAdicional(contexto.origen) : undefined,
             );
             creados.push(creado);
           }
@@ -2635,6 +3657,34 @@ export class OperativosService {
         },
         cliente,
       );
+
+      // La COPIA del trámite de Inspección, en la misma transacción (2026-10-07).
+      if (asignacion.tramite) {
+        await this.personal.guardarTramite(
+          fila.id,
+          asignacion.tramite,
+          autor.usuarioId,
+          cliente,
+        );
+        await this.auditoria.registrar(
+          {
+            entidad: 't_operativo_tramite_inspeccion',
+            entidadId: fila.id,
+            operativoId: creado.id,
+            accion: AccionAuditoria.CREAR,
+            usuario: autor.usuarioId,
+            rol: autor.rol,
+            cambios: [
+              {
+                campo: 'tramiteInspeccion',
+                valorAnterior: undefined,
+                valorNuevo: asignacion.tramite.codigoTramite,
+              },
+            ],
+          },
+          cliente,
+        );
+      }
     }
 
     if (asignaciones.length === 0) {
@@ -2746,7 +3796,7 @@ export class OperativosService {
       // INV-07. El punto pertenece a alguna de las zonales del operativo.
       if (!ubicacion.incluyeZonal(punto.zonalId)) {
         throw new ValidacionError(
-          `El punto ${punto.nombre} pertenece a la zonal ${punto.zonal.nombre}, que no está entre las seleccionadas.`,
+          `El punto ${punto.nombre} pertenece a la zonal ${punto.zonalFormulario.nombre}, que no está entre las seleccionadas.`,
           { puntoId: punto.id, zonalId: punto.zonalId },
         );
       }
@@ -2861,11 +3911,12 @@ interface ContextoRegistro {
    * es por formulario (serie única). Ver `registrarConSecuencial`.
    */
   numeraPorPrefijo?: boolean;
-  /**
-   * Transporte heredado del operativo original, ya verificado. Solo en los adicionales;
-   * un registro ordinario nace siempre sin conductor ni vehículo (RN-40).
-   */
-  transporte?: TransporteHeredado;
+  /** Tipo de transporte pedido y macrooperativo (2026-10-06). Sin ellos, los del esquema. */
+  tipoTransporte?: TipoTransporte;
+  esMacrooperativo?: boolean;
+  /** Compartir unidad (2026-10-19), ya validado. Nulos en el adicional. */
+  compartirConId?: number | null;
+  justificacionExclusivo?: string | null;
   /**
    * Presente **solo si el operativo nace como adicional**. Su ausencia es lo que
    * distingue un registro ordinario, y de ella dependen las tres cosas que cambian:
@@ -2889,19 +3940,6 @@ interface EstadoDeVentana {
   horaCierre: string | null;
 }
 
-/**
- * Resultado de intentar heredar el transporte del operativo original.
- *
- * `motivo` no es un error: es la explicación de por qué el adicional nace `PENDIENTE`
- * pudiendo haber nacido `ASIGNADO`. Sin él, quien lo captura no sabría si el original no
- * tenía transporte o si el conductor no podía, que son dos situaciones muy distintas.
- */
-interface TransporteHeredado {
-  conductorId: number | null;
-  vehiculoId: number | null;
-  motivo: string | null;
-}
-
 /** Persona que ya pasó composición y descanso, lista para asignarse al registrar. */
 interface PersonaVerificada {
   id: number;
@@ -2912,6 +3950,13 @@ interface PersonaVerificada {
   horaFin: string | null;
   /** Cuántos operativos genera esta persona (2026-09-10). Por defecto 1; solo aplica en el 8. */
   cantidad: number;
+  /** De la ficha: con la cédula se cruza contra Inspección; el nombre va en los mensajes. */
+  cedula: string;
+  nombre: string;
+  /** Código del trámite de Inspección que se pidió (2026-10-07). Nulo si no se eligió. */
+  codigoTramite: string | null;
+  /** El trámite ya comprobado contra Inspección. Lo llena `adjuntarTramites`. */
+  tramite: TramiteDeInspeccion | null;
 }
 
 /** Una persona a asignar, con su ventana horaria opcional (override del operativo). */
@@ -2924,12 +3969,31 @@ interface AsignacionSolicitada {
    * los formularios con `variosPorPersona` (el 8 y el 5). Ver `componerOperativosDelRegistro`.
    */
   cantidad?: number;
+  /** Trámite de Inspección elegido para esta persona (2026-10-07). */
+  tramiteInspeccion?: { codigoTramite: string };
 }
 
 /**
  * Notas del operativo, limpias: recorta cada una y descarta las vacías (2026-09-09). Una
  * nota en blanco no es una nota, y guardarla ensuciaría la bitácora.
  */
+/**
+ * Transporte requerido (2026-10-07). El macrooperativo pide vehículo EXCLUSIVO.
+ *
+ * SOLO EN COMPLETO DESDE EL 2026-10-19, a pedido del negocio: el vehículo exclusivo tiene sentido
+ * cuando la unidad acompaña TODO el operativo. En «solo dejar», «solo retirar» o «dejar y
+ * retirar» la unidad queda libre entre traslados y se puede compartir; con PROPIOS_MEDIOS no hay
+ * vehículo. En cualquier tipo distinto de COMPLETO la marca se limpia en silencio —alta, edición y
+ * herencia del adicional—, igual que ya se hacía con PROPIOS_MEDIOS, para no romper a un cliente
+ * que la envíe. No se migran datos: la regla rige al crear y al editar.
+ */
+function macroSegunTipo(
+  tipo: TipoTransporte | undefined,
+  macro: boolean | undefined,
+): boolean {
+  return tipo === TipoTransporte.COMPLETO ? macro === true : false;
+}
+
 function notasLimpias(notas?: string[]): string[] {
   return (notas ?? []).map((texto) => texto.trim()).filter(Boolean);
 }
@@ -3080,8 +4144,23 @@ function comoColumnas(operativo: {
   puntoLibre: string | null;
   tipoControlId: number | null;
   tipoLibre: string | null;
+  tipoTransporte?: string;
+  esMacrooperativo?: boolean;
+  compartirConId?: number | null;
+  justificacionExclusivo?: string | null;
+  compartirSolicitadoPor?: number | null;
+  compartirSolicitadoEn?: Date | null;
 }): Record<string, unknown> {
   return {
+    oper_tipo_transporte: operativo.tipoTransporte ?? null,
+    oper_es_macrooperativo: operativo.esMacrooperativo ?? false,
+    // Compartir unidad (2026-10-19): con quién pide viajar y por qué pide vehículo exclusivo.
+    oper_compartir_con_id: operativo.compartirConId ?? null,
+    oper_justificacion_exclusivo: operativo.justificacionExclusivo ?? null,
+    // Y quién lo pidió y cuándo (2026-10-19, plan «acciones-icono-notas»).
+    oper_compartir_solicitado_por: operativo.compartirSolicitadoPor ?? null,
+    oper_compartir_solicitado_en:
+      operativo.compartirSolicitadoEn?.toISOString() ?? null,
     oper_hora_inicio: operativo.horaInicio,
     oper_hora_fin: operativo.horaFin,
     oper_es_nocturno: operativo.esNocturno,
@@ -3092,6 +4171,33 @@ function comoColumnas(operativo: {
     tico_id: operativo.tipoControlId,
     oper_tipo_libre: operativo.tipoLibre,
   };
+}
+
+/**
+ * Quién pidió compartir unidad y cuándo, tras una edición (2026-10-19, plan «acciones-icono-notas»).
+ *
+ *   · la intención no cambia (o no viaja)   → `null`: no se toca nada;
+ *   · se retira (queda en `null`)           → se vacían los dos;
+ *   · se pide o cambia de anfitrión          → quien edita, y ahora.
+ *
+ * Pura: el reloj y el usuario llegan de fuera.
+ */
+export function solicitudDeCompartir(
+  actual: { compartirConId: number | null },
+  nuevo: number | null | undefined,
+  usuarioId: number,
+  ahora: Date,
+): {
+  compartirSolicitadoPor: number | null;
+  compartirSolicitadoEn: Date | null;
+} | null {
+  if (nuevo === undefined) return null;
+  const anterior = actual.compartirConId ?? null;
+  if (nuevo === anterior) return null;
+  if (nuevo === null) {
+    return { compartirSolicitadoPor: null, compartirSolicitadoEn: null };
+  }
+  return { compartirSolicitadoPor: usuarioId, compartirSolicitadoEn: ahora };
 }
 
 /** Compara dos conjuntos de identificadores sin importar el orden de llegada. */
@@ -3116,15 +4222,12 @@ function cambiaronNumeros(nuevos: number[], anteriores: number[]): boolean {
  * EL TEXTO ES LEGIBLE A PROPÓSITO. Quien consulte la auditoría es un funcionario, no
  * quien escribió esto: un `false` no dice qué significaba estar cerrada.
  */
-function trazaDelAdicional(
-  origen: {
-    identificador: string;
-    ventana: EstadoDeVentana;
-    estadoCuadro: EstadoCuadro;
-    laDisponeLaDireccion: boolean;
-  },
-  transporte: TransporteHeredado | undefined,
-): CambioCampo[] {
+function trazaDelAdicional(origen: {
+  identificador: string;
+  ventana: EstadoDeVentana;
+  estadoCuadro: EstadoCuadro;
+  laDisponeLaDireccion: boolean;
+}): CambioCampo[] {
   const cierre = origen.ventana.horaCierre
     ? ` (cerró a las ${origen.ventana.horaCierre.replace(':', 'H')})`
     : '';
@@ -3144,23 +4247,23 @@ function trazaDelAdicional(
           ? 'CERRADO · dispuesto por la Dirección sobre un cuadro ya cerrado (RN-58)'
           : `${origen.estadoCuadro}${origen.laDisponeLaDireccion ? ' · dispuesto por la Dirección' : ''}`,
     },
-    /**
-     * DE DÓNDE SALIÓ EL TRANSPORTE, Y ESTE ASIENTO ES OBLIGATORIO.
-     *
-     * Un operativo que nace `ASIGNADO` **sin que la DAF lo haya tocado** contradice lo
-     * que RN-40 hace esperar a cualquiera que audite. La traza tiene que decir que se
-     * heredó, y de qué operativo: entonces deja de ser una anomalía y pasa a ser una
-     * decisión de la DAF reutilizada.
-     */
-    {
-      campo: 'transporte',
-      valorNuevo:
-        transporte?.conductorId != null
-          ? `heredado de ${origen.identificador}, donde lo asignó la DAF`
-          : (transporte?.motivo ??
-            'sin heredar · el operativo original no tenía transporte asignado'),
-    },
+    // DE DÓNDE SALE EL TRANSPORTE no va aquí desde el 2026-10-14: la herencia ocurre después de
+    // confirmar el alta y deja su propio asiento `transporte` (ver `HerenciaTransporteService`).
   ];
+}
+
+/**
+ * D4 (2026-10-14): el horario o la zonal de un operativo con transporte asignado cambió. Sus
+ * tramos se cortaron con los anteriores; para seguir, quien edita confirma que se liberan.
+ */
+function errorCambioConTransporte(
+  identificadores: string[],
+): ReglaNegocioError {
+  return new ReglaNegocioError(
+    CODIGOS_ERROR.CAMBIO_CON_TRANSPORTE,
+    'Este operativo ya tiene transporte asignado. Si cambia su horario o su zonal, los tramos de transporte dejan de corresponder: la asignación se libera y la DAF tendrá que volver a resolverlo. Confirme el cambio para continuar.',
+    { operativos: identificadores },
+  );
 }
 
 /** P2002 es la violación de restricción única de Prisma. */

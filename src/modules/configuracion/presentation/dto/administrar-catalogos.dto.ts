@@ -3,7 +3,7 @@
  * Módulo: Cuadro de Colores
  * Feature: Formularios y catálogos
  * Archivo: administrar-catalogos.dto.ts
- * Responsabilidad: Declarar los contratos de administración de los tres catálogos.
+ * Responsabilidad: Declarar los contratos de administración de los cuatro catálogos.
  * Desarrollador: Jose Sosa
  * Fecha: 2026-08-05
  *
@@ -27,10 +27,9 @@ import {
   MinLength,
 } from 'class-validator';
 
-// Un punto de encuentro pertenece a UN formulario (2026-09-29): lleva su `formularioId`,
-// igual que el tipo de control. Ya no hay delimitación de varios formularios ni tabla
-// puente. El formulario queda fijo tras crearse (lo referencian los operativos), así que
-// solo el alta lo pide.
+// EL FORMULARIO VA EN LA RUTA, NO EN EL CUERPO (2026-10-13): `/administracion/catalogos/:codigo/…`.
+// Cada valor se crea en el formulario de la ruta y queda fijo en él. No hay formularios
+// adicionales: nada se copia ni se vincula entre formularios.
 export class CrearPuntoDto {
   @MaxLength(200, {
     message: 'El nombre del punto no puede superar los 200 caracteres.',
@@ -44,10 +43,6 @@ export class CrearPuntoDto {
   @IsInt({ message: 'La zonal se indica por su identificador.' })
   @IsNotEmpty({ message: 'Indique a qué zonal pertenece el punto.' })
   zonalId: number;
-
-  @IsPositive({ message: 'El formulario se indica por su identificador.' })
-  @IsInt({ message: 'El formulario se indica por su identificador.' })
-  formularioId: number;
 }
 
 export class ActualizarPuntoDto {
@@ -70,15 +65,19 @@ export class ActualizarPuntoDto {
 }
 
 /**
- * La zonal es un CATÁLOGO CERRADO hasta el 2026-09-04. Desde esa fecha el administrador
- * puede sumar zonales, y por eso existen estos contratos. Ver `zonales.controller.ts`.
- *
- * NO LLEVA CÓDIGO: se autogenera del nombre en el servidor y se comprueba único. Pedirlo
- * al administrador invitaba a duplicados y a códigos inconsistentes. Y al ACTUALIZAR solo
- * se admite el nombre —el código queda fijo tras crearse, porque lo referencian los
- * operativos— más `activo`, que es el camino de reactivación (mismo patrón que los puntos).
+ * La zonal es DEL FORMULARIO desde el 2026-10-13 (`t_zonal_formulario`). El alta pide la ZONA DE
+ * LA CIUDAD a la que corresponde —obligatoria: Transporte la usa para traslados y sector— y el
+ * nombre que tendrá en el formulario. Al ACTUALIZAR solo cambian el nombre y `activo`; la zona
+ * queda fija, porque la llevan sus puntos y los operativos.
  */
 export class CrearZonalDto {
+  @IsPositive({
+    message: 'La zona de la ciudad se indica por su identificador.',
+  })
+  @IsInt({ message: 'La zona de la ciudad se indica por su identificador.' })
+  @IsNotEmpty({ message: 'Indique la zona de la ciudad de la zonal.' })
+  zonaId: number;
+
   @MaxLength(90, {
     message: 'El nombre de la zonal no puede superar los 90 caracteres.',
   })
@@ -102,8 +101,6 @@ export class ActualizarZonalDto {
   activo?: boolean;
 }
 
-// Un tipo de control pertenece a UN formulario (2026-09-07): lleva su `formularioId`, no
-// una delimitación de varios como el punto y la institución.
 export class CrearTipoControlDto {
   @MaxLength(200, {
     message:
@@ -115,10 +112,6 @@ export class CrearTipoControlDto {
   @IsString({ message: 'El nombre del tipo de control debe ser texto.' })
   @IsNotEmpty({ message: 'Indique el nombre del tipo de control.' })
   nombre: string;
-
-  @IsPositive({ message: 'El formulario se indica por su identificador.' })
-  @IsInt({ message: 'El formulario se indica por su identificador.' })
-  formularioId: number;
 }
 
 export class ActualizarTipoControlDto {
@@ -138,8 +131,6 @@ export class ActualizarTipoControlDto {
   activo?: boolean;
 }
 
-// Una institución pertenece a UN formulario (2026-09-29): lleva su `formularioId`, igual
-// que el punto y el tipo de control. El formulario queda fijo tras crearse.
 export class CrearInstitucionDto {
   @MaxLength(40, { message: 'La sigla no puede superar los 40 caracteres.' })
   @MinLength(2, { message: 'La sigla es demasiado corta.' })
@@ -156,10 +147,6 @@ export class CrearInstitucionDto {
     message: 'Indique la denominación completa de la institución.',
   })
   nombre: string;
-
-  @IsPositive({ message: 'El formulario se indica por su identificador.' })
-  @IsInt({ message: 'El formulario se indica por su identificador.' })
-  formularioId: number;
 }
 
 export class ActualizarInstitucionDto {

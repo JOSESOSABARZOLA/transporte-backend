@@ -19,6 +19,14 @@
  * cumple aunque alguien llame al endpoint sin pasar por la pantalla. Son los mismos pasteles
  * que ya usan los nueve formularios más algunos tonos claros para tener de dónde elegir; el
  * acento es negro en todos (`#000000`), como los nueve: el texto va oscuro sobre el pastel.
+ *
+ * AMPLIACIÓN A 24 (2026-10-13). Los catorce primeros NO cambian ni de hex ni de nombre: los
+ * formularios guardados los usan y `esColorDePaleta` exige coincidencia exacta. Los diez
+ * nuevos se eligieron por cálculo, no a ojo: cada uno está a una distancia CIEDE2000 de al
+ * menos 10 de todos los demás (se distinguen de un vistazo) y tiene un contraste de al menos
+ * 7:1 con el texto negro del chip (WCAG AAA). Algunos pares de los catorce originales quedan
+ * más cerca entre sí —p. ej. Rosado y Rojo claro—; se conservan porque ya están en uso, y
+ * `paleta-formularios.spec.ts` los lista de forma explícita.
  * ═══════════════════════════════════════════════════════════════════════════════
  */
 
@@ -34,7 +42,8 @@ const ACENTO = '#000000';
 
 /**
  * La paleta institucional. Los nueve primeros son los tonos que ya usan los formularios
- * sembrados; el resto son pasteles claros para tener variedad al crear nuevos.
+ * sembrados; los cinco siguientes, pasteles claros de la primera versión; los diez últimos,
+ * la ampliación de 2026-10-13, escogidos para distinguirse de todos los anteriores.
  */
 export const PALETA_FORMULARIOS: readonly ColorFormulario[] = [
   { nombre: 'Verde azulado', fondo: '#A2C4C9', acento: ACENTO },
@@ -51,6 +60,16 @@ export const PALETA_FORMULARIOS: readonly ColorFormulario[] = [
   { nombre: 'Lavanda', fondo: '#E4DFEC', acento: ACENTO },
   { nombre: 'Verde menta', fondo: '#C6E0B4', acento: ACENTO },
   { nombre: 'Durazno', fondo: '#F8CBAD', acento: ACENTO },
+  { nombre: 'Orquídea', fondo: '#E495D1', acento: ACENTO },
+  { nombre: 'Pervinca', fondo: '#9595E4', acento: ACENTO },
+  { nombre: 'Aguamarina', fondo: '#95E4C9', acento: ACENTO },
+  { nombre: 'Rosa palo', fondo: '#E495A5', acento: ACENTO },
+  { nombre: 'Lila claro', fondo: '#F3CEF3', acento: ACENTO },
+  { nombre: 'Salmón', fondo: '#E4A595', acento: ACENTO },
+  { nombre: 'Amarillo limón', fondo: '#E4E495', acento: ACENTO },
+  { nombre: 'Turquesa claro', fondo: '#C6F1EF', acento: ACENTO },
+  { nombre: 'Violeta', fondo: '#BAA5D4', acento: ACENTO },
+  { nombre: 'Verde claro', fondo: '#95E495', acento: ACENTO },
 ];
 
 /**

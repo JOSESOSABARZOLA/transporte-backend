@@ -67,37 +67,25 @@ export class AuditoriaService {
     datos: DatosAuditoria,
     cliente?: ClientePrisma,
   ): Promise<void> {
-    const contexto = obtenerContexto();
-    const usuario = datos.usuario ?? contexto?.usuarioId;
-    const rol = datos.rol ?? contexto?.rol;
-
-    if (usuario === undefined || rol === undefined) {
-      // Sin identidad no hay evidencia útil: una traza anónima no dice quién cambió
-      // qué, que es lo único que esta funcionalidad debe garantizar.
-      throw new Error(
-        'No se puede auditar sin identidad resuelta. Verifique que IdentidadGuard se ejecutó antes.',
-      );
-    }
-
-    const base = {
-      entidad: datos.entidad,
-      entidadId: datos.entidadId,
-      accion: datos.accion,
-      operativoId: datos.operativoId,
-      usuario,
-      rol,
-      correlacion: contexto?.correlacionId,
-    };
-
-    if (!datos.cambios || datos.cambios.length === 0) {
-      await this.repositorio.insertar(base, cliente);
+    const filas = filasDe(datos);
+    if (filas.length === 1 && !datos.cambios?.length) {
+      await this.repositorio.insertar(filas[0], cliente);
       return;
     }
+    await this.repositorio.insertarVarias(filas, cliente);
+  }
 
-    await this.repositorio.insertarVarias(
-      datos.cambios.map((cambio) => ({ ...base, ...cambio })),
-      cliente,
-    );
+  /**
+   * Registra VARIAS trazas en UNA sola inserción (2026-10-14). Para las escrituras que tocan
+   * muchas filas a la vez —la confirmación del optimizador asigna decenas de tramos—: una traza
+   * por fila tocada, sin una consulta por fila. Misma garantía de DA-09: recibe el cliente de la
+   * transacción en curso.
+   */
+  async registrarVarios(
+    lista: readonly DatosAuditoria[],
+    cliente?: ClientePrisma,
+  ): Promise<void> {
+    await this.repositorio.insertarVarias(lista.flatMap(filasDe), cliente);
   }
 
   /**
@@ -120,6 +108,38 @@ export class AuditoriaService {
     }
     return cambios;
   }
+}
+
+/**
+ * Las filas de `t_auditoria` de una traza: una por campo cambiado, o una sola si no hay detalle.
+ * La identidad y la correlación salen del contexto de la petición si no se indican.
+ */
+function filasDe(datos: DatosAuditoria) {
+  const contexto = obtenerContexto();
+  const usuario = datos.usuario ?? contexto?.usuarioId;
+  const rol = datos.rol ?? contexto?.rol;
+
+  if (usuario === undefined || rol === undefined) {
+    // Sin identidad no hay evidencia útil: una traza anónima no dice quién cambió
+    // qué, que es lo único que esta funcionalidad debe garantizar.
+    throw new Error(
+      'No se puede auditar sin identidad resuelta. Verifique que IdentidadGuard se ejecutó antes.',
+    );
+  }
+
+  const base = {
+    entidad: datos.entidad,
+    entidadId: datos.entidadId,
+    accion: datos.accion,
+    operativoId: datos.operativoId,
+    usuario,
+    rol,
+    correlacion: contexto?.correlacionId,
+  };
+
+  return datos.cambios && datos.cambios.length > 0
+    ? datos.cambios.map((cambio) => ({ ...base, ...cambio }))
+    : [base];
 }
 
 /** Representación textual estable para comparar y almacenar. */

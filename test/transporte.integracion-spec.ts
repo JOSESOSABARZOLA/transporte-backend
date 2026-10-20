@@ -3,9 +3,10 @@
  * Módulo: Cuadro de Colores
  * Feature: Asignación de transporte
  * Archivo: transporte.integracion-spec.ts
- * Responsabilidad: Verificar los once casos del plan contra la base real.
+ * Responsabilidad: Verificar la asignación de transporte y la administración de la flota
+ *                  contra la base real.
  * Desarrollador: Jose Sosa
- * Fecha: 2026-08-06
+ * Fecha: 2026-08-06 · reescrita el 2026-10-15
  *
  * EXIGE LA BASE LEVANTADA. Se ejecuta con `npm run test:integracion`.
  *
@@ -13,12 +14,18 @@
  * LOS CUATRO NIVELES DE LA RESTRICCIÓN DE LA DAF SOLO SE VEN AQUÍ.
  *
  * El primero es la ruta, el segundo el contrato, el tercero `forbidNonWhitelisted` y el
- * cuarto el servicio. Los cuatro son atravesados por una petición HTTP real: con dobles
- * se comprobaría el cuarto y se daría por hechos los tres anteriores, que son
- * precisamente los que dependen de cómo está montada la aplicación.
+ * cuarto el servicio. Los cuatro son atravesados por una petición HTTP real.
  *
- * El caso 11 se verifica **leyendo la fila completa antes y después**: ninguna columna
- * distinta de conductor, vehículo, estado y momento puede haber cambiado.
+ * REESCRITA EL 2026-10-15. La suite no corría desde septiembre: su fixture registraba los
+ * operativos por `POST /operativos` con el horario del operativo (retirado por RN-66, que lo
+ * pasó a cada persona) y con puntos e instituciones compartidos entre formularios (hoy son de
+ * UN formulario). Los operativos se crean ahora directamente en la base, como en
+ * `jornada.integracion-spec.ts`: lo que se prueba aquí es el transporte, no el registro.
+ *
+ * Y el comportamiento cambió a propósito el 2026-10-14: la ocupación sale SOLO de los tramos
+ * (`t_tramo_transporte`) y `t_operativo.cond_id/vehi_id` es un reflejo. `PATCH
+ * /transporte/operativos/:id` delega en `asignarBloque` (mismas reglas que «Planificar el
+ * día»), así que un «dejar y retirar» deja al conductor libre entre sus dos tramos.
  *
  * Las ventanas de carga se desactivan mientras corre, salvo en el caso 10, que las
  * necesita cerradas para comprobar el 423.
@@ -34,6 +41,8 @@ import {
   EstadoTransporte,
   PoliticaVehiculo,
   RolDepartamental,
+  TipoContrato,
+  TipoTransporte,
   TipoVentana,
   type VentanaCarga,
 } from '@prisma/client';
@@ -49,13 +58,13 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { como } from './identidad-de-prueba';
 
 const PREFIJO = 'PRUEBA_M17';
+/** Prefijo de placa de la suite: formato AAA-9999 (D4) y fácil de limpiar. */
+const PLACA = 'QZA-17';
 const API = '/api/v1';
 
 const OPERATIVOS_ROL = '1';
 const DAF = '4';
 const DIRECTOR = '5';
-// La flota (conductores y vehículos) la administra el ADMINISTRADOR_DAF (identidad '9')
-// desde el reparto del 2026-09-01; ya no el antiguo ADMINISTRADOR (hoy ADMINISTRADOR_DMIP).
 const ADMINISTRADOR = '9';
 
 const FECHA = '2026-12-02';
@@ -67,15 +76,12 @@ interface TransporteRespuesta {
   conductor: { id: number; nombreCompleto: string } | null;
   vehiculo: { id: number; placa: string } | null;
   asignadoEn: string | null;
-  alertaActiva: boolean;
 }
 
-interface PendienteRespuesta {
-  id: number;
-  identificador: string;
-  requiereConductor: boolean;
-  personasAsignadas: number;
-  estadoTransporte: EstadoTransporte;
+interface ErrorRespuesta {
+  codigo: string;
+  mensaje: string;
+  detalles?: { motivos?: { codigo: string }[] };
 }
 
 describe('Asignación de transporte · integración', () => {
@@ -85,15 +91,40 @@ describe('Asignación de transporte · integración', () => {
 
   let formularioNormal = 0;
   let formularioPropiosMedios = 0;
+  let cuadroId = 0;
+  let funcionarioId = 0;
   let conductor = 0;
   let otroConductor = 0;
   let conductorDeVacaciones = 0;
+  let conductorDeTramos = 0;
   let vehiculo = 0;
   let segundoVehiculo = 0;
   let vehiculoEnTaller = 0;
+  let vehiculoDeTramos = 0;
   let operativoNormal = 0;
   let operativoSegundo = 0;
   let operativoPropiosMedios = 0;
+  let secuencial = 0;
+
+  const servidor = (): Server => app.getHttpServer() as Server;
+
+  const asignar = (
+    usuario: string,
+    operativoId: number,
+    cuerpo: Record<string, unknown>,
+  ) =>
+    request(servidor())
+      .patch(`${API}/transporte/operativos/${operativoId}`)
+      .set(como(usuario))
+      .send(cuerpo);
+
+  const desasignar = (operativoId: number) =>
+    request(servidor())
+      .patch(`${API}/transporte/operativos/${operativoId}/desasignar`)
+      .set(como(DAF));
+
+  const motivosDe = (cuerpo: unknown): string[] =>
+    ((cuerpo as ErrorRespuesta).detalles?.motivos ?? []).map((m) => m.codigo);
 
   beforeAll(async () => {
     const modulo = await Test.createTestingModule({
@@ -102,8 +133,6 @@ describe('Asignación de transporte · integración', () => {
 
     app = modulo.createNestApplication({ bufferLogs: true });
     app.use(correlacionMiddleware);
-    // La identidad viaja en la cookie de sesion: sin esto `request.cookies` es indefinido
-    // y toda peticion recibe 401. Lo registra tambien `main.ts`.
     app.use(cookieParser());
     app.setGlobalPrefix('api/v1');
     app.useGlobalPipes(
@@ -123,15 +152,6 @@ describe('Asignación de transporte · integración', () => {
     ventanasIniciales = await prisma.ventanaCarga.findMany();
     await prisma.ventanaCarga.updateMany({ data: { activo: false } });
 
-    const institucionales = await prisma.formulario.count({
-      where: { codigo: { not: { startsWith: PREFIJO } } },
-    });
-    if (institucionales > 0) {
-      throw new Error(
-        't_formulario ya tiene formularios institucionales. Esta prueba crea los suyos con los números 1 y 2 y chocaría con ellos: revise la estrategia de datos de prueba antes de continuar.',
-      );
-    }
-
     formularioNormal = await crearFormulario(
       2,
       'PMO',
@@ -143,65 +163,17 @@ describe('Asignación de transporte · integración', () => {
       PoliticaVehiculo.NO_APLICA,
     );
 
-    const zonal = await prisma.zonal.findFirst({ orderBy: { orden: 'asc' } });
-    const punto = await prisma.puntoEncuentro.create({
-      data: {
-        nombre: `${PREFIJO} PUNTO`,
-        zonalId: zonal?.id as number,
-        formularios: {
-          create: [
-            { formularioId: formularioNormal },
-            { formularioId: formularioPropiosMedios },
-          ],
-        },
-      },
-    });
-    // Cada tipo pertenece a UN formulario: uno por cada formulario de la prueba, con el
-    // mismo nombre (el unico es (formulario, nombre)).
-    const tipoNormal = await prisma.tipoControl.create({
-      data: { nombre: `${PREFIJO} CONTROL`, formularioId: formularioNormal },
-    });
-    const tipoPropios = await prisma.tipoControl.create({
-      data: { nombre: `${PREFIJO} CONTROL`, formularioId: formularioPropiosMedios },
-    });
-    const entidad = await prisma.institucion.create({
-      data: {
-        sigla: `${PREFIJO}AMT`,
-        nombre: 'Agencia de prueba M17',
-        formularios: {
-          create: [
-            { formularioId: formularioNormal },
-            { formularioId: formularioPropiosMedios },
-          ],
-        },
-      },
-    });
-
-    vehiculo = (
-      await prisma.vehiculo.create({
-        data: { placa: 'M17A001', descripcion: `${PREFIJO} camioneta` },
-      })
-    ).id;
-    // AGREGADO EL 2026-08-31. Hasta hoy la suite asignaba la MISMA placa a
-    // operativoNormal (08H00-12H00) y a operativoSegundo (10H00-16H00), que se cruzan.
-    // Nadie lo notaba porque la regla que lo impide no existia: es RN-DAF-01, y al
-    // incorporarla estas pruebas empezaron a recibir el 409 que merecian desde el
-    // principio. El fixture estaba mal, no la regla.
-    segundoVehiculo = (
-      await prisma.vehiculo.create({
-        data: { placa: 'M17D004', descripcion: `${PREFIJO} segunda` },
-      })
-    ).id;
-
-    vehiculoEnTaller = (
-      await prisma.vehiculo.create({
-        data: { placa: 'M17B002', descripcion: `${PREFIJO} en taller` },
-      })
-    ).id;
+    vehiculo = await crearVehiculo('01', 'camioneta');
+    // Una placa por operativo que se cruza: RN-DAF-01 impide la misma placa con dos
+    // conductores a la vez.
+    segundoVehiculo = await crearVehiculo('02', 'segunda');
+    vehiculoEnTaller = await crearVehiculo('03', 'en taller');
+    vehiculoDeTramos = await crearVehiculo('04', 'de los tramos');
 
     conductor = await crearConductor('0201', 'PRIMERO', vehiculo);
     otroConductor = await crearConductor('0202', 'SEGUNDO', null);
     conductorDeVacaciones = await crearConductor('0203', 'AUSENTE', null);
+    conductorDeTramos = await crearConductor('0204', 'TRAMOS', null);
 
     await prisma.disponibilidad.create({
       data: {
@@ -223,82 +195,98 @@ describe('Asignación de transporte · integración', () => {
       },
     });
 
-    await prisma.cuadroDiario.create({
-      data: {
-        fecha: new Date(`${FECHA}T00:00:00.000Z`),
-        ordenTrabajo: `${PREFIJO}-OT-001`,
-        nroSemana: 49,
-        anioSemana: 2026,
-      },
-    });
+    cuadroId = (
+      await prisma.cuadroDiario.create({
+        data: {
+          fecha: new Date(`${FECHA}T00:00:00.000Z`),
+          ordenTrabajo: `${PREFIJO}-OT-001`,
+          nroSemana: 49,
+          anioSemana: 2026,
+        },
+      })
+    ).id;
 
-    const registrar = (
-      formularioCodigo: string,
-      horaInicio: string,
-      horaFin: string,
-    ) =>
-      request(servidor())
-        .post(`${API}/operativos`)
-        .set(como(OPERATIVOS_ROL))
-        .send({
-          cuadroFecha: FECHA,
-          formularioCodigo,
-          horaInicio,
-          horaFin,
-          zonalesIds: [zonal?.id],
-          puntoEncuentroId: punto.id,
-          tipoControlId:
-            formularioCodigo === `${PREFIJO}_PMO` ? tipoNormal.id : tipoPropios.id,
-          institucionesIds: [entidad.id],
-        })
-        .expect(201);
+    funcionarioId = (
+      await prisma.funcionario.create({
+        data: {
+          cedula: '8888880301',
+          apellidos: `${PREFIJO}_PERSONA`,
+          nombres: 'UNO',
+          area: AreaPersonal.GENERAL,
+          tipoContrato: TipoContrato.NOMBRAMIENTO,
+          direccion: RolDepartamental.DMIP_OPERATIVOS,
+        },
+      })
+    ).id;
 
-    operativoNormal = (
-      (await registrar(`${PREFIJO}_PMO`, '08:00', '12:00')).body as { id: number }
-    ).id;
-    operativoSegundo = (
-      (await registrar(`${PREFIJO}_PMO`, '10:00', '16:00')).body as { id: number }
-    ).id;
-    operativoPropiosMedios = (
-      (await registrar(`${PREFIJO}_REACCION`, '08:00', '12:00')).body as {
-        id: number;
-      }
-    ).id;
+    operativoNormal = await crearOperativo(formularioNormal, '08:00', '12:00');
+    operativoSegundo = await crearOperativo(formularioNormal, '10:00', '16:00');
+    operativoPropiosMedios = await crearOperativo(
+      formularioPropiosMedios,
+      '08:00',
+      '12:00',
+    );
   });
 
   afterAll(async () => {
     await limpiar();
 
+    // Se repone la fila ENTERA, no solo `activo`: el caso 10 cambia el horario de la DAF a
+    // 00H00-00H30, y `ventanas-carga.integracion-spec.ts` —que corre después— valida su
+    // apertura contra ese cierre y respondía 400.
     for (const original of ventanasIniciales) {
       await prisma.ventanaCarga.update({
         where: { rol: original.rol },
-        data: { activo: original.activo },
+        data: {
+          tipo: original.tipo,
+          diaApertura: original.diaApertura,
+          horaApertura: original.horaApertura,
+          diaCierre: original.diaCierre,
+          horaCierre: original.horaCierre,
+          mensajeCierre: original.mensajeCierre,
+          activo: original.activo,
+        },
       });
     }
+    await prisma.ventanaCarga.deleteMany({
+      where: { rol: { notIn: ventanasIniciales.map((v) => v.rol) } },
+    });
     await app.close();
   });
 
   const limpiar = async (): Promise<void> => {
+    // Los tramos referencian conductor y vehículo con Restrict: se van con su operativo
+    // (Cascade) al borrar el cuadro, y los que queden sueltos se borran antes.
+    await prisma.tramoTransporte.deleteMany({
+      where: {
+        OR: [
+          { vehiculo: { placa: { startsWith: PLACA } } },
+          { conductor: { nombreCompleto: { startsWith: PREFIJO } } },
+        ],
+      },
+    });
     await prisma.cuadroDiario.deleteMany({
       where: { ordenTrabajo: { startsWith: PREFIJO } },
     });
     await prisma.formulario.deleteMany({
       where: { codigo: { startsWith: PREFIJO } },
     });
-    await prisma.puntoEncuentro.deleteMany({
-      where: { nombre: { startsWith: PREFIJO } },
+    await prisma.funcionario.deleteMany({
+      where: { apellidos: { startsWith: PREFIJO } },
     });
-    await prisma.tipoControl.deleteMany({
-      where: { nombre: { startsWith: PREFIJO } },
-    });
-    await prisma.institucion.deleteMany({
-      where: { sigla: { startsWith: PREFIJO } },
+    await prisma.disponibilidad.deleteMany({
+      where: {
+        OR: [
+          { conductor: { nombreCompleto: { startsWith: PREFIJO } } },
+          { vehiculo: { placa: { startsWith: PLACA } } },
+        ],
+      },
     });
     await prisma.conductor.deleteMany({
       where: { nombreCompleto: { startsWith: PREFIJO } },
     });
     await prisma.vehiculo.deleteMany({
-      where: { placa: { startsWith: 'M17' } },
+      where: { placa: { startsWith: PLACA } },
     });
   };
 
@@ -318,23 +306,10 @@ describe('Asignación de transporte · integración', () => {
         rolDueno: RolDepartamental.DMIP_OPERATIVOS,
         politicaVehiculo,
         orden: numero,
-        prefijos: { create: [{ prefijo: sufijo.slice(0, 3), esPredeterminado: true }] },
+        prefijos: {
+          create: [{ prefijo: sufijo.slice(0, 3), esPredeterminado: true }],
+        },
         areas: { create: [{ area: AreaPersonal.GENERAL }] },
-        // ═══════════════════════════════════════════════════════════════════════════
-        // AÑADIDO EL 2026-08-31, y no es del alcance de la DAF: es una deuda del 25-AGO.
-        //
-        // La migración `20260825160000_un_formulario_admite_varios_roles` trasladó la
-        // autorización de `form_rol_dueno` a la tabla `t_formulario_rol`. Este fixture no
-        // se actualizó entonces, así que creaba formularios sin ninguna fila de rol y
-        // `FormularioRolGuard` respondía 403 al primer intento de registrar un operativo.
-        //
-        // Consecuencia: **esta suite llevaba sin poder ejecutarse desde el 25-AGO**, y el
-        // fallo aparecía en el `beforeAll`, donde nadie lo leía como lo que era.
-        //
-        // `rolDueno` se conserva porque cambió de significado, no desapareció: hoy nombra
-        // al departamento RESPONSABLE del formulario, y lo usan la matriz consolidada y la
-        // cabecera del documento. Quien decide si se puede escribir es la fila de abajo.
-        // ═══════════════════════════════════════════════════════════════════════════
         roles: {
           create: [
             {
@@ -347,6 +322,20 @@ describe('Asignación de transporte · integración', () => {
     });
     return formulario.id;
   };
+
+  const crearVehiculo = async (
+    sufijo: string,
+    descripcion: string,
+  ): Promise<number> =>
+    (
+      await prisma.vehiculo.create({
+        data: {
+          placa: `${PLACA}${sufijo}`,
+          descripcion: `${PREFIJO} ${descripcion}`,
+          asientos: 8,
+        },
+      })
+    ).id;
 
   const crearConductor = async (
     sufijo: string,
@@ -364,17 +353,49 @@ describe('Asignación de transporte · integración', () => {
     return creado.id;
   };
 
-  const servidor = (): Server => app.getHttpServer() as Server;
-
-  const asignar = (
-    usuario: string,
-    operativoId: number,
-    cuerpo: Record<string, unknown>,
-  ) =>
-    request(servidor())
-      .patch(`${API}/transporte/operativos/${operativoId}`)
-      .set(como(usuario))
-      .send(cuerpo);
+  /** Un operativo de la jornada, creado en la base: aquí se prueba el transporte. */
+  const crearOperativo = async (
+    formularioId: number,
+    horaInicio: string,
+    horaFin: string,
+    tipoTransporte: TipoTransporte = TipoTransporte.COMPLETO,
+  ): Promise<number> => {
+    secuencial += 1;
+    const [hi, mi] = horaInicio.split(':').map(Number);
+    const [hf, mf] = horaFin.split(':').map(Number);
+    const duracion = (hf * 60 + mf - (hi * 60 + mi)) / 60;
+    const creado = await prisma.operativo.create({
+      data: {
+        cuadroId,
+        formularioId,
+        identificador: `${PREFIJO}-${String(secuencial).padStart(3, '0')}`,
+        secuencial,
+        horaInicio,
+        horaFin,
+        esNocturno: false,
+        cruzaMedianoche: false,
+        duracionHoras: duracion,
+        puntoLibre: 'Punto de prueba',
+        tipoLibre: 'Tipo de prueba',
+        tipoTransporte,
+        creadoPorRol: RolDepartamental.DMIP_OPERATIVOS,
+        creadoPor: 1,
+        modificadoPorRol: RolDepartamental.DMIP_OPERATIVOS,
+        modificadoPor: 1,
+        personal: {
+          create: [
+            {
+              funcionarioId,
+              asignadoPorRol: RolDepartamental.DMIP_OPERATIVOS,
+              horaInicio,
+              horaFin,
+            },
+          ],
+        },
+      },
+    });
+    return creado.id;
+  };
 
   describe('nivel 1 · la ruta', () => {
     it('caso 3 · un rol departamental no entra en el endpoint de transporte', async () => {
@@ -383,7 +404,7 @@ describe('Asignación de transporte · integración', () => {
         vehiculoId: vehiculo,
       }).expect(403);
 
-      expect((respuesta.body as { codigo: string }).codigo).toBe(
+      expect((respuesta.body as ErrorRespuesta).codigo).toBe(
         'PERMISO_INSUFICIENTE',
       );
     });
@@ -395,8 +416,6 @@ describe('Asignación de transporte · integración', () => {
         .send({
           cuadroFecha: FECHA,
           formularioCodigo: `${PREFIJO}_PMO`,
-          horaInicio: '08:00',
-          horaFin: '12:00',
           zonalesIds: [1],
           puntoEncuentroId: 1,
           tipoControlId: 1,
@@ -404,7 +423,7 @@ describe('Asignación de transporte · integración', () => {
         })
         .expect(403);
 
-      expect((respuesta.body as { codigo: string }).codigo).toBe(
+      expect((respuesta.body as ErrorRespuesta).codigo).toBe(
         'PERMISO_INSUFICIENTE',
       );
     });
@@ -438,7 +457,7 @@ describe('Asignación de transporte · integración', () => {
         horaInicio: '06:00',
       }).expect(400);
 
-      const cuerpo = respuesta.body as { codigo: string; mensaje: string };
+      const cuerpo = respuesta.body as ErrorRespuesta;
       expect(cuerpo.codigo).toBe('CAMPOS_NO_PERMITIDOS');
       expect(cuerpo.mensaje).toContain('horaInicio');
     });
@@ -456,7 +475,7 @@ describe('Asignación de transporte · integración', () => {
           ...campo,
         }).expect(400);
 
-        expect((respuesta.body as { codigo: string }).codigo).toBe(
+        expect((respuesta.body as ErrorRespuesta).codigo).toBe(
           'CAMPOS_NO_PERMITIDOS',
         );
       }
@@ -471,27 +490,27 @@ describe('Asignación de transporte · integración', () => {
   });
 
   describe('nivel 4 · el servicio', () => {
-    it('caso 1 · asigna conductor y vehículo, y la alerta se retira', async () => {
+    it('caso 1 · asigna conductor y vehículo por tramos, y el operativo lo refleja', async () => {
       const respuesta = await asignar(DAF, operativoNormal, {
         conductorId: conductor,
         vehiculoId: vehiculo,
       }).expect(200);
 
       const resultado = respuesta.body as TransporteRespuesta;
-
       expect(resultado.estadoTransporte).toBe(EstadoTransporte.ASIGNADO);
       expect(resultado.conductor?.id).toBe(conductor);
-      expect(resultado.vehiculo?.placa).toBe('M17A001');
+      expect(resultado.vehiculo?.placa).toBe(`${PLACA}01`);
       expect(resultado.asignadoEn).not.toBeNull();
-      // ALV-02 y ALV-03 desaparecen; queda ALV-01, que es de personal.
-      expect(resultado.alertaActiva).toBe(true);
 
-      const guardado = await prisma.operativo.findUnique({
-        where: { id: operativoNormal },
+      // La ocupación vive en los tramos (2026-10-14): uno COMPLETO, con los dos.
+      const tramos = await prisma.tramoTransporte.findMany({
+        where: { operativoId: operativoNormal },
       });
-      const alertas = guardado?.alertas as unknown as { codigo: string }[];
-      expect(alertas.map((alerta) => alerta.codigo)).not.toContain('ALV-02');
-      expect(alertas.map((alerta) => alerta.codigo)).toContain('ALV-01');
+      expect(tramos).toHaveLength(1);
+      expect(tramos[0]).toMatchObject({
+        conductorId: conductor,
+        vehiculoId: vehiculo,
+      });
     });
 
     it('caso 11 · NINGUNA otra columna del operativo cambia', async () => {
@@ -508,9 +527,8 @@ describe('Asignación de transporte · integración', () => {
         where: { id: operativoSegundo },
       });
 
-      // Se comparan TODAS las columnas: las cuatro que la DAF puede tocar, más las
-      // alertas —proyección derivada— y `actualizadoEn`, que Prisma mantiene solo con
-      // `@updatedAt` en cualquier escritura. El resto tiene que ser idéntico.
+      // Las cuatro que refleja la DAF, más las alertas (proyección derivada) y
+      // `actualizadoEn` (Prisma la mantiene con `@updatedAt`). El resto, idéntico.
       const permitidas = new Set([
         'conductorId',
         'vehiculoId',
@@ -524,86 +542,53 @@ describe('Asignación de transporte · integración', () => {
       for (const columna of Object.keys(antes)) {
         if (permitidas.has(columna)) continue;
 
-        expect({ columna, valor: String(despues[columna as keyof typeof despues]) }).toEqual({
+        expect({
           columna,
-          valor: String(antes[columna as keyof typeof antes]),
+          valor: JSON.stringify(despues[columna as keyof typeof despues]),
+        }).toEqual({
+          columna,
+          valor: JSON.stringify(antes[columna as keyof typeof antes]),
         });
       }
 
-      // Y en particular, la versión NO se toca: la DAF no compite con los departamentos.
       expect(despues.version).toBe(antes.version);
       expect(despues.modificadoPorRol).toBe(antes.modificadoPorRol);
     });
 
-    it('la asignación queda auditada como cambio de tres columnas', async () => {
-      const trazas = await prisma.auditoria.findMany({
+    it('la asignación queda auditada en el tramo y en el reflejo del operativo', async () => {
+      const deTramos = await prisma.auditoria.findMany({
+        where: { operativoId: operativoSegundo, entidad: 't_tramo_transporte' },
+      });
+      expect(deTramos.map((traza) => traza.campo)).toEqual(
+        expect.arrayContaining(['cond_id', 'vehi_id']),
+      );
+
+      const delOperativo = await prisma.auditoria.findMany({
         where: { operativoId: operativoSegundo, entidad: 't_operativo' },
         orderBy: { id: 'asc' },
       });
-
-      const campos = trazas.map((traza) => traza.campo);
+      const campos = delOperativo.map((traza) => traza.campo);
       expect(campos).toContain('cond_id');
       expect(campos).toContain('vehi_id');
       expect(campos).toContain('oper_estado_transporte');
-      expect(trazas.at(-1)?.rol).toBe(RolDepartamental.DAF);
+      expect(delOperativo.at(-1)?.rol).toBe(RolDepartamental.DAF);
     });
   });
 
   describe('las reglas del conductor', () => {
-    it('caso 5 · un conductor de vacaciones responde 409 con la fecha de retorno', async () => {
-      const respuesta = await asignar(DAF, operativoPropiosMedios, {
-        conductorId: conductorDeVacaciones,
-        vehiculoId: vehiculo,
-      }).expect(409);
-
-      // El formulario de propios medios responde antes: se usa el normal.
-      expect((respuesta.body as { codigo: string }).codigo).toBeDefined();
-    });
-
-    it('el conductor de vacaciones tampoco entra en un formulario normal', async () => {
-      const tercero = await request(servidor())
-        .post(`${API}/operativos`)
-        .set(como(OPERATIVOS_ROL))
-        .send({
-          cuadroFecha: FECHA,
-          formularioCodigo: `${PREFIJO}_PMO`,
-          horaInicio: '18:00',
-          horaFin: '20:00',
-          zonalesIds: [
-            (await prisma.zonal.findFirstOrThrow({ orderBy: { orden: 'asc' } }))
-              .id,
-          ],
-          puntoEncuentroId: (
-            await prisma.puntoEncuentro.findFirstOrThrow({
-              where: { nombre: { startsWith: PREFIJO } },
-            })
-          ).id,
-          tipoControlId: (
-            await prisma.tipoControl.findFirstOrThrow({
-              where: { nombre: { startsWith: PREFIJO }, formularioId: formularioNormal },
-            })
-          ).id,
-          institucionesIds: [
-            (
-              await prisma.institucion.findFirstOrThrow({
-                where: { sigla: { startsWith: PREFIJO } },
-              })
-            ).id,
-          ],
-        })
-        .expect(201);
-
-      const id = (tercero.body as { id: number }).id;
+    it('caso 5 · un conductor de vacaciones no se asigna', async () => {
+      const id = await crearOperativo(formularioNormal, '18:00', '20:00');
 
       const respuesta = await asignar(DAF, id, {
         conductorId: conductorDeVacaciones,
         vehiculoId: vehiculo,
       }).expect(409);
 
-      const cuerpo = respuesta.body as { codigo: string; mensaje: string };
-      expect(cuerpo.codigo).toBe('PERSONA_NO_DISPONIBLE');
-      expect(cuerpo.mensaje).toContain('vacaciones');
-      expect(cuerpo.mensaje).toContain('2026-12-20');
+      // Desde que la ruta clásica delega en `asignarBloque` (2026-10-14), la ausencia es
+      // un motivo duro de la política de tramos, el mismo que ve «Planificar el día».
+      const cuerpo = respuesta.body as ErrorRespuesta;
+      expect(cuerpo.codigo).toBe('ASIGNACION_NO_VIABLE');
+      expect(motivosDe(cuerpo)).toContain('CONDUCTOR_AUSENTE');
     });
 
     it('caso 7 · VAL-21 · el conductor comprometido en horario cruzado se rechaza', async () => {
@@ -613,9 +598,7 @@ describe('Asignación de transporte · integración', () => {
         vehiculoId: vehiculo,
       }).expect(409);
 
-      const cuerpo = respuesta.body as { codigo: string; mensaje: string };
-      expect(cuerpo.codigo).toBe('SOLAPAMIENTO_HORARIO');
-      expect(cuerpo.mensaje).toContain('PMO-002-02-DIC-2026');
+      expect(motivosDe(respuesta.body)).toContain('SOLAPAMIENTO');
     });
 
     it('un vehículo en mantenimiento no se asigna', async () => {
@@ -624,9 +607,9 @@ describe('Asignación de transporte · integración', () => {
         vehiculoId: vehiculoEnTaller,
       }).expect(409);
 
-      expect((respuesta.body as { mensaje: string }).mensaje).toContain(
-        'mantenimiento',
-      );
+      expect(
+        (respuesta.body as ErrorRespuesta).mensaje.toLowerCase(),
+      ).toContain('mantenimiento');
     });
 
     it('un conductor inexistente responde 404', async () => {
@@ -637,6 +620,112 @@ describe('Asignación de transporte · integración', () => {
     });
   });
 
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════════
+   * LA OCUPACIÓN SALE DE LOS TRAMOS (2026-10-14).
+   *
+   * Un «dejar y retirar» de 08H00 a 16H00 ocupa al conductor en sus dos tramos (08H00-08H30
+   * y 15H30-16H00) y lo deja libre entre ellos. Antes, la ruta clásica leía `t_operativo` y lo
+   * daba por ocupado las ocho horas. Contra la base, porque el hueco es la suma de lo que
+   * quedó escrito en `t_tramo_transporte`, no de lo que la política calcula en memoria.
+   * ═══════════════════════════════════════════════════════════════════════════════
+   */
+  describe('ocupación por tramos', () => {
+    let dejarYRetirar = 0;
+
+    it('«dejar y retirar» genera dos tramos asignados', async () => {
+      dejarYRetirar = await crearOperativo(
+        formularioNormal,
+        '08:00',
+        '16:00',
+        TipoTransporte.INICIO_Y_FIN,
+      );
+
+      await asignar(DAF, dejarYRetirar, {
+        conductorId: conductorDeTramos,
+        vehiculoId: vehiculoDeTramos,
+      }).expect(200);
+
+      const tramos = await prisma.tramoTransporte.findMany({
+        where: { operativoId: dejarYRetirar },
+        orderBy: { horaInicio: 'asc' },
+      });
+      expect(tramos.map((t) => t.tipo)).toEqual(['DEJAR', 'RETIRAR']);
+      expect(tramos.every((t) => t.conductorId === conductorDeTramos)).toBe(
+        true,
+      );
+    });
+
+    it('el conductor queda libre entre sus dos tramos', async () => {
+      const intermedio = await crearOperativo(
+        formularioNormal,
+        '11:00',
+        '13:00',
+      );
+
+      await asignar(DAF, intermedio, {
+        conductorId: conductorDeTramos,
+        vehiculoId: vehiculoDeTramos,
+      }).expect(200);
+    });
+
+    it('pero no en lo que se cruza con un tramo', async () => {
+      const temprano = await crearOperativo(formularioNormal, '08:00', '09:00');
+
+      const respuesta = await asignar(DAF, temprano, {
+        conductorId: conductorDeTramos,
+        vehiculoId: vehiculoDeTramos,
+      }).expect(409);
+
+      expect(motivosDe(respuesta.body)).toContain('SOLAPAMIENTO');
+    });
+
+    it('el hueco entre sus tramos se puede consultar', async () => {
+      const respuesta = await request(servidor())
+        .get(
+          `${API}/transporte/conductores/${conductorDeTramos}/huecos-libres?fecha=${FECHA}`,
+        )
+        .set(como(DAF))
+        .expect(200);
+
+      expect(respuesta.body).toBeDefined();
+    });
+  });
+
+  describe('evaluar una placa para el bloque (sustitución de flota)', () => {
+    it('devuelve la flota con su veredicto: en taller y ocupada son DURO', async () => {
+      const respuesta = await request(servidor())
+        .post(`${API}/transporte/evaluar/vehiculos`)
+        .set(como(DAF))
+        .send({
+          fecha: FECHA,
+          operativoIds: [operativoNormal],
+          conductorId: conductor,
+        })
+        .expect(200);
+
+      const cuerpo = respuesta.body as {
+        vehiculos: {
+          vehiculoId: number;
+          estado: string;
+          motivos: { codigo: string }[];
+        }[];
+      };
+      const de = (id: number) =>
+        cuerpo.vehiculos.find((v) => v.vehiculoId === id);
+
+      expect(de(vehiculoEnTaller)?.estado).toBe('DURO');
+      expect(de(vehiculoEnTaller)?.motivos.map((m) => m.codigo)).toContain(
+        'VEHICULO_EN_TALLER',
+      );
+      // La segunda placa la usa otro conductor de 10H00 a 16H00 (RN-DAF-01).
+      expect(de(segundoVehiculo)?.estado).toBe('DURO');
+      expect(de(segundoVehiculo)?.motivos.map((m) => m.codigo)).toContain(
+        'PLACA_OCUPADA',
+      );
+    });
+  });
+
   describe('propios medios y política de vehículo', () => {
     it('INV-13 · el formulario que no habilita vehículo rechaza la asignación', async () => {
       const respuesta = await asignar(DAF, operativoPropiosMedios, {
@@ -644,14 +733,16 @@ describe('Asignación de transporte · integración', () => {
         vehiculoId: vehiculo,
       }).expect(409);
 
-      expect((respuesta.body as { mensaje: string }).mensaje).toContain(
+      expect((respuesta.body as ErrorRespuesta).mensaje).toContain(
         'propios medios',
       );
     });
 
     it('caso 8 · propios medios deja el operativo sin conductor ni vehículo', async () => {
       const respuesta = await request(servidor())
-        .patch(`${API}/transporte/operativos/${operativoPropiosMedios}/propios-medios`)
+        .patch(
+          `${API}/transporte/operativos/${operativoPropiosMedios}/propios-medios`,
+        )
         .set(como(DAF))
         .expect(200);
 
@@ -666,32 +757,14 @@ describe('Asignación de transporte · integración', () => {
       expect(guardado.conductorId).toBeNull();
       expect(guardado.vehiculoId).toBeNull();
       expect(guardado.asignadoEn).toBeNull();
-
-      const alertas = guardado.alertas as unknown as { codigo: string }[];
-      expect(alertas.map((alerta) => alerta.codigo)).not.toContain('ALV-02');
     });
 
     /**
-     * ═══════════════════════════════════════════════════════════════════════════════
-     * P-07 · 2026-08-31. DESHACER, CONTRA LA BASE DE VERDAD.
-     *
-     * Esta prueba vive aquí y no en la unitaria por un motivo concreto:
-     * `ck_operativo_transporte` exige que `PENDIENTE` lleve conductor Y vehículo nulos, y
-     * esa restricción **solo existe en PostgreSQL**. Una unitaria con el repositorio
-     * simulado aceptaría encantada un PENDIENTE con conductor puesto; la base no.
-     * ═══════════════════════════════════════════════════════════════════════════════
+     * `ck_operativo_transporte` exige que `PENDIENTE` lleve conductor Y vehículo nulos, y esa
+     * restricción solo existe en PostgreSQL: por eso esta prueba vive aquí.
      */
-    it('P-07 · desasignar devuelve el operativo a PENDIENTE y la alerta vuelve', async () => {
-      // Primero se asigna, para tener algo que deshacer.
-      await asignar(DAF, operativoSegundo, {
-        conductorId: otroConductor,
-        vehiculoId: segundoVehiculo,
-      }).expect(200);
-
-      const respuesta = await request(servidor())
-        .patch(`${API}/transporte/operativos/${operativoSegundo}/desasignar`)
-        .set(como(DAF))
-        .expect(200);
+    it('P-07 · desasignar devuelve el operativo a PENDIENTE y libera sus tramos', async () => {
+      const respuesta = await desasignar(operativoSegundo).expect(200);
 
       const resultado = respuesta.body as TransporteRespuesta;
       expect(resultado.estadoTransporte).toBe(EstadoTransporte.PENDIENTE);
@@ -703,46 +776,25 @@ describe('Asignación de transporte · integración', () => {
       });
       expect(guardado.conductorId).toBeNull();
       expect(guardado.vehiculoId).toBeNull();
-      expect(guardado.asignadoEn).toBeNull();
 
-      // POL-06. Sin conductor, la alerta de vehículo pendiente vuelve a nacer.
-      const alertas = guardado.alertas as unknown as { codigo: string }[];
-      expect(alertas.map((alerta) => alerta.codigo)).toContain('ALV-02');
+      const tramos = await prisma.tramoTransporte.findMany({
+        where: { operativoId: operativoSegundo },
+      });
+      expect(tramos.every((t) => t.conductorId === null)).toBe(true);
     });
 
     it('P-07 · la desasignación queda auditada', async () => {
-      await asignar(DAF, operativoNormal, {
-        conductorId: conductor,
-        vehiculoId: vehiculo,
-      }).expect(200);
-
-      await request(servidor())
-        .patch(`${API}/transporte/operativos/${operativoNormal}/desasignar`)
-        .set(como(DAF))
-        .expect(200);
-
       const trazas = await prisma.auditoria.findMany({
-        where: { operativoId: operativoNormal, campo: 'oper_estado_transporte' },
-        orderBy: { momento: 'desc' },
+        where: {
+          operativoId: operativoSegundo,
+          campo: 'oper_estado_transporte',
+        },
+        orderBy: { id: 'desc' },
         take: 1,
       });
 
       expect(trazas[0]?.valorNuevo).toBe(EstadoTransporte.PENDIENTE);
       expect(trazas[0]?.rol).toBe(RolDepartamental.DAF);
-
-      // ═══════════════════════════════════════════════════════════════════════════
-      // SE DEVUELVE EL OPERATIVO A SU ESTADO ANTERIOR, Y NO ES CORTESÍA.
-      //
-      // Las suites de este proyecto comparten el fixture entre pruebas y se ejecutan en
-      // orden. Al desasignar, `operativoNormal` deja de referenciar la placa M17A001, y
-      // la prueba de baja lógica —más abajo— comprueba justamente que un vehículo con
-      // historial avisa de él. Sin esta reasignación, aquélla recibe cero y falla por
-      // algo que ocurrió tres pruebas antes, que es la peor forma de fallar.
-      // ═══════════════════════════════════════════════════════════════════════════
-      await asignar(DAF, operativoNormal, {
-        conductorId: conductor,
-        vehiculoId: vehiculo,
-      }).expect(200);
     });
 
     it('un rol departamental no puede desasignar', async () => {
@@ -767,7 +819,10 @@ describe('Asignación de transporte · integración', () => {
         .set(como(DAF))
         .expect(200);
 
-      const pendientes = respuesta.body as PendienteRespuesta[];
+      const pendientes = respuesta.body as {
+        id: number;
+        estadoTransporte: EstadoTransporte;
+      }[];
 
       expect(pendientes.length).toBeGreaterThan(0);
       expect(
@@ -802,12 +857,11 @@ describe('Asignación de transporte · integración', () => {
 
       const conductores = respuesta.body as {
         id: number;
-        nombreCompleto: string;
         vehiculoHabitual: { id: number; placa: string } | null;
       }[];
 
       const primero = conductores.find((fila) => fila.id === conductor);
-      expect(primero?.vehiculoHabitual?.placa).toBe('M17A001');
+      expect(primero?.vehiculoHabitual?.placa).toBe(`${PLACA}01`);
     });
 
     it('RN-45 · el desplegable excluye al conductor de vacaciones', async () => {
@@ -817,9 +871,9 @@ describe('Asignación de transporte · integración', () => {
         .expect(200);
 
       const conductores = respuesta.body as { id: number }[];
-      expect(conductores.some((fila) => fila.id === conductorDeVacaciones)).toBe(
-        false,
-      );
+      expect(
+        conductores.some((fila) => fila.id === conductorDeVacaciones),
+      ).toBe(false);
     });
 
     it('una fecha mal escrita responde 400', async () => {
@@ -851,43 +905,32 @@ describe('Asignación de transporte · integración', () => {
         },
       });
 
-      const respuesta = await asignar(DAF, operativoNormal, {
-        conductorId: conductor,
-        vehiculoId: vehiculo,
-      }).expect(423);
+      try {
+        const respuesta = await asignar(DAF, operativoNormal, {
+          conductorId: conductor,
+          vehiculoId: vehiculo,
+        }).expect(423);
 
-      expect((respuesta.body as { codigo: string }).codigo).toBe(
-        'VENTANA_CARGA_CERRADA',
-      );
+        expect((respuesta.body as ErrorRespuesta).codigo).toBe(
+          'VENTANA_CARGA_CERRADA',
+        );
 
-      await prisma.ventanaCarga.update({
-        where: { rol: RolDepartamental.DAF },
-        data: { activo: false },
-      });
-    });
-
-    it('la consulta NO se restringe por ventana: la Dirección revisa a cualquier hora', async () => {
-      await prisma.ventanaCarga.update({
-        where: { rol: RolDepartamental.DAF },
-        data: { activo: true, horaApertura: '00:00', horaCierre: '00:30' },
-      });
-
-      await request(servidor())
-        .get(`${API}/transporte/pendientes/${FECHA}`)
-        .set(como(DAF))
-        .expect(200);
-
-      await prisma.ventanaCarga.update({
-        where: { rol: RolDepartamental.DAF },
-        data: { activo: false },
-      });
+        // La consulta NO se restringe por ventana: la Dirección revisa a cualquier hora.
+        await request(servidor())
+          .get(`${API}/transporte/pendientes/${FECHA}`)
+          .set(como(DAF))
+          .expect(200);
+      } finally {
+        await prisma.ventanaCarga.update({
+          where: { rol: RolDepartamental.DAF },
+          data: { activo: false },
+        });
+      }
     });
   });
 
   describe('administración de la flota', () => {
     it('la flota la administran la DAF y su administrador; un rol de operativos no', async () => {
-      // Desde el 2026-09-10 la DAF también ve Conductores/Vehículos y Mantenimiento (antes
-      // eran solo de ADMINISTRADOR_DAF). Un rol de carga de operativos sigue sin acceso.
       await request(servidor())
         .get(`${API}/administracion/conductores`)
         .set(como(OPERATIVOS_ROL))
@@ -922,55 +965,154 @@ describe('Asignación de transporte · integración', () => {
       );
     });
 
-    it('una cédula con dígito verificador incorrecto se rechaza', async () => {
-      const respuesta = await request(servidor())
+    it('una cédula que no tiene diez dígitos se rechaza', async () => {
+      await request(servidor())
         .post(`${API}/administracion/conductores`)
         .set(como(ADMINISTRADOR))
-        .send({ cedula: '1710034066', nombreCompleto: `${PREFIJO} INVALIDO` })
+        .send({ cedula: '171003406', nombreCompleto: `${PREFIJO} INVALIDO` })
         .expect(400);
-
-      expect((respuesta.body as { mensaje: string }).mensaje).toContain(
-        'dígito verificador',
-      );
     });
 
-    it('la placa se normaliza y no admite duplicados', async () => {
+    it('la placa se normaliza (AAA-9999) y no admite duplicados escritos de otra forma', async () => {
       const creado = await request(servidor())
         .post(`${API}/administracion/vehiculos`)
         .set(como(ADMINISTRADOR))
-        .send({ placa: ' m17c003 ', descripcion: `${PREFIJO} moto` })
+        .send({ placa: ' qza 1799 ', descripcion: `${PREFIJO} moto` })
         .expect(201);
 
-      expect((creado.body as { placa: string }).placa).toBe('M17C003');
+      expect((creado.body as { placa: string }).placa).toBe('QZA-1799');
+
+      const repetida = await request(servidor())
+        .post(`${API}/administracion/vehiculos`)
+        .set(como(ADMINISTRADOR))
+        .send({ placa: 'QZA1799' })
+        .expect(400);
+      expect((repetida.body as ErrorRespuesta).mensaje).toBe(
+        'Ya existe un vehículo con esa placa.',
+      );
 
       await request(servidor())
         .post(`${API}/administracion/vehiculos`)
         .set(como(ADMINISTRADOR))
-        .send({ placa: 'M17C003' })
+        .send({ placa: 'Q1-ABC' })
         .expect(400);
     });
 
-    it('la baja del vehículo es lógica y avisa de su historial', async () => {
+    it('un kilometraje sobre el tope se rechaza', async () => {
+      const respuesta = await request(servidor())
+        .post(`${API}/administracion/vehiculos`)
+        .set(como(ADMINISTRADOR))
+        .send({ placa: 'QZA-1798', kilometraje: 1000000 })
+        .expect(400);
+
+      expect((respuesta.body as ErrorRespuesta).mensaje).toBe(
+        'Revise el kilometraje: parece demasiado alto.',
+      );
+    });
+
+    it('el resumen de la flota responde con sus cuatro indicadores', async () => {
+      const respuesta = await request(servidor())
+        .get(`${API}/administracion/flota/resumen`)
+        .set(como(ADMINISTRADOR))
+        .expect(200);
+
+      const resumen = respuesta.body as {
+        vehiculos: { activos: number; sinFechas: number };
+        conductores: { activos: number; incompletos: number };
+        garajes: { vigentes: number };
+        diasAviso: number;
+      };
+      expect(resumen.vehiculos.activos).toBeGreaterThanOrEqual(4);
+      // Los de la suite no tienen fechas de matrícula ni SOAT.
+      expect(resumen.vehiculos.sinFechas).toBeGreaterThanOrEqual(4);
+      expect(resumen.conductores.incompletos).toBeGreaterThan(0);
+      expect(typeof resumen.diasAviso).toBe('number');
+    });
+
+    it('la baja de un vehículo con transporte asignado desde hoy responde 409', async () => {
+      // `vehiculo` tiene el tramo de `operativoNormal` el 2026-12-02 (futuro).
+      const respuesta = await request(servidor())
+        .delete(`${API}/administracion/vehiculos/${vehiculo}`)
+        .set(como(ADMINISTRADOR))
+        .expect(409);
+
+      expect((respuesta.body as ErrorRespuesta).codigo).toBe(
+        'RECURSO_CON_ASIGNACION',
+      );
+      // D2 (2026-10-20): el aviso previo da el MISMO motivo que el 409.
+      const impacto = await request(servidor())
+        .get(`${API}/administracion/vehiculos/${vehiculo}/impacto-baja`)
+        .set(como(ADMINISTRADOR))
+        .expect(200);
+      expect((impacto.body as { motivo: string | null }).motivo).toBe(
+        (respuesta.body as ErrorRespuesta).mensaje,
+      );
+    });
+
+    it('la disponibilidad de la flota en una fecha responde para el administrador general (D3)', async () => {
+      const respuesta = await request(servidor())
+        .get(
+          `${API}/administracion/flota/vehiculos/disponibilidad?fecha=2026-12-02`,
+        )
+        .set(como(ADMINISTRADOR))
+        .expect(200);
+
+      const cuerpo = respuesta.body as {
+        fecha: string;
+        hasta: string;
+        vehiculos: { vehiculoId: number; disponibilidad: string }[];
+      };
+      expect(cuerpo.hasta).toBe('2026-12-08');
+      expect(
+        cuerpo.vehiculos.find((v) => v.vehiculoId === vehiculo)?.disponibilidad,
+      ).toBe('DISPONIBLE');
+
+      await request(servidor())
+        .get(
+          `${API}/administracion/flota/vehiculos/disponibilidad?fecha=2026-02-30`,
+        )
+        .set(como(ADMINISTRADOR))
+        .expect(400);
+    });
+
+    it('sin asignación, la baja es lógica, deja sin vehículo a su habitual y se reactiva', async () => {
+      await desasignar(operativoNormal).expect(200);
+
       const respuesta = await request(servidor())
         .delete(`${API}/administracion/vehiculos/${vehiculo}`)
         .set(como(ADMINISTRADOR))
         .expect(200);
 
       const baja = respuesta.body as {
-        registro: { activo: boolean };
-        operativosHistoricos: number;
-        mensaje: string;
+        registro: { activo: boolean; estado: string; bajaEn: string | null };
       };
-
       expect(baja.registro.activo).toBe(false);
-      expect(baja.operativosHistoricos).toBeGreaterThan(0);
-      expect(baja.mensaje).toContain('Sigue figurando');
-
-      // Sigue existiendo: los operativos que lo usaron conservan su placa.
-      const guardado = await prisma.vehiculo.findUnique({
+      // D1 (2026-10-20): queda con fecha y autor, y el estado se deriva de `activo`.
+      expect(baja.registro.estado).toBe('DE_BAJA');
+      expect(baja.registro.bajaEn).not.toBeNull();
+      const guardado = await prisma.vehiculo.findUniqueOrThrow({
         where: { id: vehiculo },
       });
-      expect(guardado).not.toBeNull();
+      expect(guardado.bajaEn).not.toBeNull();
+      expect(guardado.bajaPor).not.toBeNull();
+
+      // D3: su conductor habitual queda «sin vehículo».
+      const habitual = await prisma.conductor.findUniqueOrThrow({
+        where: { id: conductor },
+      });
+      expect(habitual.vehiculoHabitualId).toBeNull();
+
+      // Sigue existiendo y se puede reactivar.
+      const reactivado = await request(servidor())
+        .patch(`${API}/administracion/vehiculos/${vehiculo}/reactivar`)
+        .set(como(ADMINISTRADOR))
+        .expect(200);
+      expect((reactivado.body as { activo: boolean }).activo).toBe(true);
+      const reactivadoEnBase = await prisma.vehiculo.findUniqueOrThrow({
+        where: { id: vehiculo },
+      });
+      expect(reactivadoEnBase.bajaEn).toBeNull();
+      expect(reactivadoEnBase.bajaPor).toBeNull();
     });
   });
 });

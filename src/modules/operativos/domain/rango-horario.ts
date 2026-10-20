@@ -235,6 +235,25 @@ export class RangoHorario {
   }
 }
 
+/**
+ * Horas entre dos `HH:MM` de cualquier minuto, contemplando el cruce de medianoche (2026-10-14).
+ *
+ * Es para los TRAMOS de transporte, que no cumplen la granularidad de media hora del operativo
+ * (un «dejar» dura un parámetro en minutos), y por eso no pasa por `RangoHorario.de`. Usa la
+ * MISMA descomposición que el resto del archivo: no es una segunda aritmética. Inicio igual a fin
+ * es duración cero (un tramo nunca dura el día entero).
+ */
+export function duracionEnHoras(horaInicio: string, horaFin: string): number {
+  const inicio = aMinutos(horaInicio);
+  const fin = aMinutos(horaFin);
+  if (inicio === fin) return 0;
+  const total = descomponer(inicio, fin).reduce(
+    (suma, intervalo) => suma + (intervalo.hasta - intervalo.desde),
+    0,
+  );
+  return total / MINUTOS_POR_HORA;
+}
+
 // ─────────────────────────── Aritmética interna ───────────────────────────
 
 /**

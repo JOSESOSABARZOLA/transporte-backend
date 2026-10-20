@@ -58,7 +58,11 @@ interface CapacidadRespuesta {
     observacion: string | null;
   } | null;
   demanda: { vehiculos: number; conductores: number };
-  vehiculos: { declarados: number; requeridos: number; excedente: number } | null;
+  vehiculos: {
+    declarados: number;
+    requeridos: number;
+    excedente: number;
+  } | null;
   hayAdvertencia: boolean;
   advertencia: string | null;
 }
@@ -134,30 +138,6 @@ describe('Capacidad de flota · integración', () => {
       },
     });
 
-    const zonal = await prisma.zonal.findFirstOrThrow({
-      orderBy: { orden: 'asc' },
-    });
-    const punto = await prisma.puntoEncuentro.create({
-      data: {
-        nombre: `${PREFIJO} PUNTO`,
-        zonalId: zonal.id,
-        formularios: { create: [{ formularioId: formulario.id }] },
-      },
-    });
-    const tipo = await prisma.tipoControl.create({
-      data: {
-        nombre: `${PREFIJO} CONTROL`,
-        formularioId: formulario.id,
-      },
-    });
-    const entidad = await prisma.institucion.create({
-      data: {
-        sigla: `${PREFIJO}AMT`,
-        nombre: 'Agencia de prueba M18',
-        formularios: { create: [{ formularioId: formulario.id }] },
-      },
-    });
-
     vehiculo = (
       await prisma.vehiculo.create({
         data: { placa: 'M18A001', descripcion: `${PREFIJO} camioneta` },
@@ -174,7 +154,7 @@ describe('Capacidad de flota · integración', () => {
       })
     ).id;
 
-    await prisma.cuadroDiario.create({
+    const cuadro = await prisma.cuadroDiario.create({
       data: {
         fecha: new Date(`${FECHA}T00:00:00.000Z`),
         ordenTrabajo: `${PREFIJO}-OT-001`,
@@ -183,32 +163,37 @@ describe('Capacidad de flota · integración', () => {
       },
     });
 
-    // Tres operativos que requieren vehículo: la demanda del día será 3.
+    // Tres operativos que requieren vehículo: la demanda del día será 3. Se crean en la
+    // base (2026-10-15): `POST /operativos` ya no lleva el horario del operativo (RN-66) y
+    // los puntos son de un formulario; aquí se prueba la capacidad, no el registro.
     const horarios = [
       ['08:00', '12:00'],
       ['13:00', '17:00'],
       ['18:00', '20:00'],
     ];
 
-    for (const [horaInicio, horaFin] of horarios) {
-      const creado = await request(servidor())
-        .post(`${API}/operativos`)
-        .set(como(OPERATIVOS_ROL))
-        .send({
-          cuadroFecha: FECHA,
-          formularioCodigo: `${PREFIJO}_PMO`,
+    for (const [indice, [horaInicio, horaFin]] of horarios.entries()) {
+      const creado = await prisma.operativo.create({
+        data: {
+          cuadroId: cuadro.id,
+          formularioId: formulario.id,
+          identificador: `CAP-00${indice + 1}`,
+          secuencial: indice + 1,
           horaInicio,
           horaFin,
-          zonalesIds: [zonal.id],
-          puntoEncuentroId: punto.id,
-          tipoControlId: tipo.id,
-          institucionesIds: [entidad.id],
-        })
-        .expect(201);
+          esNocturno: false,
+          cruzaMedianoche: false,
+          duracionHoras: 4,
+          puntoLibre: 'Punto de prueba',
+          tipoLibre: 'Tipo de prueba',
+          creadoPorRol: RolDepartamental.DMIP_OPERATIVOS,
+          creadoPor: 1,
+          modificadoPorRol: RolDepartamental.DMIP_OPERATIVOS,
+          modificadoPor: 1,
+        },
+      });
 
-      if (primerOperativo === 0) {
-        primerOperativo = (creado.body as { id: number }).id;
-      }
+      if (primerOperativo === 0) primerOperativo = creado.id;
     }
   });
 
@@ -244,7 +229,9 @@ describe('Capacidad de flota · integración', () => {
     await prisma.conductor.deleteMany({
       where: { nombreCompleto: { startsWith: PREFIJO } },
     });
-    await prisma.vehiculo.deleteMany({ where: { placa: { startsWith: 'M18' } } });
+    await prisma.vehiculo.deleteMany({
+      where: { placa: { startsWith: 'M18' } },
+    });
   };
 
   const servidor = (): Server => app.getHttpServer() as Server;
@@ -326,6 +313,7 @@ describe('Capacidad de flota · integración', () => {
       await declarar(DAF, {
         vehiculosHabiles: 20,
         conductoresHabiles: 20,
+        observacion: 'Corrección de prueba.',
       }).expect(200);
 
       const filas = await prisma.capacidadFlota.findMany({
@@ -334,8 +322,8 @@ describe('Capacidad de flota · integración', () => {
 
       expect(filas).toHaveLength(1);
       expect(filas[0].vehiculosHabiles).toBe(20);
-      // La observación anterior se reemplaza: la declaración es del día, no acumulativa.
-      expect(filas[0].observacion).toBeNull();
+      // La observación anterior se reemplaza por la nueva: la declaración es del día, no acumulativa.
+      expect(filas[0].observacion).toBe('Corrección de prueba.');
     });
 
     it('el cambio queda auditado campo a campo', async () => {
@@ -377,6 +365,7 @@ describe('Capacidad de flota · integración', () => {
       const respuesta = await declarar(DAF, {
         vehiculosHabiles: 1,
         conductoresHabiles: 1,
+        observacion: 'Corrección de prueba.',
       }).expect(200);
 
       const capacidad = respuesta.body as CapacidadRespuesta;
@@ -452,6 +441,7 @@ describe('Capacidad de flota · integración', () => {
       await declarar(ADMINISTRADOR, {
         vehiculosHabiles: 9,
         conductoresHabiles: 9,
+        observacion: 'Corrección de prueba.',
       }).expect(200);
       await consultar(ADMINISTRADOR).expect(403);
     });

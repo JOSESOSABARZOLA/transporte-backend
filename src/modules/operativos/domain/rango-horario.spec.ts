@@ -13,7 +13,11 @@
  */
 
 import { ValidacionError } from '../../../common/errors/errores-dominio';
-import { RangoHorario, type FranjaNocturna } from './rango-horario';
+import {
+  duracionEnHoras,
+  RangoHorario,
+  type FranjaNocturna,
+} from './rango-horario';
 
 /** La franja llega de los parámetros de política, no de una constante del dominio. */
 const FRANJA: FranjaNocturna = { inicio: '20:00', fin: '05:00' };
@@ -387,3 +391,17 @@ describe('RangoHorario · envolvente de varias personas (RN-66, 2026-09-08)', ()
 // La división del horario en tramos se retiró el 2026-09-14: el formulario 8 ya no segmenta,
 // cada operativo de la persona lleva la misma hora general. `RangoHorario.dividir` se eliminó
 // con estas pruebas; la composición de los N operativos se verifica en `operativos.service.spec`.
+
+describe('duracionEnHoras · tramos de cualquier minuto (2026-10-14)', () => {
+  it('mide un tramo corto sin la granularidad de media hora', () => {
+    expect(duracionEnHoras('07:30', '07:50')).toBeCloseTo(20 / 60);
+  });
+
+  it('contempla el cruce de medianoche', () => {
+    expect(duracionEnHoras('23:40', '00:10')).toBeCloseTo(0.5);
+  });
+
+  it('inicio igual a fin es duración cero, no el día entero', () => {
+    expect(duracionEnHoras('08:00', '08:00')).toBe(0);
+  });
+});

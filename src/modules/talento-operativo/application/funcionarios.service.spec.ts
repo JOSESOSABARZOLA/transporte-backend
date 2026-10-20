@@ -20,9 +20,11 @@ import {
 } from '@prisma/client';
 
 import type { AuditoriaService } from '../../../common/auditoria/auditoria.service';
+import { CODIGOS_ERROR } from '../../../common/errors/codigos-error';
 import {
   AutorizacionError,
   RecursoNoEncontradoError,
+  ReglaNegocioError,
   ValidacionError,
 } from '../../../common/errors/errores-dominio';
 import type { FuncionariosRepository } from '../infrastructure/funcionarios.repository';
@@ -39,7 +41,7 @@ const funcionario = (parcial: Partial<Funcionario> = {}): Funcionario =>
     cedula: CEDULA,
     apellidos: 'BENAVIDES',
     nombres: 'FERNANDO',
-    telefono: '98 514 4231',
+    telefono: '098 514 4231',
     cargo: 'Inspector',
     area: AreaPersonal.GENERAL,
     tipoContrato: TipoContrato.NOMBRAMIENTO,
@@ -148,7 +150,7 @@ const NUEVO = {
   cedula: CEDULA,
   apellidos: 'benavides',
   nombres: 'fernando',
-  telefono: '98 514 4231',
+  telefono: '098 514 4231',
   cargo: 'Inspector',
   area: AreaPersonal.GENERAL,
   tipoContrato: TipoContrato.NOMBRAMIENTO,
@@ -180,9 +182,16 @@ describe('FuncionariosService · alta', () => {
       .crear(NUEVO, 6, COMO_DMIP)
       .catch((error: unknown) => error);
 
-    expect(fallo).toBeInstanceOf(ValidacionError);
-    expect((fallo as ValidacionError).message).toContain('BENAVIDES FERNANDO');
-    expect((fallo as ValidacionError).message).toContain('reactive su ficha');
+    // 409 desde el rediseño de P-07 (2026-10-08), con su código: el frontend lo lleva al campo.
+    expect(fallo).toBeInstanceOf(ReglaNegocioError);
+    expect((fallo as ReglaNegocioError).statusCode).toBe(409);
+    expect((fallo as ReglaNegocioError).code).toBe(
+      CODIGOS_ERROR.CEDULA_CON_FICHA,
+    );
+    expect((fallo as ReglaNegocioError).message).toContain(
+      'BENAVIDES FERNANDO',
+    );
+    expect((fallo as ReglaNegocioError).message).toContain('reactive su ficha');
     expect(crear).not.toHaveBeenCalled();
   });
 
@@ -311,7 +320,7 @@ describe('FuncionariosService · modificación', () => {
   it('LA TRAZA NO GUARDA EL TELÉFONO NI LA CÉDULA, solo que cambiaron', async () => {
     const { servicio, registrar } = armar({ existentes: [funcionario()] });
 
-    await servicio.actualizar(1, { telefono: '99 111 2233' }, 6, COMO_DMIP);
+    await servicio.actualizar(1, { telefono: '099 111 2233' }, 6, COMO_DMIP);
 
     const [datos] = registrar.mock.calls[0] as [{ cambios: unknown[] }];
     expect(datos.cambios).toEqual([
@@ -330,6 +339,28 @@ describe('FuncionariosService · modificación', () => {
 
     await expect(
       servicio.actualizar(1, { cedula: OTRA_CEDULA }, 6, COMO_DMIP),
+    ).rejects.toBeInstanceOf(ReglaNegocioError);
+  });
+
+  /**
+   * EL TELÉFONO SOLO SE COMPRUEBA SI CAMBIA (2026-10-08). El formato pasó a ser estricto y
+   * hay fichas con números del formato anterior: corregir el cargo no debe exigir tocarlo.
+   */
+  it('editar otro campo no exige rehacer un teléfono del formato anterior', async () => {
+    const { servicio } = armar({
+      existentes: [funcionario({ telefono: '02-2445566' })],
+    });
+
+    await expect(
+      servicio.actualizar(1, { cargo: 'Inspector General' }, 6, COMO_DMIP),
+    ).resolves.toBeDefined();
+  });
+
+  it('pero un teléfono nuevo sí se exige como celular 09 de diez dígitos', async () => {
+    const { servicio } = armar({ existentes: [funcionario()] });
+
+    await expect(
+      servicio.actualizar(1, { telefono: '02-2445566' }, 6, COMO_DMIP),
     ).rejects.toBeInstanceOf(ValidacionError);
   });
 

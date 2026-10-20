@@ -73,6 +73,8 @@ export class CalculadorAlertasService {
       esNocturno: operativo.esNocturno,
       puntoLibre: operativo.puntoLibre,
       tipoLibre: operativo.tipoLibre,
+      tipoTransporte: operativo.tipoTransporte,
+      transporteLiberado: Boolean(operativo.transporteLiberadoEn),
     });
   }
 }

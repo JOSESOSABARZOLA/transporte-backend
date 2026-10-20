@@ -3,7 +3,7 @@
  * Módulo: Cuadro de Colores
  * Feature: Formularios y catálogos
  * Archivo: administracion-catalogos.controller.ts
- * Responsabilidad: Exponer la administración de puntos, tipos de control e instituciones.
+ * Responsabilidad: Exponer la administración de zonales, puntos, tipos de control e instituciones.
  * Desarrollador: Jose Sosa
  * Fecha: 2026-08-05
  *
@@ -13,9 +13,17 @@
  * SIN `VentanaCargaGuard`, por el mismo motivo que en M-06: la ventana gobierna la
  * jornada del cuadro, no la administración del sistema.
  *
- * `DELETE` DESACTIVA, NO BORRA (RF-058 e INV-22). La ruta se conserva porque es la
- * que el administrador espera; la respuesta explica qué ocurrió realmente y cuántos
- * operativos anteriores usan el valor.
+ * TODO CUELGA DEL FORMULARIO (2026-10-13): `/administracion/catalogos/:codigo/…`. Cada formulario
+ * tiene su configuración propia e independiente; el valor se crea en el formulario de la ruta, y
+ * editar, desactivar o eliminar un valor de OTRO formulario responde 404. Se retiraron las rutas
+ * sin formulario, `GET zonales` global y las copias (`POST …/:id/copias`).
+ *
+ * LAS ZONALES SE IDENTIFICAN POR SU ZONA DE LA CIUDAD (`:zonaId`), única dentro del formulario:
+ * es el `zonalId` que llevan sus puntos y sus operativos.
+ *
+ * `DELETE` DESACTIVA, NO BORRA (RF-058 e INV-22). La respuesta explica qué ocurrió realmente y
+ * cuántos operativos anteriores usan el valor. El borrado de verdad es `DELETE …/permanente`,
+ * solo para lo que nunca se usó (409 si no).
  */
 
 import {
@@ -37,7 +45,10 @@ import { UsuarioActual } from '../../../common/auth/decorators/usuario-actual.de
 import { IdentidadGuard } from '../../../common/auth/guards/identidad.guard';
 import { PermisosGuard } from '../../../common/auth/guards/permisos.guard';
 import type { UsuarioAutenticado } from '../../../common/auth/interfaces/usuario-autenticado.interface';
-import { CatalogosService } from '../application/catalogos.service';
+import {
+  CatalogosService,
+  type ResultadoBaja,
+} from '../application/catalogos.service';
 import {
   ActualizarInstitucionDto,
   ActualizarPuntoDto,
@@ -49,15 +60,17 @@ import {
   CrearZonalDto,
 } from './dto/administrar-catalogos.dto';
 import {
-  aCatalogosResponse,
+  aCatalogosAdminResponse,
   aInstitucionResponse,
   aPuntoResponse,
   aTipoControlResponse,
+  aZonalAdminResponse,
   aZonalResponse,
-  type CatalogosFormularioResponseDto,
+  type CatalogosAdminResponseDto,
   type InstitucionResponseDto,
   type PuntoResponseDto,
   type TipoControlResponseDto,
+  type ZonalAdminResponseDto,
   type ZonalResponseDto,
 } from './dto/catalogos-response.dto';
 
@@ -75,6 +88,15 @@ interface EliminacionResponseDto {
   mensaje: string;
 }
 
+const aBaja = (
+  baja: ResultadoBaja<{ id: number; activo: boolean }>,
+): BajaResponseDto => ({
+  id: baja.registro.id,
+  activo: baja.registro.activo,
+  usosHistoricos: baja.usosHistoricos,
+  mensaje: baja.mensaje,
+});
+
 @Controller('administracion/catalogos')
 @UseGuards(IdentidadGuard, PermisosGuard)
 @RequierePermiso('catalogos:administrar')
@@ -84,217 +106,239 @@ export class AdministracionCatalogosController {
   /**
    * PV-36. Los catálogos del formulario INCLUYENDO LOS DESACTIVADOS, para poder
    * reactivarlos. El registro de operativos lee por `GET /formularios/:codigo/catalogos`,
-   * que solo devuelve lo vigente; este camino es exclusivo de la administración y por eso
-   * cuelga de este controlador, tras el mismo `@Roles`.
+   * que solo devuelve lo vigente.
    */
   @Get(':codigo')
   async catalogosParaAdministrar(
     @Param('codigo') codigo: string,
-  ): Promise<CatalogosFormularioResponseDto> {
-    return aCatalogosResponse(
+  ): Promise<CatalogosAdminResponseDto> {
+    return aCatalogosAdminResponse(
       await this.catalogos.obtenerCatalogosAdmin(codigo),
     );
   }
 
   // ─────────────────────────── Zonales ───────────────────────────
-  //
-  // La zonal dejó de ser un catálogo cerrado el 2026-09-04. El código no viaja en el
-  // cuerpo: se autogenera del nombre en el servicio. Al actualizar solo cambian el nombre
-  // y el estado; el código queda fijo tras crearse.
 
-  @Post('zonales')
-  async crearZonal(
-    @Body() dto: CrearZonalDto,
-    @UsuarioActual() usuario: UsuarioAutenticado,
-  ): Promise<ZonalResponseDto> {
-    return aZonalResponse(
-      await this.catalogos.crearZonal(dto, usuario.usuarioId),
+  /** Las zonales DEL FORMULARIO, con las desactivadas, sus puntos y sus usos en él. */
+  @Get(':codigo/zonales')
+  async zonalesParaAdministrar(
+    @Param('codigo') codigo: string,
+  ): Promise<ZonalAdminResponseDto[]> {
+    return (await this.catalogos.listarZonalesAdmin(codigo)).map(
+      aZonalAdminResponse,
     );
   }
 
-  @Put('zonales/:id')
+  /** Las zonas de la ciudad que el formulario aún no tiene: lo que ofrece el alta de una zonal. */
+  @Get(':codigo/zonas-disponibles')
+  async zonasDisponibles(
+    @Param('codigo') codigo: string,
+  ): Promise<ZonalResponseDto[]> {
+    return (await this.catalogos.zonasDisponibles(codigo)).map(aZonalResponse);
+  }
+
+  @Post(':codigo/zonales')
+  async crearZonal(
+    @Param('codigo') codigo: string,
+    @Body() dto: CrearZonalDto,
+    @UsuarioActual() usuario: UsuarioAutenticado,
+  ): Promise<ZonalAdminResponseDto> {
+    return aZonalAdminResponse(
+      await this.catalogos.crearZonal(codigo, dto, usuario.usuarioId),
+    );
+  }
+
+  @Put(':codigo/zonales/:zonaId')
   async actualizarZonal(
-    @Param('id', ParseIntPipe) id: number,
+    @Param('codigo') codigo: string,
+    @Param('zonaId', ParseIntPipe) zonaId: number,
     @Body() dto: ActualizarZonalDto,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<ZonalResponseDto> {
     return aZonalResponse(
-      await this.catalogos.actualizarZonal(id, dto, usuario.usuarioId),
+      await this.catalogos.actualizarZonal(
+        codigo,
+        zonaId,
+        dto,
+        usuario.usuarioId,
+      ),
     );
   }
 
-  @Delete('zonales/:id')
+  @Delete(':codigo/zonales/:zonaId')
   @HttpCode(HttpStatus.OK)
   async desactivarZonal(
-    @Param('id', ParseIntPipe) id: number,
+    @Param('codigo') codigo: string,
+    @Param('zonaId', ParseIntPipe) zonaId: number,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<BajaResponseDto> {
-    const baja = await this.catalogos.desactivarZonal(id, usuario.usuarioId);
-    return {
-      id: baja.registro.id,
-      activo: baja.registro.activo,
-      usosHistoricos: baja.usosHistoricos,
-      mensaje: baja.mensaje,
-    };
+    return aBaja(
+      await this.catalogos.desactivarZonal(codigo, zonaId, usuario.usuarioId),
+    );
   }
 
-  /** Baja FÍSICA. Solo si la zonal nunca se usó y no tiene puntos; si no, 409. */
-  @Delete('zonales/:id/permanente')
+  /** Baja FÍSICA de la zonal DEL FORMULARIO: solo si en él nunca se usó y no tiene puntos; si no, 409. */
+  @Delete(':codigo/zonales/:zonaId/permanente')
   @HttpCode(HttpStatus.OK)
   async eliminarZonal(
-    @Param('id', ParseIntPipe) id: number,
+    @Param('codigo') codigo: string,
+    @Param('zonaId', ParseIntPipe) zonaId: number,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<EliminacionResponseDto> {
-    return this.catalogos.eliminarZonal(id, usuario.usuarioId);
+    return this.catalogos.eliminarZonal(codigo, zonaId, usuario.usuarioId);
   }
 
   // ─────────────────────────── Puntos ───────────────────────────
 
-  @Post('puntos')
+  @Post(':codigo/puntos')
   async crearPunto(
+    @Param('codigo') codigo: string,
     @Body() dto: CrearPuntoDto,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<PuntoResponseDto> {
     return aPuntoResponse(
-      await this.catalogos.crearPunto(dto, usuario.usuarioId),
+      await this.catalogos.crearPunto(codigo, dto, usuario.usuarioId),
     );
   }
 
-  @Put('puntos/:id')
+  @Put(':codigo/puntos/:id')
   async actualizarPunto(
+    @Param('codigo') codigo: string,
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: ActualizarPuntoDto,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<PuntoResponseDto> {
     return aPuntoResponse(
-      await this.catalogos.actualizarPunto(id, dto, usuario.usuarioId),
+      await this.catalogos.actualizarPunto(codigo, id, dto, usuario.usuarioId),
     );
   }
 
-  @Delete('puntos/:id')
+  @Delete(':codigo/puntos/:id')
   @HttpCode(HttpStatus.OK)
   async desactivarPunto(
+    @Param('codigo') codigo: string,
     @Param('id', ParseIntPipe) id: number,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<BajaResponseDto> {
-    const baja = await this.catalogos.desactivarPunto(id, usuario.usuarioId);
-    return {
-      id: baja.registro.id,
-      activo: baja.registro.activo,
-      usosHistoricos: baja.usosHistoricos,
-      mensaje: baja.mensaje,
-    };
+    return aBaja(
+      await this.catalogos.desactivarPunto(codigo, id, usuario.usuarioId),
+    );
   }
 
   /** Baja FÍSICA. Solo si el punto nunca se usó; si no, 409. */
-  @Delete('puntos/:id/permanente')
+  @Delete(':codigo/puntos/:id/permanente')
   @HttpCode(HttpStatus.OK)
   async eliminarPunto(
+    @Param('codigo') codigo: string,
     @Param('id', ParseIntPipe) id: number,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<EliminacionResponseDto> {
-    return this.catalogos.eliminarPunto(id, usuario.usuarioId);
+    return this.catalogos.eliminarPunto(codigo, id, usuario.usuarioId);
   }
 
   // ─────────────────────── Tipos de control ───────────────────────
 
-  @Post('tipos-control')
+  @Post(':codigo/tipos-control')
   async crearTipoControl(
+    @Param('codigo') codigo: string,
     @Body() dto: CrearTipoControlDto,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<TipoControlResponseDto> {
     return aTipoControlResponse(
-      await this.catalogos.crearTipoControl(dto, usuario.usuarioId),
+      await this.catalogos.crearTipoControl(codigo, dto, usuario.usuarioId),
     );
   }
 
-  @Put('tipos-control/:id')
+  @Put(':codigo/tipos-control/:id')
   async actualizarTipoControl(
+    @Param('codigo') codigo: string,
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: ActualizarTipoControlDto,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<TipoControlResponseDto> {
     return aTipoControlResponse(
-      await this.catalogos.actualizarTipoControl(id, dto, usuario.usuarioId),
+      await this.catalogos.actualizarTipoControl(
+        codigo,
+        id,
+        dto,
+        usuario.usuarioId,
+      ),
     );
   }
 
-  @Delete('tipos-control/:id')
+  @Delete(':codigo/tipos-control/:id')
   @HttpCode(HttpStatus.OK)
   async desactivarTipoControl(
+    @Param('codigo') codigo: string,
     @Param('id', ParseIntPipe) id: number,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<BajaResponseDto> {
-    const baja = await this.catalogos.desactivarTipoControl(
-      id,
-      usuario.usuarioId,
+    return aBaja(
+      await this.catalogos.desactivarTipoControl(codigo, id, usuario.usuarioId),
     );
-    return {
-      id: baja.registro.id,
-      activo: baja.registro.activo,
-      usosHistoricos: baja.usosHistoricos,
-      mensaje: baja.mensaje,
-    };
   }
 
   /** Baja FÍSICA. Solo si el tipo de control nunca se usó; si no, 409. */
-  @Delete('tipos-control/:id/permanente')
+  @Delete(':codigo/tipos-control/:id/permanente')
   @HttpCode(HttpStatus.OK)
   async eliminarTipoControl(
+    @Param('codigo') codigo: string,
     @Param('id', ParseIntPipe) id: number,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<EliminacionResponseDto> {
-    return this.catalogos.eliminarTipoControl(id, usuario.usuarioId);
+    return this.catalogos.eliminarTipoControl(codigo, id, usuario.usuarioId);
   }
 
   // ─────────────────────── Instituciones ───────────────────────
 
-  @Post('instituciones')
+  @Post(':codigo/instituciones')
   async crearInstitucion(
+    @Param('codigo') codigo: string,
     @Body() dto: CrearInstitucionDto,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<InstitucionResponseDto> {
     return aInstitucionResponse(
-      await this.catalogos.crearInstitucion(dto, usuario.usuarioId),
+      await this.catalogos.crearInstitucion(codigo, dto, usuario.usuarioId),
     );
   }
 
-  @Put('instituciones/:id')
+  @Put(':codigo/instituciones/:id')
   async actualizarInstitucion(
+    @Param('codigo') codigo: string,
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: ActualizarInstitucionDto,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<InstitucionResponseDto> {
     return aInstitucionResponse(
-      await this.catalogos.actualizarInstitucion(id, dto, usuario.usuarioId),
+      await this.catalogos.actualizarInstitucion(
+        codigo,
+        id,
+        dto,
+        usuario.usuarioId,
+      ),
     );
   }
 
-  @Delete('instituciones/:id')
+  @Delete(':codigo/instituciones/:id')
   @HttpCode(HttpStatus.OK)
   async desactivarInstitucion(
+    @Param('codigo') codigo: string,
     @Param('id', ParseIntPipe) id: number,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<BajaResponseDto> {
-    const baja = await this.catalogos.desactivarInstitucion(
-      id,
-      usuario.usuarioId,
+    return aBaja(
+      await this.catalogos.desactivarInstitucion(codigo, id, usuario.usuarioId),
     );
-    return {
-      id: baja.registro.id,
-      activo: baja.registro.activo,
-      usosHistoricos: baja.usosHistoricos,
-      mensaje: baja.mensaje,
-    };
   }
 
   /** Baja FÍSICA. Solo si la institución nunca se usó; si no, 409. */
-  @Delete('instituciones/:id/permanente')
+  @Delete(':codigo/instituciones/:id/permanente')
   @HttpCode(HttpStatus.OK)
   async eliminarInstitucion(
+    @Param('codigo') codigo: string,
     @Param('id', ParseIntPipe) id: number,
     @UsuarioActual() usuario: UsuarioAutenticado,
   ): Promise<EliminacionResponseDto> {
-    return this.catalogos.eliminarInstitucion(id, usuario.usuarioId);
+    return this.catalogos.eliminarInstitucion(codigo, id, usuario.usuarioId);
   }
 }

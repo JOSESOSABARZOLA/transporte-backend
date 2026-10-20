@@ -141,7 +141,7 @@ describe('Personal y disponibilidad · integración', () => {
     cedula,
     apellidos,
     nombres: 'PERSONA',
-    telefono: '98 514 4231',
+    telefono: '098 514 4231',
     cargo: 'Inspector',
     area: AreaPersonal.GENERAL,
     tipoContrato: TipoContrato.NOMBRAMIENTO,
@@ -163,7 +163,7 @@ describe('Personal y disponibilidad · integración', () => {
       creadoId = ficha.id;
 
       expect(ficha.cedula).toBe(CEDULA_UNO);
-      expect(ficha.telefono).toBe('98 514 4231');
+      expect(ficha.telefono).toBe('098 514 4231');
       expect(ficha.activo).toBe(true);
     });
 
@@ -172,7 +172,8 @@ describe('Personal y disponibilidad · integración', () => {
         .post(`${API}/administracion/personal`)
         .set(como(ADMINISTRADOR))
         .send(nuevaFicha(CEDULA_UNO, `${PREFIJO}_REPETIDA`))
-        .expect(400);
+        // 409 CEDULA_CON_FICHA desde el rediseño de P-07 (2026-10-08).
+        .expect(409);
 
       expect((respuesta.body as { mensaje: string }).mensaje).toContain(
         `${PREFIJO}_UNO`,
@@ -242,7 +243,7 @@ describe('Personal y disponibilidad · integración', () => {
             cedula: '1713175146',
             apellidos: `${PREFIJO}_DE_INSPECCIONES`,
             nombres: 'PERSONA',
-            telefono: '98 514 4232',
+            telefono: '098 514 4232',
             area: AreaPersonal.GENERAL,
             tipoContrato: TipoContrato.NOMBRAMIENTO,
             direccion: RolDepartamental.DMIP_INSPECCIONES,
@@ -251,7 +252,7 @@ describe('Personal y disponibilidad · integración', () => {
             cedula: '1717639543',
             apellidos: `${PREFIJO}_DE_OPERATIVOS`,
             nombres: 'PERSONA',
-            telefono: '98 514 4233',
+            telefono: '098 514 4233',
             area: AreaPersonal.OPERATIVOS,
             tipoContrato: TipoContrato.NOMBRAMIENTO,
             direccion: RolDepartamental.DMIP_OPERATIVOS,
@@ -349,7 +350,8 @@ describe('Personal y disponibilidad · integración', () => {
         .post(`${API}/administracion/personal/${creadoId}/disponibilidad`)
         .set(como(ADMINISTRADOR))
         .send({ estado: 'PERMISO', desde: '2026-09-10', hasta: '2026-09-20' })
-        .expect(400);
+        // 409 AUSENCIA_SOLAPADA desde el rediseño de P-07 (2026-10-08).
+        .expect(409);
 
       expect((respuesta.body as { mensaje: string }).mensaje).toContain(
         '2026-09-01',
@@ -569,7 +571,7 @@ describe('Personal y disponibilidad · integración', () => {
       await request(servidor())
         .put(`${API}/administracion/personal/${creadoId}`)
         .set(como(ADMINISTRADOR))
-        .send({ telefono: '99 111 2233' })
+        .send({ telefono: '099 111 2233' })
         .expect(200);
 
       const trazas = await prisma.auditoria.findMany({
@@ -622,7 +624,7 @@ describe('Personal y disponibilidad · integración', () => {
             cedula: CEDULA_DMIT,
             apellidos: `${PREFIJO}_DE_INSTRUCCION`,
             nombres: 'PERSONA',
-            telefono: '98 514 4234',
+            telefono: '098 514 4234',
             area: AreaPersonal.INSTRUCCION,
             tipoContrato: TipoContrato.NOMBRAMIENTO,
             direccion: RolDepartamental.DMIT_INSTRUCTOR,

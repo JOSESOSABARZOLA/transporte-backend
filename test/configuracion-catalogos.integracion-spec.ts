@@ -209,6 +209,20 @@ describe('Formularios y catálogos · integración', () => {
       });
       creados.formularios.push(creado.id);
     }
+
+    // Las zonales son DEL FORMULARIO desde el 2026-10-13: INSP tiene las dos zonas de la prueba
+    // (una con puntos y otra sin ellos). Caen en cascada con el formulario al terminar.
+    const zonasDePrueba = [zonalConPuntos, zonalSinPuntos];
+    for (const [indice, zonaId] of zonasDePrueba.entries()) {
+      await prisma.zonalFormulario.create({
+        data: {
+          formularioId: creados.formularios[1],
+          zonaId,
+          nombre: `${PREFIJO}Zonal ${indice + 1}`,
+          orden: indice + 1,
+        },
+      });
+    }
   });
 
   afterAll(async () => {
@@ -229,7 +243,6 @@ describe('Formularios y catálogos · integración', () => {
     });
     await app.close();
   });
-
 
   /** `getHttpServer()` devuelve `any`; se tipa una sola vez y no en cada llamada. */
   const servidor = (): Server => app.getHttpServer() as Server;
@@ -315,12 +328,11 @@ describe('Formularios y catálogos · integración', () => {
   describe('GET /formularios/:codigo/catalogos', () => {
     it('caso 4 · devuelve lo delimitado a ESE formulario y nada de otro', async () => {
       const punto = await request(servidor())
-        .post(`${API}/administracion/catalogos/puntos`)
+        .post(`${API}/administracion/catalogos/${PREFIJO}INSP/puntos`)
         .set(como(ADMINISTRADOR))
         .send({
           nombre: `${PREFIJO}Punto delimitado`,
           zonalId: zonalConPuntos,
-          formularioIds: [creados.formularios[1]],
         })
         .expect(201);
       creados.puntos.push((punto.body as { id: number }).id);
@@ -399,8 +411,12 @@ describe('Formularios y catálogos · integración', () => {
         .set(como(OPERATIVOS))
         .expect(200);
 
-      expect((multiple.body as CatalogosRespuesta).tipoControlMultiple).toBe(true);
-      expect((unico.body as CatalogosRespuesta).tipoControlMultiple).toBe(false);
+      expect((multiple.body as CatalogosRespuesta).tipoControlMultiple).toBe(
+        true,
+      );
+      expect((unico.body as CatalogosRespuesta).tipoControlMultiple).toBe(
+        false,
+      );
     });
 
     it('un código inexistente responde 404', async () => {
@@ -457,7 +473,7 @@ describe('Formularios y catálogos · integración', () => {
   describe('CRUD /administracion/catalogos', () => {
     it('un rol que no es ADMINISTRADOR recibe 403', async () => {
       await request(servidor())
-        .post(`${API}/administracion/catalogos/tipos-control`)
+        .post(`${API}/administracion/catalogos/${PREFIJO}OPER/tipos-control`)
         .set(como(DIRECTOR))
         .send({ nombre: `${PREFIJO}Tipo prohibido` })
         .expect(403);
@@ -465,11 +481,10 @@ describe('Formularios y catálogos · integración', () => {
 
     it('crea un tipo de control y lo deja disponible', async () => {
       const creado = await request(servidor())
-        .post(`${API}/administracion/catalogos/tipos-control`)
+        .post(`${API}/administracion/catalogos/${PREFIJO}OPER/tipos-control`)
         .set(como(ADMINISTRADOR))
         .send({
           nombre: `${PREFIJO}Control de prueba`,
-          formularioId: creados.formularios[0],
         })
         .expect(201);
 
@@ -488,26 +503,25 @@ describe('Formularios y catálogos · integración', () => {
 
     it('rechaza el duplicado que solo cambia mayúsculas y acentos', async () => {
       const respuesta = await request(servidor())
-        .post(`${API}/administracion/catalogos/tipos-control`)
+        .post(`${API}/administracion/catalogos/${PREFIJO}OPER/tipos-control`)
         .set(como(ADMINISTRADOR))
         .send({
           nombre: `${PREFIJO}CONTROL DE PRUEBA`,
-          formularioId: creados.formularios[0],
         })
-        .expect(400);
+        // 409 desde el 2026-10-12: la petición es correcta, choca con el catálogo.
+        .expect(409);
 
-      expect((respuesta.body as { mensaje: string }).mensaje).toContain(
-        'Ya existe',
-      );
+      const cuerpo = respuesta.body as { codigo: string; mensaje: string };
+      expect(cuerpo.codigo).toBe('CATALOGO_DUPLICADO');
+      expect(cuerpo.mensaje).toContain('Ya existe');
     });
 
     it('rechaza un campo fuera de contrato nombrándolo', async () => {
       const respuesta = await request(servidor())
-        .post(`${API}/administracion/catalogos/tipos-control`)
+        .post(`${API}/administracion/catalogos/${PREFIJO}OPER/tipos-control`)
         .set(como(ADMINISTRADOR))
         .send({
           nombre: `${PREFIJO}Otro`,
-          formularioId: creados.formularios[0],
           activo: true,
         })
         .expect(400);
@@ -519,9 +533,9 @@ describe('Formularios y catálogos · integración', () => {
 
     it('exige el nombre con un mensaje que sirve al administrador', async () => {
       const respuesta = await request(servidor())
-        .post(`${API}/administracion/catalogos/tipos-control`)
+        .post(`${API}/administracion/catalogos/${PREFIJO}OPER/tipos-control`)
         .set(como(ADMINISTRADOR))
-        .send({ formularioId: creados.formularios[0] })
+        .send({})
         .expect(400);
 
       expect((respuesta.body as { mensaje: string }).mensaje).toBe(
@@ -533,7 +547,9 @@ describe('Formularios y catálogos · integración', () => {
       const id = creados.tipos[0];
 
       const baja = await request(servidor())
-        .delete(`${API}/administracion/catalogos/tipos-control/${id}`)
+        .delete(
+          `${API}/administracion/catalogos/${PREFIJO}OPER/tipos-control/${id}`,
+        )
         .set(como(ADMINISTRADOR))
         .expect(200);
 
@@ -570,16 +586,21 @@ describe('Formularios y catálogos · integración', () => {
       expect(trazas[1].campo).toBe('tico_activo');
     });
 
-    it('vincular a un formulario inexistente se rechaza con 400', async () => {
+    it('crear en un formulario inexistente responde 404', async () => {
       await request(servidor())
-        .post(`${API}/administracion/catalogos/instituciones`)
+        .post(`${API}/administracion/catalogos/NO_EXISTE/instituciones`)
         .set(como(ADMINISTRADOR))
-        .send({
-          sigla: `${PREFIJO}XX`,
-          nombre: 'Institución de prueba',
-          formularioIds: [999999],
-        })
-        .expect(400);
+        .send({ sigla: `${PREFIJO}XX`, nombre: 'Institución de prueba' })
+        .expect(404);
+    });
+
+    it('desactivar un tipo indicando OTRO formulario responde 404 (2026-10-13)', async () => {
+      await request(servidor())
+        .delete(
+          `${API}/administracion/catalogos/${PREFIJO}INSP/tipos-control/${creados.tipos[0]}`,
+        )
+        .set(como(ADMINISTRADOR))
+        .expect(404);
     });
   });
 });

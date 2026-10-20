@@ -57,6 +57,7 @@ export type AsignacionParaMemorando = Prisma.AsignacionPersonalGetPayload<{
         cuadro: true;
       };
     };
+    tramiteInspeccion: true;
   };
 }>;
 
@@ -87,16 +88,17 @@ export interface VigenteAnterior {
   numeroAnio: number | null;
 }
 
-/** La config del memorando de una jornada (D13, 2026-10-02): NULL = sin configurar. */
+/**
+ * La config del memorando de una jornada (D13, 2026-10-02): NULL = sin configurar. SOLO RESPALDO
+ * desde el 2026-10-08: se lee «elaborado por» para las órdenes resueltas con una versión de plantilla
+ * anterior a la tabla de control. Ya no se escribe. Las columnas `ocuc_numero_memorando` y `ocuc_nut`
+ * permanecen en la tabla, sin uso, para no hacer una migración destructiva.
+ */
 export interface ConfigCuadroFila {
-  // El número de memorando se movió a los DATOS GENERALES de la plantilla (2026-10-02): aquí quedan
-  // solo el NUT y quién elabora, que SÍ son del día. La columna `ocuc_numero_memorando` permanece en
-  // la tabla (sin uso) para no hacer una migración destructiva.
-  nut: string | null;
   elaboradoPor: string | null;
 }
 
-/** Un borrador de la jornada candidato a numerarse al guardar la config del cuadro. */
+/** Un borrador candidato a numerarse (al guardar la plantilla de su Director). */
 export interface BorradorDeCuadro {
   id: number;
   codigo: string;
@@ -424,6 +426,8 @@ export class OrdenServicioRepository extends RepositorioPrisma {
             cuadro: true,
           },
         },
+        // Trámite de Inspección copiado a la persona en cada operativo (2026-10-07).
+        tramiteInspeccion: true,
       },
       orderBy: { operativo: { identificador: 'asc' } },
     });
@@ -600,10 +604,10 @@ export class OrdenServicioRepository extends RepositorioPrisma {
     });
   }
 
-  // ───────────────── Config del memorando por cuadro (D13) ─────────────────
+  // ──────────── Config del memorando por cuadro (D13): solo lectura de respaldo ────────────
 
   /**
-   * La config del memorando de una jornada (número de memorando, NUT, quién elabora), o `null` si
+   * El «elaborado por» de una jornada (respaldo de las versiones de plantilla anteriores), o `null` si
    * aún no se ha configurado. Acepta el cliente de transacción para leerse dentro del completado.
    */
   async obtenerConfigCuadro(
@@ -613,66 +617,14 @@ export class OrdenServicioRepository extends RepositorioPrisma {
     const db = cliente ?? this.prisma;
     return db.ordenConfigCuadro.findUnique({
       where: { fecha },
-      select: { nut: true, elaboradoPor: true },
-    });
-  }
-
-  /** Crea o actualiza la config del memorando de una jornada. */
-  async upsertConfigCuadro(
-    fecha: Date,
-    datos: ConfigCuadroFila,
-    cliente: Prisma.TransactionClient,
-  ): Promise<void> {
-    await cliente.ordenConfigCuadro.upsert({
-      where: { fecha },
-      create: { fecha, ...datos },
-      update: datos,
-    });
-  }
-
-  /**
-   * Los borradores VIGENTES de la jornada que aún no tienen número, para promoverlos al guardar la
-   * config del cuadro: con sus datos de persona (incluida la dirección, de la que sale la
-   * dependencia), firmante y editables se recalculan los faltantes con los mismos criterios (D12).
-   */
-  async borradoresSinNumeroDeCuadro(
-    fecha: Date,
-    cliente: Prisma.TransactionClient,
-  ): Promise<BorradorDeCuadro[]> {
-    return cliente.ordenServicio.findMany({
-      where: {
-        vigente: true,
-        numeroSecuencial: null,
-        operativo: { cuadro: { fecha } },
-      },
-      select: {
-        id: true,
-        codigo: true,
-        firmante: true,
-        directorId: true,
-        plantillaId: true,
-        plantillaVersion: true,
-        editables: true,
-        numeroSecuencial: true,
-        numeroAnio: true,
-        emitidaEn: true,
-        funcionario: {
-          select: {
-            nombres: true,
-            apellidos: true,
-            cargo: true,
-            direccion: true,
-          },
-        },
-      },
-      orderBy: { id: 'asc' },
+      select: { elaboradoPor: true },
     });
   }
 
   /**
    * Los borradores VIGENTES sin número de UN Director (de cualquier jornada), para regenerarlos al
    * guardar SU plantilla: solo los suyos —nunca los de otro Director—. Lleva la fecha del cuadro para
-   * leer la config (NUT/elaboradoPor) de cada jornada por separado.
+   * leer el respaldo de «elaborado por» de cada jornada por separado.
    */
   async borradoresDeDirector(
     directorId: number,

@@ -99,3 +99,51 @@ describe('Contrato de la plantilla · datos generales', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 });
+
+describe('Contrato de la plantilla · tabla de control (2026-10-08)', () => {
+  const TABLA = {
+    accion: 'Elaborado por',
+    elaboradoPor: 'Jose Sosa',
+    siglasUnidad: 'dmi',
+  };
+
+  it('acepta acción, quién elabora y siglas, y guarda las siglas en mayúsculas', async () => {
+    const dto = (await validar(GuardarPlantillaDto, {
+      apartados: APARTADOS,
+      datosGenerales: { ...DATOS_GENERALES, ...TABLA },
+    })) as GuardarPlantillaDto;
+
+    expect(dto.datosGenerales).toEqual(
+      expect.objectContaining({
+        accion: 'Elaborado por',
+        elaboradoPor: 'Jose Sosa',
+        siglasUnidad: 'DMI',
+      }),
+    );
+  });
+
+  it('las siglas no pasan de 20 caracteres', async () => {
+    await expect(
+      validar(GuardarPlantillaDto, {
+        apartados: APARTADOS,
+        datosGenerales: { ...DATOS_GENERALES, siglasUnidad: 'A'.repeat(21) },
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    await expect(
+      validar(GuardarPlantillaDto, {
+        apartados: APARTADOS,
+        datosGenerales: { ...DATOS_GENERALES, siglasUnidad: 'A'.repeat(20) },
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it('la vista previa acepta también la tabla de control en edición', async () => {
+    await expect(
+      validar(PrevisualizarPlantillaDto, {
+        apartados: APARTADOS,
+        datosGenerales: { ...DATOS_GENERALES, ...TABLA },
+      }),
+    ).resolves.toBeDefined();
+  });
+});

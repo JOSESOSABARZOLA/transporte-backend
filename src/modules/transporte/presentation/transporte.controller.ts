@@ -178,6 +178,8 @@ export class TransporteController {
         ubicacionId: dto.ubicacionId ?? null,
         domicilio: dto.domicilio ?? false,
         observacion: dto.observacion,
+        tipo: dto.tipo,
+        conductorId: dto.conductorId,
       },
       usuario.usuarioId,
     );

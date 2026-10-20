@@ -1,0 +1,2 @@
+# Los scripts de shell viajan a servidores Linux: siempre LF, aunque se clonen en Windows.
+*.sh text eol=lf

@@ -30,9 +30,17 @@
 import { Injectable } from '@nestjs/common';
 import type { CuadroDiario, Prisma } from '@prisma/client';
 
+import { autoresPorIds } from '../../../common/notas/autores';
+import {
+  firmantesDeNotas,
+  type MapaDeAutores,
+} from '../../../common/notas/notas-operativo';
 import { PrismaService } from '../../../prisma/prisma.service';
 
-/** Operativo con todo lo que la matriz imprime. */
+/**
+ * Operativo con todo lo que la matriz imprime. `autores` (2026-10-19): el nombre de quien firma
+ * cada nota, en UNA consulta por listado (`autoresPorIds`).
+ */
 export type OperativoDeMatriz = Prisma.OperativoGetPayload<{
   include: {
     formulario: true;
@@ -46,8 +54,9 @@ export type OperativoDeMatriz = Prisma.OperativoGetPayload<{
     conductor: true;
     vehiculo: true;
     origen: { select: { identificador: true } };
+    compartirCon: { select: { id: true; identificador: true } };
   };
-}>;
+}> & { autores?: MapaDeAutores };
 
 /** Formulario con sus prefijos, para la cabecera de cada sección. */
 export type FormularioDeMatriz = Prisma.FormularioGetPayload<{
@@ -87,6 +96,8 @@ const RELACIONES = {
    * unas líneas más arriba, en la misma sección.
    */
   origen: { select: { identificador: true } },
+  /** La tarjeta COMPARTIDA de las notas, en pantalla y en el PDF (2026-10-19). */
+  compartirCon: { select: { id: true, identificador: true } },
 } satisfies Prisma.OperativoInclude;
 
 @Injectable()
@@ -118,7 +129,7 @@ export class MatrizRepository {
    * produciría un PDF con la mitad del cuadro, que es peor que no tenerlo.
    */
   async listarOperativos(fecha: Date): Promise<OperativoDeMatriz[]> {
-    return this.prisma.operativo.findMany({
+    const operativos = await this.prisma.operativo.findMany({
       where: { activo: true, cuadro: { fecha } },
       include: RELACIONES,
       /**
@@ -142,5 +153,12 @@ export class MatrizRepository {
         { secuencial: 'asc' },
       ],
     });
+
+    // Quién firma cada nota (2026-10-19): UNA consulta para el día entero, nunca por fila.
+    const autores = await autoresPorIds(
+      this.prisma,
+      firmantesDeNotas(operativos),
+    );
+    return operativos.map((operativo) => ({ ...operativo, autores }));
   }
 }

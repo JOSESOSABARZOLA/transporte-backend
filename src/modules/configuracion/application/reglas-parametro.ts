@@ -27,6 +27,16 @@ export const PERIODOS_COMPUTO = ['SEMANAL', 'QUINCENAL', 'MENSUAL'];
 
 const PATRON_HORA = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
 
+/** Siete enteros ≥ 0 separados por comas (L,M,X,J,V,S,D), o SIN_CONFIGURAR. 2026-10-07. */
+const PATRON_MINIMOS = /^\d{1,3}(,\d{1,3}){6}$/;
+
+function esMinimosPorDia(valor: string): boolean {
+  const limpio = valor.replace(/\s+/g, '');
+  return (
+    limpio.toUpperCase() === 'SIN_CONFIGURAR' || PATRON_MINIMOS.test(limpio)
+  );
+}
+
 /** Parámetros de texto cuyo contenido tiene forma acotada. */
 const DOMINIO_TEXTO: Record<
   string,
@@ -47,6 +57,32 @@ const DOMINIO_TEXTO: Record<
   FRANJA_NOCTURNA_FIN: {
     valido: (valor) => PATRON_HORA.test(valor),
     mensaje: 'El fin de la franja nocturna se escribe en formato HH:MM.',
+  },
+  // Cobertura por turnos (Instrucción), 2026-10-05: ¿se admite diurno tras nocturno? Solo avisa.
+  COBERTURA_PERMITE_NOCTURNO_A_DIURNO: {
+    valido: (valor) =>
+      ['SIN_CONFIGURAR', 'SI', 'NO'].includes(valor.toUpperCase()),
+    mensaje:
+      'Admite SI, NO o SIN_CONFIGURAR (no se evalúa). Con NO, la matriz avisa de un diurno tras un nocturno.',
+  },
+  // Turnos de conductores de la DAF (2026-10-07): ¿se admite DÍA tras NOCHE? La propuesta del mes
+  // no lo propone con NO; SIN_CONFIGURAR no se evalúa.
+  DAF_PERMITE_NOCHE_A_DIA: {
+    valido: (valor) =>
+      ['SIN_CONFIGURAR', 'SI', 'NO'].includes(valor.toUpperCase()),
+    mensaje:
+      'Admite SI, NO o SIN_CONFIGURAR (no se evalúa). Con NO, la propuesta del mes no pone un DÍA tras una NOCHE.',
+  },
+  // Mínimo de conductores por turno y día de la semana (L,M,X,J,V,S,D), 2026-10-07.
+  DAF_MIN_CONDUCTORES_DIA: {
+    valido: esMinimosPorDia,
+    mensaje:
+      'Escriba SIN_CONFIGURAR o siete enteros ≥ 0 separados por comas, de lunes a domingo (p. ej. 6,6,6,6,6,4,4).',
+  },
+  DAF_MIN_CONDUCTORES_NOCHE: {
+    valido: esMinimosPorDia,
+    mensaje:
+      'Escriba SIN_CONFIGURAR o siete enteros ≥ 0 separados por comas, de lunes a domingo (p. ej. 3,3,3,3,3,3,3).',
   },
   // Cobertura por turnos (Instrucción): las ventanas de los turnos diurno y nocturno.
   // El horario del operativo al asignar debe caer dentro de la ventana de su turno.
@@ -81,7 +117,38 @@ const DOMINIO_TEXTO: Record<
     mensaje:
       'El fin de la jornada del nombramiento se escribe en formato HH:MM, por ejemplo 16:00.',
   },
+  // Transporte por tramos (2026-10-06): las horas de la línea de tiempo de los conductores.
+  ...horasDeTransporte({
+    HORA_NOMBRAMIENTO_CONDUCTOR_FIN:
+      'El fin de la jornada del conductor de nombramiento',
+    INICIO_JORNADA_TRANSPORTE: 'El inicio de la línea de tiempo del transporte',
+    HORA_TURNO_CONDUCTOR_DIA_INICIO: 'El inicio del turno DÍA de conductores',
+    HORA_TURNO_CONDUCTOR_DIA_FIN: 'El fin del turno DÍA de conductores',
+    HORA_TURNO_CONDUCTOR_NOCHE_INICIO:
+      'El inicio del turno NOCHE de conductores',
+    HORA_TURNO_CONDUCTOR_NOCHE_FIN: 'El fin del turno NOCHE de conductores',
+    HORA_TURNO_CONDUCTOR_ECU_NOCHE_INICIO:
+      'El inicio del turno ECU NOCHE de conductores',
+    HORA_TURNO_CONDUCTOR_ECU_NOCHE_FIN:
+      'El fin del turno ECU NOCHE de conductores',
+    // Fin del día (2026-10-06): desde qué hora un cierre se considera «tarde» para la guarda.
+    GUARDA_HORA_TARDE: 'La hora a partir de la cual un cierre es tarde',
+  }),
 };
+
+function horasDeTransporte(
+  sujetos: Record<string, string>,
+): Record<string, { valido: (valor: string) => boolean; mensaje: string }> {
+  return Object.fromEntries(
+    Object.entries(sujetos).map(([clave, sujeto]) => [
+      clave,
+      {
+        valido: (valor: string) => PATRON_HORA.test(valor),
+        mensaje: `${sujeto} se escribe en formato HH:MM, por ejemplo 16:30.`,
+      },
+    ]),
+  );
+}
 
 /**
  * Comprueba el valor propuesto contra el tipo, el dominio y el rango del parámetro.

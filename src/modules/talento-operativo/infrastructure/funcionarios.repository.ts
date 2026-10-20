@@ -138,6 +138,18 @@ export class FuncionariosRepository extends RepositorioPrisma {
     return this.prisma.funcionario.findUnique({ where: { id } });
   }
 
+  /**
+   * Varias fichas en UNA consulta (2026-10-07). Los ids que no existen simplemente no vuelven:
+   * quien pregunta decide qué hacer con la ausencia, no se lanza por uno solo.
+   */
+  async buscarPorIds(ids: readonly number[]): Promise<Funcionario[]> {
+    if (ids.length === 0) return [];
+    return this.prisma.funcionario.findMany({
+      where: { id: { in: [...ids] } },
+      orderBy: { id: 'asc' },
+    });
+  }
+
   async buscarPorCedula(cedula: string): Promise<Funcionario | null> {
     return this.prisma.funcionario.findUnique({ where: { cedula } });
   }

@@ -13,8 +13,8 @@
  * La Dirección edita una plantilla única (añadir, quitar, reordenar apartados y cambiar sus
  * textos). Este exportador solo RENDERIZA la lista de apartados que recibe, ya con sus
  * tokens `{{...}}` sustituidos por el servicio. El membrete, el encabezado (memorando, PARA)
- * y el cierre (firma, NUT) son la tramoya institucional; el cuerpo editable son los
- * apartados.
+ * y el cierre (firma y tabla de control) son la tramoya institucional; el cuerpo editable son
+ * los apartados. La línea del NUT se retiró el 2026-10-08.
  *
  * Sigue siendo por persona (RN-51): el apartado de tipo `operativos` enumera los operativos
  * de ESA persona, que llegan en `datos.operativos`.
@@ -139,7 +139,11 @@ export interface DatosOrdenMemorando {
   telefonoFuncionario?: string;
   operativos: OperativoDeOrden[];
   firmante: { nombre: string; cargo: string; dependencia: string };
-  nut: string;
+  /**
+   * TABLA DE CONTROL (2026-10-08), de la plantilla del Director: la fila dice
+   * «<accion>: <elaboradoPor>» | siglas de la unidad | fecha de emisión.
+   */
+  accion: string;
   elaboradoPor: string;
   siglasUnidad: string;
   /** El cuerpo editable: apartados YA resueltos (tokens sustituidos por el servicio). */
@@ -545,14 +549,14 @@ export async function exportarOrdenMemorando(
               ),
               bold: true,
             },
-            {
-              ...textoConFaltante(
-                datos.para.cargo,
-                'Cargo',
-                datos.modoVistaPrevia,
-              ),
-              bold: true,
-            },
+            // El cargo sale de la ficha de Personal (2026-10-08): sin dato va EN BLANCO, sin
+            // resaltado. Solo la vista previa genérica de la plantilla conserva el marcador gris.
+            datos.modoVistaPrevia
+              ? {
+                  ...textoConFaltante(datos.para.cargo, 'Cargo', true),
+                  bold: true,
+                }
+              : { text: datos.para.cargo.trim(), bold: true },
             {
               ...textoConFaltante(
                 datos.para.dependencia,
@@ -624,7 +628,11 @@ export async function exportarOrdenMemorando(
       alignment: 'center',
       margin: [0, 0, 0, 16],
     },
-    { text: `NUT: ${datos.nut}`, margin: [0, 0, 0, 12] },
+    /*
+      TABLA DE CONTROL (2026-10-08). Sin la línea del NUT, que se retiró. Los tres datos salen de la
+      plantilla del Director —la fecha es la de emisión—; un dato vacío se resalta como el firmante:
+      amarillo en el documento, gris en la vista previa.
+    */
     {
       table: {
         widths: ['*', 120, 90],
@@ -653,8 +661,24 @@ export async function exportarOrdenMemorando(
             },
           ],
           [
-            { text: `Elaborado por: ${datos.elaboradoPor}` },
-            { text: datos.siglasUnidad, alignment: 'center' },
+            {
+              text: [
+                { text: `${datos.accion}: ` },
+                textoConFaltante(
+                  datos.elaboradoPor,
+                  'Elaborado por',
+                  datos.modoVistaPrevia,
+                ),
+              ],
+            },
+            {
+              ...textoConFaltante(
+                datos.siglasUnidad,
+                'Siglas de la unidad',
+                datos.modoVistaPrevia,
+              ),
+              alignment: 'center',
+            },
             datos.modoVistaPrevia
               ? {
                   ...textoConFaltante('', 'Fecha de emisión', true),

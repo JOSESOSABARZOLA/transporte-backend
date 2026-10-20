@@ -50,6 +50,21 @@ export interface AppConfig {
    * poder cambiarse sin tocar la base ni reiniciar más que el proceso.
    */
   limitePeticiones: LimitePeticionesConfig;
+  /** Sistema de Inspección (2026-10-07). `urlApi` vacía = sin integración. */
+  inspeccion: { urlApi: string };
+  /**
+   * Proxies de confianza delante del backend (`TRUST_PROXY`, 2026-10-16), en SALTOS.
+   *
+   * Detrás del Gateway de `*.quito.gob.ec` y del nginx del frontend, toda petición llega con
+   * la IP del último proxy: sin esto, el límite de peticiones contaría a todos los usuarios
+   * como UNO y el ingreso daría 429 en hora pico. Con `n`, Express toma la IP real de
+   * `X-Forwarded-For` descontando `n` saltos (`req.ip`, el que usa `ThrottlerGuard`).
+   *
+   * `null` = sin declarar: no se toca, como antes (el servidor sin Gateway). `NaN` = valor
+   * inválido: `validarEntorno` detiene el arranque. Un valor mayor que los proxies reales
+   * dejaría que el cliente eligiera su IP con `X-Forwarded-For`: se pone el número exacto.
+   */
+  saltosProxy: number | null;
 }
 
 export interface LimitePeticionesConfig {
@@ -124,6 +139,20 @@ const aNumero = (valor: string | undefined, porDefecto: number): number => {
   return Number.isFinite(convertido) ? convertido : porDefecto;
 };
 
+/**
+ * `TRUST_PROXY`: vacía o ausente → `null` (no se toca); un entero >= 0 → ese número de
+ * saltos; cualquier otra cosa → `NaN`, que `validarEntorno` rechaza. No se admiten `true`
+ * ni listas de IP: «confiar en todo» dejaría al cliente falsificar su dirección.
+ */
+export const aSaltosProxy = (valor: string | undefined): number | null => {
+  const texto = (valor ?? '').trim();
+  if (texto === '') {
+    return null;
+  }
+
+  return /^\d+$/.test(texto) ? Number(texto) : Number.NaN;
+};
+
 const aBooleano = (valor: string | undefined, porDefecto: boolean): boolean => {
   if (valor === undefined) {
     return porDefecto;
@@ -180,6 +209,15 @@ export const appConfig: AppConfig = {
       sameSite: aSameSite(process.env.AUTH_COOKIE_SAME_SITE),
     },
   },
+  /**
+   * Sistema de Inspección (2026-10-07). Base de su API, de la que cuelga `/operativos?fecha=`: los
+   * trámites que tiene asignados cada inspector en una fecha. Se llama DESDE EL SERVIDOR con el
+   * token de Auth central del usuario conectado; el navegador nunca habla con Inspección. Vacía
+   * significa **sin integración**: el registro funciona igual y el combo lo dice.
+   */
+  inspeccion: {
+    urlApi: (process.env.INSPECCION_API_URL ?? '').replace(/\/$/, ''),
+  },
   limitePeticiones: {
     ventanaMs: aNumero(process.env.LIMITE_VENTANA_MS, 60000),
     // 300 por minuto. Holgado para quien arma el cuadro —una pantalla de registro
@@ -187,4 +225,5 @@ export const appConfig: AppConfig = {
     maximo: aNumero(process.env.LIMITE_MAXIMO, 300),
     maximoIngreso: aNumero(process.env.LIMITE_MAXIMO_INGRESO, 10),
   },
+  saltosProxy: aSaltosProxy(process.env.TRUST_PROXY),
 };

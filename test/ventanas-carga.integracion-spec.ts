@@ -244,19 +244,18 @@ describe('Ventanas de carga · integración', () => {
       expect(cuerpo.mensaje).toContain('zonaHoraria');
     });
 
-    it('devuelve las advertencias sin impedir el cambio', async () => {
+    // La pantalla solo parametriza; la coherencia entre ventanas la aplica el sistema en
+    // ejecución (2026-10-08): se guarda sin comparar con otras ventanas y sin advertencias.
+    it('guarda la DAF abriendo antes del cierre del registro, sin advertencias', async () => {
       const respuesta = await request(servidor())
         .put(`${API}/administracion/ventanas/DAF`)
         .set(como(ADMINISTRADOR))
         .send({ horaApertura: '14:00' })
         .expect(200);
 
-      const cuerpo = respuesta.body as {
-        ventana: VentanaRespuesta;
-        advertencias: string[];
-      };
+      const cuerpo = respuesta.body as { ventana: VentanaRespuesta };
       expect(cuerpo.ventana.horaApertura).toBe('14:00');
-      expect(cuerpo.advertencias.join(' ')).toContain('RN-56');
+      expect(cuerpo).not.toHaveProperty('advertencias');
     });
 
     it('un rol departamental no puede administrar ventanas', async () => {

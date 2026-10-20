@@ -32,10 +32,32 @@
  * ALGÚN conductor del día lo tenga autorizado— y no bloquea cuando no hay conductor
  * asignado todavía: bloquear obligaría a declarar el destino después de la asignación, y
  * la DAF hace las dos cosas a la vez mientras habla por teléfono.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════════
+ * 2026-10-06 · EL DOMICILIO PASA A SER UN RECHAZO, NO UN AVISO (Art. 8 del Reglamento).
+ *
+ * Con el acta de parqueadero en la ficha del conductor ya se puede comprobar de verdad: un
+ * DOMICILIO exige un conductor —el indicado, o el habitual del vehículo— con parqueadero
+ * autorizado y acta VIGENTE ese día. Sin ella, 400 con un mensaje para la DAF. El destino
+ * lleva además su TIPO (GARAJE, DOMICILIO o TALLER), que la línea de tiempo usa para decir dónde
+ * amanece cada vehículo.
+ * ═══════════════════════════════════════════════════════════════════════════════
+ * 2026-10-08 · EL NÚMERO DE ACTA SE ESCRIBE Y SE COMPRUEBA («Planificar el día», paso 3).
+ *
+ * El fin del día pide, para dejar un vehículo en el domicilio, el N.º DE ACTA. Llega en
+ * `actaNumero` con `exigirNumeroActa`: si falta, o no coincide con el acta vigente del conductor
+ * (sin distinguir mayúsculas ni espacios), 400. El número se guarda en `dest_acta_numero`. La
+ * declaración suelta (`PUT /transporte/vehiculos/:id/destino/:fecha`) no lo exige; si lo trae, se
+ * comprueba igual, y si no, se guarda el del acta vigente.
+ * ═══════════════════════════════════════════════════════════════════════════════
  */
 
 import { Injectable } from '@nestjs/common';
-import { AccionAuditoria, type DestinoVehiculo } from '@prisma/client';
+import {
+  AccionAuditoria,
+  TipoUbicacionVehiculo,
+  type DestinoVehiculo,
+} from '@prisma/client';
 
 import { AuditoriaService } from '../../../common/auditoria/auditoria.service';
 import {
@@ -47,6 +69,7 @@ import {
   FlotaRepository,
   type DestinoConUbicacion,
 } from '../infrastructure/flota.repository';
+import { actaVigente } from './politicas/acta-parqueadero';
 
 export interface DatosDestino {
   /** Zonal donde queda. Excluyente con `domicilio`. */
@@ -54,6 +77,14 @@ export interface DatosDestino {
   /** Se lo lleva el conductor. Excluyente con `ubicacionId`. */
   domicilio?: boolean;
   observacion?: string | null;
+  /** GARAJE | DOMICILIO | TALLER. Si no viaja, se deduce de `domicilio`. */
+  tipo?: TipoUbicacionVehiculo;
+  /** Quién se lo lleva (DOMICILIO). Si no viaja, el conductor habitual del vehículo. */
+  conductorId?: number;
+  /** N.º del acta de parqueadero escrito por la DAF (DOMICILIO). */
+  actaNumero?: string | null;
+  /** El fin del día lo exige: un DOMICILIO sin número se rechaza. */
+  exigirNumeroActa?: boolean;
 }
 
 @Injectable()
@@ -90,8 +121,22 @@ export class DestinoVehiculoService {
       });
     }
 
-    const domicilio = datos.domicilio === true;
+    const domicilio =
+      datos.domicilio === true ||
+      datos.tipo === TipoUbicacionVehiculo.DOMICILIO;
+    const tipo =
+      datos.tipo ??
+      (domicilio
+        ? TipoUbicacionVehiculo.DOMICILIO
+        : TipoUbicacionVehiculo.GARAJE);
     const ubicacionId = domicilio ? null : (datos.ubicacionId ?? null);
+
+    if (domicilio && tipo !== TipoUbicacionVehiculo.DOMICILIO) {
+      throw new ValidacionError(
+        'Un vehículo que se lleva el conductor es de tipo DOMICILIO, no garaje ni taller.',
+        { vehiculoId },
+      );
+    }
 
     // `ck_destino_sujeto` lo respalda en la base. Aquí se comprueba antes para devolver un
     // mensaje que la DAF entienda en lugar de un error del motor.
@@ -120,14 +165,21 @@ export class DestinoVehiculoService {
       }
     }
 
+    // Quién se lo lleva queda registrado: al día siguiente se le repite el vehículo (Fase 5).
+    const acta = domicilio
+      ? await this.exigirActaVigente(vehiculoId, fecha, datos)
+      : null;
+    const conductorId = acta ? acta.conductorId : (datos.conductorId ?? null);
+
     const anterior = await this.flota.buscarDestino(vehiculoId, fecha);
 
     const traza = this.auditoria.compararCambios(
       {
         ubic_id: anterior?.ubicacionId ?? null,
         dest_domicilio: anterior?.domicilio ?? false,
+        dest_tipo: anterior?.tipo ?? null,
       },
-      { ubic_id: ubicacionId, dest_domicilio: domicilio },
+      { ubic_id: ubicacionId, dest_domicilio: domicilio, dest_tipo: tipo },
     );
 
     const guardado = await this.flota.ejecutarEnTransaccion(async (cliente) => {
@@ -138,6 +190,9 @@ export class DestinoVehiculoService {
           ubicacionId,
           domicilio,
           observacion: datos.observacion ?? null,
+          tipo,
+          conductorId,
+          actaNumero: acta?.actaNumero ?? null,
           registradoPor: usuarioId,
         },
         cliente,
@@ -167,4 +222,58 @@ export class DestinoVehiculoService {
 
     return guardado;
   }
+
+  /**
+   * Art. 8 · DOMICILIO solo con un conductor que tenga acta de parqueadero vigente ese día.
+   * Devuelve quién se lo lleva y el número de acta que queda registrado.
+   */
+  private async exigirActaVigente(
+    vehiculoId: number,
+    fecha: Date,
+    datos: DatosDestino,
+  ): Promise<{ conductorId: number; actaNumero: string }> {
+    const conductorId = datos.conductorId;
+    const conductor =
+      conductorId !== undefined
+        ? await this.flota.buscarConductor(conductorId)
+        : await this.flota.conductorHabitualDe(vehiculoId);
+
+    if (!conductor || !conductor.activo) {
+      throw new ValidacionError(
+        conductorId !== undefined
+          ? 'El conductor indicado no existe o está dado de baja.'
+          : 'Indique qué conductor se lleva el vehículo: no tiene un conductor habitual.',
+        { vehiculoId, conductorId },
+      );
+    }
+
+    if (!actaVigente(conductor, fecha)) {
+      throw new ValidacionError(
+        `${conductor.nombreCompleto} no tiene acta de parqueadero vigente ese día: el vehículo no puede quedar en su domicilio.`,
+        { vehiculoId, conductorId: conductor.id },
+      );
+    }
+
+    const vigente = conductor.actaParqueaderoNumero ?? '';
+    const escrito = datos.actaNumero?.trim() ?? '';
+    if (escrito === '' && datos.exigirNumeroActa) {
+      throw new ValidacionError(
+        `Escriba el número del acta de parqueadero de ${conductor.nombreCompleto} para dejar el vehículo en su domicilio.`,
+        { vehiculoId, conductorId: conductor.id },
+      );
+    }
+    if (escrito !== '' && normalizarActa(escrito) !== normalizarActa(vigente)) {
+      throw new ValidacionError(
+        `El acta N.º ${escrito} no es la vigente de ${conductor.nombreCompleto}: revise el número.`,
+        { vehiculoId, conductorId: conductor.id },
+      );
+    }
+
+    return { conductorId: conductor.id, actaNumero: vigente };
+  }
+}
+
+/** El número de acta se compara sin espacios ni mayúsculas: «A-12 » = «a-12». */
+function normalizarActa(numero: string): string {
+  return numero.replace(/\s+/g, '').toUpperCase();
 }

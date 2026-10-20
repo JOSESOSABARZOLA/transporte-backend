@@ -39,7 +39,9 @@ import {
   Get,
   Param,
   ParseIntPipe,
+  Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 
@@ -49,9 +51,13 @@ import { IdentidadGuard } from '../../../common/auth/guards/identidad.guard';
 import { PermisosGuard } from '../../../common/auth/guards/permisos.guard';
 import type { UsuarioAutenticado } from '../../../common/auth/interfaces/usuario-autenticado.interface';
 import { ValidacionError } from '../../../common/errors/errores-dominio';
-import { MantenimientoVehiculoService } from '../application/mantenimiento-vehiculo.service';
+import {
+  MantenimientoVehiculoService,
+  type TramoAfectadoPorParada,
+} from '../application/mantenimiento-vehiculo.service';
 import {
   aMantenimientoResponse,
+  CambiarEstadoMantenimientoDto,
   CrearMantenimientoDto,
   type MantenimientoResponseDto,
 } from './dto/transporte.dto';
@@ -78,6 +84,25 @@ import {
 export class MantenimientoVehiculoController {
   constructor(private readonly mantenimiento: MantenimientoVehiculoService) {}
 
+  /**
+   * D4 (2026-10-20): los traslados ya asignados a la placa entre `desde` y `hasta`, para avisar
+   * antes de guardar la parada. No cambia nada.
+   */
+  @Get(':id/mantenimiento/impacto')
+  async impacto(
+    @Param('id', ParseIntPipe) id: number,
+    @Query('desde') desde: string,
+    @Query('hasta') hasta: string,
+  ): Promise<{ tramosAfectados: TramoAfectadoPorParada[] }> {
+    return {
+      tramosAfectados: await this.mantenimiento.impacto(
+        id,
+        exigirFecha(desde),
+        exigirFecha(hasta),
+      ),
+    };
+  }
+
   /** RN-DAF-05. Las paradas de un vehículo, de la más reciente hacia atrás. */
   @Get(':id/mantenimiento')
   async listar(
@@ -101,11 +126,28 @@ export class MantenimientoVehiculoController {
         taller: dto.taller,
         hora: dto.hora,
         motivo: dto.motivo,
+        zonalTallerId: dto.zonalTallerId ?? null,
       },
       usuario.usuarioId,
     );
 
     return aMantenimientoResponse(registrado);
+  }
+
+  /** Fase 5. Cambia el estado de la cita: PROGRAMADO → EN_TALLER → LISTO (LISTO vuelve a circular). */
+  @Patch(':id/mantenimiento/:mantenimientoId/estado')
+  async cambiarEstado(
+    @Param('id', ParseIntPipe) _id: number,
+    @Param('mantenimientoId', ParseIntPipe) mantenimientoId: number,
+    @Body() dto: CambiarEstadoMantenimientoDto,
+    @UsuarioActual() usuario: UsuarioAutenticado,
+  ): Promise<MantenimientoResponseDto> {
+    const fila = await this.mantenimiento.cambiarEstado(
+      mantenimientoId,
+      dto.estado,
+      usuario.usuarioId,
+    );
+    return aMantenimientoResponse(fila);
   }
 
   /**

@@ -129,7 +129,7 @@ describe('AllExceptionsFilter', () => {
 
     it('no devuelve el detalle de un fallo del servidor', () => {
       const cuerpo = atrapar(
-        new InternalServerErrorException('connect ECONNREFUSED 10.0.0.7:5432'),
+        new InternalServerErrorException('connect ECONNREFUSED db.local:5432'),
       );
 
       expect(cuerpo.statusCode).toBe(500);

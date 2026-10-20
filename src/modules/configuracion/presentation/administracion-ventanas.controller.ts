@@ -34,10 +34,13 @@ import {
   type VentanaResponseDto,
 } from './dto/ventana.dto';
 
-/** Respuesta de la modificación: qué quedó guardado y qué conviene revisar. */
+/**
+ * Respuesta de la modificación: la ventana tal como quedó guardada. Sin advertencias desde el
+ * 2026-10-08: la pantalla solo parametriza; la coherencia entre ventanas la aplica el sistema en
+ * ejecución (`VentanaCargaGuard` y el flujo del cuadro).
+ */
 interface VentanaActualizadaResponseDto {
   ventana: VentanaResponseDto;
-  advertencias: string[];
 }
 
 @Controller('administracion/ventanas')
@@ -71,9 +74,6 @@ export class AdministracionVentanasController {
       usuario.usuarioId,
     );
 
-    return {
-      ventana: aVentanaResponse(resultado.ventana),
-      advertencias: resultado.advertencias,
-    };
+    return { ventana: aVentanaResponse(resultado.ventana) };
   }
 }
